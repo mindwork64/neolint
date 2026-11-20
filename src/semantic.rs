@@ -768,13 +768,9 @@ fn analyze_function_returns(
                     ),
                     span: tokens[cursor].span,
                 });
-            } else if let Some(actual_type) = infer_expression_type(
-                tokens,
-                expression_start,
-                semicolon,
-                scopes,
-                functions,
-            ) {
+            } else if let Some(actual_type) =
+                infer_expression_type(tokens, expression_start, semicolon, scopes, functions)
+            {
                 if !can_implicitly_convert(&actual_type, &signature.return_type) {
                     diagnostics.push(Diagnostic {
                         code: "SEM008",
@@ -1486,8 +1482,7 @@ mod tests {
 
     #[test]
     fn reports_wrong_typed_function_return_expression() {
-        let diagnostics =
-            analyze_source(r#"integer get_value() { return "wrong"; } default { }"#);
+        let diagnostics = analyze_source(r#"integer get_value() { return "wrong"; } default { }"#);
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM008"),
             "{diagnostics:?}"
@@ -1496,8 +1491,7 @@ mod tests {
 
     #[test]
     fn reports_value_returned_from_no_return_function() {
-        let diagnostics =
-            analyze_source("do_work() { return 1; } default { state_entry() { } }");
+        let diagnostics = analyze_source("do_work() { return 1; } default { state_entry() { } }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM008"),
             "{diagnostics:?}"
