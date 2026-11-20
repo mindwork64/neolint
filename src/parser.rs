@@ -195,17 +195,21 @@ impl<'a> Parser<'a> {
 
     fn parse_for_statement(&mut self) {
         self.expect(TokenKind::LParen, "expected '(' after 'for'");
-        if !self.check(TokenKind::Semicolon) {
-            if self.is_type() {
+        if self.is_type() {
+            self.error_here(
+                "PAR008",
+                "LSL for-loop initializers must be expressions; declare variables before the loop",
+            );
+            while !self.at_end()
+                && !self.check(TokenKind::Semicolon)
+                && !self.check(TokenKind::RParen)
+            {
                 self.advance();
-                self.parse_local_declaration();
-            } else {
-                self.parse_expression(1);
-                self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
             }
-        } else {
-            self.advance();
+        } else if !self.check(TokenKind::Semicolon) {
+            self.parse_expression(1);
         }
+        self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
         if !self.check(TokenKind::Semicolon) {
             self.parse_expression(1);
         }
@@ -644,6 +648,17 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_variable_declarations_in_for_initializers() {
+        let diagnostics = parse_source(
+            "default { state_entry() { for (integer i = 0; i < 3; ++i) { } } }",
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR008"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
