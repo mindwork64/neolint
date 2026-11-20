@@ -73,13 +73,14 @@ fn declared_types_and_declarations_inventory_positive() {
         list global_list = [1, "two", <1, 2, 3>];
         vector global_vector = <1.0, 2.0, 3.0>;
         rotation global_rotation = <0.0, 0.0, 0.0, 1.0>;
-        integer first, second;
+        integer first = 1, second = 2;
 
         default
         {
             state_entry()
             {
                 integer local_integer = 1;
+                integer local_first = 3, local_second = 4;
                 float local_float = 2.0;
                 string local_string = "local";
                 key local_key;
@@ -87,7 +88,7 @@ fn declared_types_and_declarations_inventory_positive() {
                 vector local_vector;
                 rotation local_rotation;
                 first = local_integer;
-                second = 0;
+                second = local_second;
             }
         }
         "#,
@@ -246,6 +247,140 @@ fn focused_malformed_statement_diagnostics() {
                 .iter()
                 .any(|diagnostic| diagnostic.kind == DiagnosticKind::Syntax),
             "expected a syntax error for {source:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn jump_labels_in_nested_blocks_are_syntactically_accepted() {
+    let diagnostics = parse_source(
+        r#"
+        default
+        {
+            state_entry()
+            {
+                @outer;
+                if (TRUE)
+                {
+                    @inner;
+                    jump outer;
+                }
+                jump inner;
+            }
+        }
+        "#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn recovery_keeps_later_event_and_state_after_malformed_handler() {
+    let diagnostics = parse_source(
+        r#"
+        default
+        {
+            malformed(
+            {
+            }
+
+            state_entry()
+            {
+                llOwnerSay("still parsed");
+            }
+        }
+
+        state running
+        {
+            state_entry()
+            {
+            }
+        }
+        "#,
+    );
+    assert_has_code(&diagnostics, "PAR003");
+    assert!(
+        !syntax_codes(&diagnostics)
+            .iter()
+            .any(|code| matches!(*code, "PAR001" | "PAR013")),
+        "recovery lost a later construct: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn incomplete_constructs_near_eof_report_syntax_errors() {
+    for source in [
+        "default { state_entry() {",
+        "integer function(integer value",
+        "default { state_entry() { list values = [1, 2,",
+        "default { state_entry() { vector value = <1, 2,",
+        "default { state_entry() { if (1)",
+        "default { state_entry() { for (;;)",
+    ] {
+        let diagnostics = parse_source(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == DiagnosticKind::Syntax),
+            "expected syntax error for {source:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn adjacent_binary_operators_are_rejected_without_cascades() {
+    for source in [
+        "default { state_entry() { integer value = 1 + * 2; } }",
+        "default { state_entry() { integer value = 1 * / 2; } }",
+        "default { state_entry() { integer value = ; } }",
+    ] {
+        let diagnostics = parse_source(source);
+        assert!(
+            !diagnostics.is_empty(),
+            "adjacent operators were silently accepted: {source:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.kind == DiagnosticKind::Syntax)
+                .count()
+                <= 2,
+            "too many syntax diagnostics for {source:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_event_does_not_prevent_later_event_inventory_positive() {
+    let diagnostics = parse_source(
+        "default { broken( { } state_entry() { } } state running { state_entry() { } }",
+    );
+    assert_eq!(
+        syntax_codes(&diagnostics),
+        vec!["PAR003"],
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn extra_closing_delimiters_are_rejected_without_large_cascades() {
+    for source in [
+        "default { state_entry() { list values = [1, 2]]; } }",
+        "default { state_entry() { vector value = <1, 2, 3>>; } }",
+        "default { state_entry() { integer value = (1)); } }",
+        "default { state_entry() { } } }",
+    ] {
+        let diagnostics = parse_source(source);
+        let syntax_count = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == DiagnosticKind::Syntax)
+            .count();
+        assert!(
+            syntax_count > 0,
+            "extra delimiter was silently accepted: {source:?}"
+        );
+        assert!(
+            syntax_count <= 3,
+            "too many syntax diagnostics for {source:?}: {diagnostics:?}"
         );
     }
 }

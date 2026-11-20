@@ -8,6 +8,7 @@ struct Parser<'a> {
     states_started: bool,
     default_state_seen: bool,
     missing_default_reported: bool,
+    eof_reported: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -19,6 +20,7 @@ impl<'a> Parser<'a> {
             states_started: false,
             default_state_seen: false,
             missing_default_reported: false,
+            eof_reported: false,
         }
     }
 
@@ -68,21 +70,26 @@ impl<'a> Parser<'a> {
         }
 
         if self.matches(TokenKind::LParen) {
-            self.parse_parameters();
-            self.parse_block();
+            if self.parse_parameters() {
+                self.parse_block();
+            } else {
+                self.synchronize_top_level();
+            }
         } else {
             self.finish_variable_declaration();
         }
     }
 
     fn finish_variable_declaration(&mut self) {
-        if self.matches(TokenKind::Equal) {
-            self.parse_expression(1);
+        if self.matches(TokenKind::Equal) && !self.parse_expression(1) {
+            self.synchronize_statement();
+            return;
         }
         while self.matches(TokenKind::Comma) {
             self.expect(TokenKind::Identifier, "expected a variable name after ','");
-            if self.matches(TokenKind::Equal) {
-                self.parse_expression(1);
+            if self.matches(TokenKind::Equal) && !self.parse_expression(1) {
+                self.synchronize_statement();
+                return;
             }
         }
         self.expect(
@@ -91,22 +98,25 @@ impl<'a> Parser<'a> {
         );
     }
 
-    fn parse_parameters(&mut self) {
+    fn parse_parameters(&mut self) -> bool {
         if self.matches(TokenKind::RParen) {
-            return;
+            return true;
         }
         loop {
             if !self.parse_type() {
                 self.error_here("PAR003", "expected a parameter type");
                 self.synchronize_parameters();
-                return;
+                return false;
             }
-            self.expect(TokenKind::Identifier, "expected a parameter name");
+            if !self.expect(TokenKind::Identifier, "expected a parameter name") {
+                self.synchronize_parameters();
+                return false;
+            }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
         }
-        self.expect(TokenKind::RParen, "expected ')' after parameter list");
+        self.expect(TokenKind::RParen, "expected ')' after parameter list")
     }
 
     fn parse_state(&mut self) {
@@ -137,14 +147,18 @@ impl<'a> Parser<'a> {
             let before = self.current;
             if !self.check(TokenKind::Identifier) {
                 self.error_here("PAR004", "expected an event handler inside state");
-                self.synchronize_state();
+                self.synchronize_event();
             } else {
                 self.advance(); // event name
-                if self.expect(TokenKind::LParen, "expected '(' after event name") {
-                    self.parse_parameters();
+                let header_ok = if self.expect(TokenKind::LParen, "expected '(' after event name") {
+                    self.parse_parameters()
+                } else {
+                    false
+                };
+                if header_ok {
                     self.parse_block();
                 } else {
-                    self.synchronize_state();
+                    self.synchronize_event();
                 }
             }
             if self.current == before {
@@ -160,17 +174,17 @@ impl<'a> Parser<'a> {
         }
         while !self.at_end() && !self.check(TokenKind::RBrace) {
             let before = self.current;
-            self.parse_statement();
-            if self.current == before {
+            let parsed = self.parse_statement();
+            if !parsed && self.current == before {
                 self.advance();
             }
         }
         self.expect(TokenKind::RBrace, "expected '}' after block");
     }
 
-    fn parse_statement(&mut self) {
+    fn parse_statement(&mut self) -> bool {
         if self.matches(TokenKind::Semicolon) {
-            return;
+            return true;
         }
         if self.check(TokenKind::LBrace) {
             self.parse_block();
@@ -203,9 +217,16 @@ impl<'a> Parser<'a> {
             self.advance();
             self.parse_local_declaration();
         } else {
-            self.parse_expression(1);
+            let expression_start = self.current;
+            if !self.parse_expression(1) {
+                if self.current > expression_start {
+                    self.synchronize_statement();
+                }
+                return false;
+            }
             self.expect(TokenKind::Semicolon, "expected ';' after expression");
         }
+        true
     }
 
     fn parse_if_statement(&mut self) {
@@ -277,13 +298,15 @@ impl<'a> Parser<'a> {
 
     fn parse_local_declaration(&mut self) {
         self.expect(TokenKind::Identifier, "expected a local variable name");
-        if self.matches(TokenKind::Equal) {
-            self.parse_expression(1);
+        if self.matches(TokenKind::Equal) && !self.parse_expression(1) {
+            self.synchronize_statement();
+            return;
         }
         while self.matches(TokenKind::Comma) {
             self.expect(TokenKind::Identifier, "expected a variable name after ','");
-            if self.matches(TokenKind::Equal) {
-                self.parse_expression(1);
+            if self.matches(TokenKind::Equal) && !self.parse_expression(1) {
+                self.synchronize_statement();
+                return;
             }
         }
         self.expect(TokenKind::Semicolon, "expected ';' after local declaration");
@@ -325,7 +348,7 @@ impl<'a> Parser<'a> {
             };
             if !self.parse_expression(next_min) {
                 self.error_here("PAR005", "expected an expression after operator");
-                break;
+                return false;
             }
         }
         true
@@ -463,7 +486,10 @@ impl<'a> Parser<'a> {
             return;
         }
         loop {
-            self.parse_expression(1);
+            if !self.parse_expression(1) {
+                self.synchronize_arguments();
+                return;
+            }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
@@ -505,6 +531,9 @@ impl<'a> Parser<'a> {
         if self.matches(kind) {
             true
         } else {
+            if self.at_end() && self.eof_reported {
+                return false;
+            }
             self.error_here("PAR007", message);
             false
         }
@@ -550,6 +579,9 @@ impl<'a> Parser<'a> {
     }
 
     fn error_here(&mut self, code: &'static str, message: impl Into<String>) {
+        if self.at_end() && self.eof_reported {
+            return;
+        }
         let span = self
             .tokens
             .get(self.current)
@@ -564,6 +596,9 @@ impl<'a> Parser<'a> {
                 end_column: 1,
             });
         self.push_error(code, message, span);
+        if self.at_end() {
+            self.eof_reported = true;
+        }
     }
 
     fn push_error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
@@ -577,36 +612,141 @@ impl<'a> Parser<'a> {
     }
 
     fn synchronize_top_level(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
         while !self.at_end() {
-            if self.current > 0 && self.previous().kind == TokenKind::RBrace {
-                return;
-            }
-            if self.is_type()
-                || self.check(TokenKind::KwVoid)
-                || self.check(TokenKind::KwDefault)
-                || self.check(TokenKind::KwState)
+            if brace_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && (self.is_type()
+                    || self.check(TokenKind::KwVoid)
+                    || self.check(TokenKind::KwDefault)
+                    || self.check(TokenKind::KwState))
             {
                 return;
+            }
+
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        self.advance();
+                        continue;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
             }
             self.advance();
         }
     }
 
-    fn synchronize_state(&mut self) {
-        while !self.at_end() && !self.check(TokenKind::RBrace) {
-            if self.current > 0 && self.previous().kind == TokenKind::RBrace {
-                return;
+    // Recover from a malformed event header or body. Braces that belong to a
+    // malformed handler are skipped, while the containing state's closing
+    // brace and the next event-like declaration are left for the caller.
+    fn synchronize_event(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RBrace) {
+                    return;
+                }
+                if self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen {
+                    return;
+                }
             }
-            if self.check(TokenKind::Identifier) {
-                return;
+
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        return;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_arguments(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            match self.peek_kind() {
+                TokenKind::RParen if paren_depth == 0 && bracket_depth == 0 => {
+                    self.advance();
+                    return;
+                }
+                TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return,
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_statement(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RBrace) {
+                    return;
+                }
+                if self.matches(TokenKind::Semicolon) {
+                    return;
+                }
+            }
+
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        return;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
             }
             self.advance();
         }
     }
 
     fn synchronize_parameters(&mut self) {
-        while !self.at_end() && !self.check(TokenKind::RParen) {
-            if self.matches(TokenKind::Comma) {
+        while !self.at_end() {
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::LBrace
+                    | TokenKind::RBrace
+                    | TokenKind::Semicolon
+            ) {
                 return;
             }
             self.advance();
@@ -1301,6 +1441,208 @@ mod tests {
              state running { state_entry() { state default; } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_event_body_before_a_valid_event() {
+        let diagnostics =
+            parse_source(r#"default { bad( { } state_entry() { llOwnerSay("ok"); } }"#);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR003");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 16)
+        );
+    }
+
+    #[test]
+    fn malformed_event_body_does_not_mistake_nested_calls_for_handlers() {
+        let diagnostics =
+            parse_source(r#"default { bad( { llOwnerSay("inside"); } state_entry() { } }"#);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR003");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "PAR004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_function_parameter_list_before_a_state() {
+        let diagnostics =
+            parse_source("integer f(integer value { return value; } default { state_entry() { } }");
+        let syntax = diagnostics
+            .iter()
+            .filter(|item| item.kind == DiagnosticKind::Syntax)
+            .collect::<Vec<_>>();
+        assert_eq!(syntax.len(), 1, "{diagnostics:?}");
+        assert_eq!(syntax[0].code, "PAR007");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "PAR013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn missing_function_body_recovers_to_default() {
+        let diagnostics = parse_source("integer f() default { state_entry() { } }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR007");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "PAR013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_state_before_default() {
+        let diagnostics =
+            parse_source("default { } state broken( { } state running { state_entry() { } }");
+        let syntax = diagnostics
+            .iter()
+            .filter(|item| item.kind == DiagnosticKind::Syntax)
+            .collect::<Vec<_>>();
+        assert_eq!(syntax.len(), 1, "{diagnostics:?}");
+        assert_eq!(syntax[0].code, "PAR007");
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_event_header_before_a_valid_event() {
+        let diagnostics = parse_source("default { bad( ; state_entry() { } }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR003");
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_handler_before_a_valid_state() {
+        let diagnostics = parse_source("default { bad( { } } state running { state_entry() { } }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR003");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "PAR013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_declarations_recover_without_losing_later_declarations() {
+        for (source, code, column) in [
+            (
+                r#"default { state_entry() { integer first, ; integer second; llOwnerSay("ok"); } }"#,
+                "PAR007",
+                42,
+            ),
+            (
+                "integer first; ? integer second; default { state_entry() { } }",
+                "PAR001",
+                16,
+            ),
+            (
+                "integer first integer second; default { state_entry() { } }",
+                "PAR007",
+                15,
+            ),
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(diagnostics.len(), 1, "source {source:?}: {diagnostics:?}");
+            assert_eq!(diagnostics[0].code, code, "source {source:?}");
+            assert_eq!(
+                (diagnostics[0].span.line, diagnostics[0].span.column),
+                (1, column),
+                "source {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_expression_reports_one_primary_diagnostic() {
+        let diagnostics =
+            parse_source(r#"default { state_entry() { ? integer value; llOwnerSay("ok"); } }"#);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR006");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 27)
+        );
+    }
+
+    #[test]
+    fn missing_initializer_does_not_consume_the_next_declaration() {
+        let diagnostics =
+            parse_source("default { state_entry() { integer first = ; integer second; } }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR006");
+    }
+
+    #[test]
+    fn multiple_malformed_events_report_one_error_each() {
+        let diagnostics =
+            parse_source("default { first_bad( { } second_bad( { } state_entry() { } }");
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(
+            diagnostics.iter().all(|item| item.code == "PAR003"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "PAR001"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_argument_list_recovers_to_the_outer_statement() {
+        let diagnostics =
+            parse_source(r#"default { state_entry() { llOwnerSay(1,;); llOwnerSay("ok"); } }"#);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR006");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 40)
+        );
+    }
+
+    #[test]
+    fn repeated_malformed_statements_are_bounded() {
+        let malformed = "? ".repeat(64);
+        let diagnostics = parse_source(&format!(
+            r#"default {{ state_entry() {{ {malformed}llOwnerSay("ok"); }} }}"#
+        ));
+        assert_eq!(diagnostics.len(), 64, "{diagnostics:?}");
+        assert!(
+            diagnostics.iter().all(|item| item.code == "PAR006"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_expressions_do_not_panic() {
+        let open = "(".repeat(128);
+        let close = ")".repeat(128);
+        let source = format!("default {{ state_entry() {{ integer value = {open}1{close}; }} }}");
+        let diagnostics = parse_source(&source);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn incomplete_list_at_eof_reports_one_primary_diagnostic() {
+        let diagnostics = parse_source(r#"default { state_entry() { list values = [1, 2,"#);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR006");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 47)
+        );
+    }
+
+    #[test]
+    fn incomplete_block_at_eof_reports_one_primary_diagnostic() {
+        let diagnostics = parse_source("default { state_entry() {");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR007");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 26)
+        );
     }
 
     #[test]
