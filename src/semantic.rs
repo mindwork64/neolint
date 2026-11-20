@@ -5973,6 +5973,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_state_change_to_the_current_state() {
+        let diagnostics =
+            analyze_source("default { } state running { state_entry() { state running; } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM022"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_malformed_state_change_without_sem022() {
+        let diagnostics = analyze_source("default { state_entry() { state ; } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM022"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn keeps_function_state_changes_and_unknown_event_bodies_out_of_scope() {
         let diagnostics = analyze_source(
             "change() { state missing; } default { custom_event() { state also_missing; } }",
