@@ -5090,15 +5090,31 @@ mod tests {
             integer TRUE = 0;
             integer choose_global() { if (TRUE) return 1; }
             integer choose_local() { integer TRUE; if (TRUE) return 1; }
-            integer choose_nested() { { integer TRUE; if (TRUE) return 1; } return 2; }
+            integer choose_nested() { { integer TRUE; if (TRUE) return 1; } }
             default { }"#,
         );
-        assert_eq!(
-            diagnostics
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 4, "{diagnostics:?}");
+        for name in [
+            "choose_param",
+            "choose_global",
+            "choose_local",
+            "choose_nested",
+        ] {
+            assert!(
+                returns
+                    .iter()
+                    .any(|item| item.message.contains(&format!("function {name}"))),
+                "missing SEM011 for {name}: {diagnostics:?}"
+            );
+        }
+        assert!(
+            !returns
                 .iter()
-                .filter(|item| item.code == "SEM011")
-                .count(),
-            3,
+                .any(|item| item.message.contains("function known")),
             "{diagnostics:?}"
         );
     }
