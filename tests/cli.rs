@@ -21,6 +21,61 @@ fn neolint() -> Command {
 }
 
 #[test]
+fn unresolved_variable_warning_does_not_fail_cli_by_default() {
+    let directory = temporary_directory();
+    let source = directory.join("unresolved.lsl");
+
+    fs::write(
+        &source,
+        "default { state_entry() { llOwnerSay(missing_name); } }",
+    )
+    .unwrap();
+
+    let output = neolint().arg(&source).output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("warning[SEM012]"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn unresolved_variable_warning_can_be_escalated_or_disabled() {
+    let directory = temporary_directory();
+    let source = directory.join("unresolved.lsl");
+
+    fs::write(
+        &source,
+        "default { state_entry() { llOwnerSay(missing_name); } }",
+    )
+    .unwrap();
+
+    let escalated = neolint()
+        .arg("--severity")
+        .arg("SEM012=error")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(escalated.status.code(), Some(1));
+    let escalated_stdout = String::from_utf8(escalated.stdout).unwrap();
+    assert!(escalated_stdout.contains("error[SEM012]"), "{escalated_stdout}");
+
+    let disabled = neolint()
+        .arg("--disable")
+        .arg("SEM012")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(disabled.status.success());
+    let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
+    assert!(disabled_stdout.contains("no diagnostics"), "{disabled_stdout}");
+    assert!(!disabled_stdout.contains("SEM012"), "{disabled_stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn severity_override_changes_exit_code_and_output() {
     let directory = temporary_directory();
     let source = directory.join("wrong-argument.lsl");
