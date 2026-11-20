@@ -304,7 +304,10 @@ impl<'a> Parser<'a> {
             return self.parse_prefix();
         }
 
-        if matches!(self.peek_kind(), TokenKind::PlusPlus | TokenKind::MinusMinus) {
+        if matches!(
+            self.peek_kind(),
+            TokenKind::PlusPlus | TokenKind::MinusMinus
+        ) {
             self.advance();
             let operand_start = self.current;
             if !self.parse_prefix() {
