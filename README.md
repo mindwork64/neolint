@@ -21,7 +21,7 @@ The current implementation provides a source-aware lexer, a syntax parser, a ven
 - Stable diagnostic codes and source locations.
 - Syntax, semantic, and lint diagnostics remain distinct.
 - Vendored official LSL function, event, and constant definitions; normal lint runs offline.
-- Conservative semantic checks for duplicate globals/functions, built-in call arity, and known event handler signatures.
+- Conservative semantic checks for duplicate globals/functions, built-in call arity/types, and known event handler signatures.
 - The canonical LSL definitions are data input; SLua definitions are not part of LSL.
 
 ## Command line
@@ -33,7 +33,7 @@ cat script.lsl | neolint -
 neolint --tokens script.lsl
 ```
 
-The current build reports lexical and syntax errors, duplicate top-level declarations (SEM001), built-in function argument-count mismatches (SEM002), and known event handler signature mismatches (SEM003). A clean result does not yet mean full semantic validation or the wider lint rule set has passed.
+The current build reports lexical and syntax errors, duplicate top-level declarations (SEM001), built-in function argument-count mismatches (SEM002), known event handler signature mismatches (SEM003), and provable built-in argument type mismatches (SEM004). A clean result does not yet mean full semantic validation or the wider lint rule set has passed.
 
 ## License
 
