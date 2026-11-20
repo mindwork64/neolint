@@ -142,11 +142,7 @@ fn checks_multiple_explicit_files_in_one_invocation() {
         "integer repeated; integer repeated; default { state_entry() {} }",
     )
     .unwrap();
-    fs::write(
-        &second,
-        r#"default { state_entry() { llOwnerSay(123); } }"#,
-    )
-    .unwrap();
+    fs::write(&second, r#"default { state_entry() { llOwnerSay(123); } }"#).unwrap();
 
     let output = neolint()
         .arg("--format")
