@@ -710,10 +710,7 @@ fn analyze_deprecated_function_calls(
             code: "SEM013",
             severity: Severity::Warning,
             kind: DiagnosticKind::Lint,
-            message: format!(
-                "call to deprecated LSL function '{}'",
-                token.lexeme
-            ),
+            message: format!("call to deprecated LSL function '{}'", token.lexeme),
             span: token.span,
         });
     }
@@ -2105,8 +2102,7 @@ mod tests {
 
     #[test]
     fn does_not_warn_for_a_non_deprecated_builtin_function() {
-        let diagnostics =
-            analyze_source(r#"default { state_entry() { llOwnerSay("hello"); } }"#);
+        let diagnostics = analyze_source(r#"default { state_entry() { llOwnerSay("hello"); } }"#);
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM013"),
             "{diagnostics:?}"
