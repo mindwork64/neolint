@@ -255,13 +255,32 @@ impl<'a> Parser<'a> {
 
     // Precedence climbing validates expressions without constructing the AST yet.
     fn parse_expression(&mut self, min_precedence: u8) -> bool {
+        let expression_start = self.current;
         if !self.parse_prefix() {
             return false;
         }
+        let mut left_is_variable =
+            is_variable_lvalue(self.tokens, expression_start, self.current);
+
         while let Some((precedence, right_associative)) = binary_precedence(self.peek_kind()) {
             if precedence < min_precedence {
                 break;
             }
+
+            let operator = self.peek_kind();
+            if matches!(
+                operator,
+                TokenKind::Equal
+                    | TokenKind::PlusEqual
+                    | TokenKind::MinusEqual
+                    | TokenKind::StarEqual
+                    | TokenKind::SlashEqual
+                    | TokenKind::PercentEqual
+            ) && !left_is_variable
+            {
+                self.error_here("PAR010", "left-hand side of assignment must be a variable");
+            }
+
             self.advance();
             let next_min = if right_associative {
                 precedence
@@ -272,6 +291,7 @@ impl<'a> Parser<'a> {
                 self.error_here("PAR005", "expected an expression after operator");
                 break;
             }
+            left_is_variable = false;
         }
         true
     }
@@ -547,6 +567,44 @@ fn is_type_token(kind: TokenKind) -> bool {
     )
 }
 
+fn is_variable_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> bool {
+    loop {
+        if end <= start + 1
+            || tokens.get(start).map(|token| token.kind) != Some(TokenKind::LParen)
+            || tokens.get(end - 1).map(|token| token.kind) != Some(TokenKind::RParen)
+        {
+            break;
+        }
+
+        let mut depth = 0usize;
+        let mut matching_close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        matching_close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if matching_close != Some(end - 1) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+
+    end == start + 1
+        && tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+}
+
 fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
     let precedence = match kind {
         TokenKind::Equal
@@ -743,6 +801,33 @@ mod tests {
                 }
             }
             "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_assignment_to_non_variable_expressions() {
+        let left_sides = ["1", "first + second", "llGetPos()"];
+        let operators = ["=", "+=", "-=", "*=", "/=", "%="];
+
+        for left_side in left_sides {
+            for operator in operators {
+                let source = format!(
+                    "default {{ state_entry() {{ integer first; integer second; {left_side} {operator} 1; }} }}"
+                );
+                let diagnostics = parse_source(&source);
+                assert!(
+                    diagnostics.iter().any(|item| item.code == "PAR010"),
+                    "non-variable assignment target {left_side} {operator} was accepted: {diagnostics:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_variable_assignment_targets_and_chained_assignments() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer first; integer second; first = second = 1; (first) = second; } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
