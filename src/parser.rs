@@ -259,8 +259,6 @@ impl<'a> Parser<'a> {
         if !self.parse_prefix() {
             return false;
         }
-        let mut left_is_variable = is_variable_lvalue(self.tokens, expression_start, self.current);
-
         while let Some((precedence, right_associative)) = binary_precedence(self.peek_kind()) {
             if precedence < min_precedence {
                 break;
@@ -293,7 +291,6 @@ impl<'a> Parser<'a> {
                 self.error_here("PAR005", "expected an expression after operator");
                 break;
             }
-            left_is_variable = false;
         }
         true
     }
