@@ -277,7 +277,10 @@ impl<'a> Parser<'a> {
                     | TokenKind::PercentEqual
             ) && !is_assignment_lvalue(self.tokens, expression_start, self.current)
             {
-                self.error_here("PAR010", "left-hand side of assignment must be a variable or vector/rotation component");
+                self.error_here(
+                    "PAR010",
+                    "left-hand side of assignment must be a variable or vector/rotation component",
+                );
             }
 
             self.advance();
@@ -657,8 +660,12 @@ fn is_assignment_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> b
     }
 
     end == start + 3
-        && tokens.get(start).is_some_and(|token| token.kind == TokenKind::Identifier)
-        && tokens.get(start + 1).is_some_and(|token| token.kind == TokenKind::Dot)
+        && tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+        && tokens
+            .get(start + 1)
+            .is_some_and(|token| token.kind == TokenKind::Dot)
         && tokens.get(start + 2).is_some_and(|token| {
             token.kind == TokenKind::Identifier
                 && matches!(token.lexeme.as_str(), "x" | "y" | "z" | "s")
@@ -931,7 +938,11 @@ mod tests {
             "default { state_entry() { llGetPos().x = 1.0; <1, 2, 3>.x = 2.0; integer count; count.w = 3; } }",
         );
         assert!(
-            diagnostics.iter().filter(|item| item.code == "PAR010").count() >= 2,
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "PAR010")
+                .count()
+                >= 2,
             "{diagnostics:?}"
         );
     }
