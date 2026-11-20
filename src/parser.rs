@@ -86,14 +86,6 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::RParen) {
             return;
         }
-        if self.matches(TokenKind::KwVoid) {
-            self.expect(
-                TokenKind::RParen,
-                "expected ')' after void parameter marker",
-            );
-            return;
-        }
-
         loop {
             if !self.parse_type() {
                 self.error_here("PAR003", "expected a parameter type");
@@ -646,6 +638,16 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_void_as_a_parameter_list_marker() {
+        let diagnostics =
+            parse_source("integer value(void) { return 1; } default { }");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR003"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
