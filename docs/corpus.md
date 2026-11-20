@@ -77,7 +77,7 @@ Run the full project suite:
 cargo test --all-targets --all-features
 ```
 
-The directory test invokes the actual `neolint` binary recursively and compares the aggregate manifest result. It also requires every fixture path to appear in output and uses a broad 10-second smoke budget; this is not a microbenchmark.
+The directory test invokes the actual `neolint` binary recursively and compares the aggregate manifest result. It also requires every fixture path to appear in output. The runner enforces a 10-second per-fixture timeout and a 20-second recursive-directory timeout; this is a completion smoke test, not a microbenchmark.
 
 ## Licensing and provenance
 

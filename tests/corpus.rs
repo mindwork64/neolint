@@ -47,7 +47,8 @@ fn parse_expected(
             ));
         }
         let code = parts[0];
-        if code.len() != 6
+        if !code.is_ascii()
+            || code.len() != 6
             || !code[..3].bytes().all(|byte| byte.is_ascii_uppercase())
             || !code[3..].bytes().all(|byte| byte.is_ascii_digit())
         {
@@ -364,6 +365,13 @@ fn run_with_timeout(
 
 fn neolint() -> Command {
     Command::new(env!("CARGO_BIN_EXE_neolint"))
+}
+
+#[test]
+fn malformed_non_ascii_diagnostic_code_is_rejected_without_panicking() {
+    let error =
+        parse_expected("ééé:1:error", 7).expect_err("non-ASCII diagnostic code must be rejected");
+    assert!(error.contains("invalid diagnostic code"), "{error}");
 }
 
 #[test]
