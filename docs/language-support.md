@@ -32,6 +32,10 @@ The language includes decimal and `0x`/`0X` hexadecimal integer literals, float 
 
 Both line comments (`//`) and block comments (`/* ... */`) are accepted.
 
+## Parser recovery
+
+Malformed input is diagnosed deterministically without a full AST. Recovery tracks delimiter nesting at top level and inside state bodies. A malformed event header/body is skipped through its balanced braces and parsing resumes at the next event-like declaration or the containing state's closing brace; a malformed function body does not consume the following state. Nested parenthesized, list, vector/rotation, and argument-expression failures propagate to the containing expression; malformed expressions, conditions, returns, and for initializer/increment lists synchronize once at the appropriate clause or statement boundary. A missing call close does not consume a following independent statement. Every parsing loop makes progress by consuming a token, returning, or reaching a delimiter boundary. EOF errors are reported once per parse; later closing-token checks are suppressed rather than emitted as cascades. Recovery is heuristic for unbalanced outer braces and does not reconstruct missing syntax. The exact contract and test matrix are in [lsl-grammar.md](lsl-grammar.md#h1-parser-recovery-contract).
+
 ## Canonical library metadata
 
 Built-in functions, constants, and related metadata should come from the official `secondlife/lsl-definitions` repository. Its `lsl_definitions.yaml` is the LSL source; `slua_definitions.yaml` describes a different language and must not be merged into the LSL symbol table.
