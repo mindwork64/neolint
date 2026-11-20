@@ -337,7 +337,19 @@ impl<'a> Parser<'a> {
             if self.matches(TokenKind::LParen) {
                 self.parse_argument_list();
             } else if self.matches(TokenKind::Dot) {
-                self.expect(TokenKind::Identifier, "expected a member name after '.'");
+                let base_is_variable =
+                    is_variable_lvalue(self.tokens, primary_start, self.current - 1);
+                let component_is_valid = self.tokens.get(self.current).is_some_and(|token| {
+                    token.kind == TokenKind::Identifier
+                        && matches!(token.lexeme.as_str(), "x" | "y" | "z" | "s")
+                });
+                if !base_is_variable || !component_is_valid {
+                    self.error_here(
+                        "PAR012",
+                        "vector/rotation component access requires a variable and a valid component name",
+                    );
+                }
+                self.expect(TokenKind::Identifier, "expected a component name after '.'");
             } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
                 if !is_variable_lvalue(self.tokens, primary_start, self.current) {
                     self.error_here("PAR011", "increment/decrement operand must be a variable");
@@ -898,6 +910,28 @@ mod tests {
     fn accepts_increment_and_decrement_of_variables() {
         let diagnostics = parse_source(
             "default { state_entry() { integer first; integer second; ++first; second++; --(first); (second)--; } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_component_access_on_literals_and_function_results() {
+        for source in [
+            "default { state_entry() { float x = <1, 2, 3>.x; } }",
+            "default { state_entry() { float x = llGetPos().x; } }",
+        ] {
+            let diagnostics = parse_source(source);
+            assert!(
+                diagnostics.iter().any(|item| item.code == "PAR012"),
+                "invalid component access was accepted: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_component_access_on_vector_and_rotation_variables() {
+        let diagnostics = parse_source(
+            "default { state_entry() { vector position; rotation orientation; float x = position.x; float s = orientation.s; float grouped = (position).y; } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
