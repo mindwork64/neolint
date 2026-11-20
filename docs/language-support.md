@@ -46,9 +46,10 @@ The current CLI performs lexical analysis, syntax validation, and these conserva
 
 - `SEM001`: duplicate top-level variable/function declarations.
 - `SEM002`: wrong argument count for a known built-in LSL function.
+- `SEM003`: incorrect parameter count/type for a known LSL event handler.
 
 Built-in function, event, and constant metadata is vendored in `data/lsl-builtins.txt` from the official `secondlife/lsl-definitions` generator output. It is pinned and licensed; ordinary lint runs do not access the network.
 
-Not implemented yet: full user symbol resolution, argument and return type compatibility, event handler signature validation, deprecation diagnostics, and the broader correctness/style lint rule set. Unknown functions are intentionally left alone unless they are present in the built-in database.
+Not implemented yet: full user symbol resolution, built-in argument and return type compatibility, deprecation diagnostics, scope-aware local checks, and the broader correctness/style lint rule set. Unknown functions are intentionally left alone unless they are present in the built-in database.
 
 A clean result means only that the implemented checks found no issue. It is not a claim that the official LSL compiler would accept the script.
