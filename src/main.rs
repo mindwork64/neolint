@@ -1,4 +1,4 @@
-use neolint::lex;
+use neolint::{lex, parse};
 use neolint::{Diagnostic, Severity};
 use std::env;
 use std::fs;
@@ -102,7 +102,8 @@ fn run() -> i32 {
             }
         };
 
-        let (tokens, diagnostics) = lex(&source);
+        let (tokens, mut diagnostics) = lex(&source);
+        diagnostics.extend(parse(&tokens));
         results.push(FileResult {
             path,
             tokens,
@@ -131,7 +132,7 @@ fn run() -> i32 {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nEXIT CODES:\n    0  No lexical errors\n    1  Lexical errors found\n    2  Input or command-line error\n\nNOTE: This initial build performs lexical analysis only. Parser, semantic, and lint rules are being implemented.",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nEXIT CODES:\n    0  No lexical or syntax errors\n    1  Lexical or syntax errors found\n    2  Input or command-line error\n\nNOTE: This initial build performs lexical and syntax analysis only. Semantic analysis and lint rules are being implemented.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -150,7 +151,7 @@ fn print_human(results: &[FileResult], show_tokens: bool) {
         if result.diagnostics.is_empty() {
             if !show_tokens {
                 println!(
-                    "{}: no lexical errors (parser and lint rules are not implemented yet)",
+                    "{}: no lexical or syntax errors (semantic analysis and lint rules are not implemented yet)",
                     result.path
                 );
             }
