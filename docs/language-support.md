@@ -55,17 +55,22 @@ Command-line `--disable` and `--severity RULE=LEVEL` settings override the file 
 
 ## Current implementation and limitations
 
-The current CLI performs lexical analysis, syntax validation, and these conservative semantic checks:
+The current CLI performs lexical analysis, syntax validation, and the following conservative semantic checks:
 
 - `SEM001`: duplicate top-level variable/function declarations.
 - `SEM002`: wrong argument count for a known built-in LSL function.
 - `SEM003`: incorrect parameter count/type for a known LSL event handler.
-- `SEM004`: provable argument type mismatch for a known built-in function. The checker recognizes literals, constants, explicit casts, collection/vector/rotation literals, and built-in call return types. Unknown variable expressions are skipped until scope-aware inference is implemented.
+- `SEM004`: provable argument type mismatch for a known built-in function. Type inference recognizes literals, built-in constants, explicit casts, list/vector/rotation literals, built-in call return types, and variables resolved through the lexical scope model.
+- `SEM005`: wrong argument count for a known user-defined function.
+- `SEM006`: provable argument type mismatch for a known user-defined function.
+- `SEM007`: duplicate variable declaration in the same lexical scope, including redeclaration of a function parameter. Shadowing a name in a nested block is allowed.
+
+The scope model handles function and event parameters, global/local declarations, nested block scopes, and shadowing. Type checks are deliberately conservative: unresolved variables and unknown extension functions are not assigned guessed types and are not reported as undefined symbols.
 
 Built-in function, event, and constant metadata is vendored in `data/lsl-builtins.txt` from the official `secondlife/lsl-definitions` generator output. It is pinned and licensed; ordinary lint runs do not access the network.
 
-Not implemented yet: full user symbol resolution, variable-aware expression type inference, deprecation diagnostics, scope-aware local checks, and the broader correctness/style lint rule set. Unknown functions are intentionally left alone unless they are present in the built-in database.
+Not implemented yet: complete user-symbol resolution, undefined-symbol diagnostics, function return-statement/type validation, deprecation diagnostics, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
 
-LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 respects those conversions and does not guess the type of unresolved variables.
+LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 and SEM006 respect those conversions and do not guess the type of unresolved expressions.
 
 A clean result means only that the implemented checks found no issue. It is not a claim that the official LSL compiler would accept the script.
