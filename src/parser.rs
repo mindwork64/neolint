@@ -259,14 +259,6 @@ impl<'a> Parser<'a> {
             return false;
         }
         loop {
-            if self.check(TokenKind::Question) && min_precedence <= 2 {
-                self.advance();
-                self.parse_expression(1);
-                self.expect(TokenKind::Colon, "expected ':' in conditional expression");
-                self.parse_expression(2);
-                continue;
-            }
-
             let Some((precedence, right_associative)) = binary_precedence(self.peek_kind()) else {
                 break;
             };
@@ -729,18 +721,28 @@ mod tests {
     }
 
     #[test]
-    fn expression_parser_accepts_nested_calls_and_ternary() {
+    fn expression_parser_accepts_nested_calls_and_logical_conditions() {
         let diagnostics = parse_source(
             r#"
             default
             {
                 state_entry()
                 {
-                    integer x = (1 + 2) > 2 ? llAbs(-1) : 0;
+                    integer x = (1 + 2) > 2 && llAbs(-1) > 0;
                 }
             }
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_unsupported_ternary_operator() {
+        let diagnostics =
+            parse_source("default { state_entry() { integer value = 1 ? 2 : 3; } }");
+        assert!(
+            !diagnostics.is_empty(),
+            "ternary syntax is not part of LSL"
+        );
     }
 }
