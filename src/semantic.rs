@@ -1841,11 +1841,6 @@ fn is_unary_operator_position(tokens: &[Token], index: usize, start: usize) -> b
             | TokenKind::StarEqual
             | TokenKind::SlashEqual
             | TokenKind::PercentEqual
-            | TokenKind::AndEqual
-            | TokenKind::OrEqual
-            | TokenKind::XorEqual
-            | TokenKind::ShiftLeftEqual
-            | TokenKind::ShiftRightEqual
             | TokenKind::Plus
             | TokenKind::Minus
             | TokenKind::Star
