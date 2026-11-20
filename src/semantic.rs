@@ -48,6 +48,14 @@ struct VariableBinding {
     span: crate::diagnostic::Span,
 }
 
+#[derive(Debug, Clone)]
+struct VariableInitializer {
+    name_index: usize,
+    type_name: String,
+    expression_start: usize,
+    expression_end: usize,
+}
+
 #[derive(Debug, Default)]
 struct LexicalScope {
     parent: Option<usize>,
@@ -58,6 +66,7 @@ struct ScopeModel {
     scopes: Vec<LexicalScope>,
     scope_at: Vec<usize>,
     diagnostics: Vec<Diagnostic>,
+    initializers: Vec<VariableInitializer>,
 }
 
 impl ScopeModel {
@@ -90,6 +99,7 @@ impl ScopeModel {
             scopes,
             scope_at,
             diagnostics: Vec::new(),
+            initializers: Vec::new(),
         };
         model.register_function_parameters(tokens);
         model.register_event_parameters(tokens);
@@ -309,6 +319,8 @@ impl ScopeModel {
         };
         self.add_variable(scope_id, first_name, type_name, type_index + 1);
 
+        let mut name_index = type_index + 1;
+        let mut initializer_start = None;
         let mut index = type_index + 2;
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -317,24 +329,33 @@ impl ScopeModel {
 
         while index < tokens.len() {
             let kind = tokens[index].kind;
-            if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && vector_depth == 0
-                && kind == TokenKind::Semicolon
-            {
-                break;
+            let at_declarator_level =
+                paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && vector_depth == 0;
+
+            if at_declarator_level && kind == TokenKind::Equal && initializer_start.is_none() {
+                initializer_start = Some(index + 1);
             }
 
-            if kind == TokenKind::Comma
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && vector_depth == 0
-            {
+            if at_declarator_level && matches!(kind, TokenKind::Comma | TokenKind::Semicolon) {
+                if let Some(expression_start) = initializer_start.take() {
+                    if expression_start < index {
+                        self.initializers.push(VariableInitializer {
+                            name_index,
+                            type_name: type_name.to_owned(),
+                            expression_start,
+                            expression_end: index,
+                        });
+                    }
+                }
+
+                if kind == TokenKind::Semicolon {
+                    break;
+                }
+
                 if let Some(name) = tokens.get(index + 1) {
                     if name.kind == TokenKind::Identifier {
-                        self.add_variable(scope_id, name, type_name, index + 1);
+                        name_index = index + 1;
+                        self.add_variable(scope_id, name, type_name, name_index);
                         index += 2;
                         continue;
                     }
@@ -535,6 +556,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     diagnostics.extend(std::mem::take(&mut scopes.diagnostics));
     let user_functions = collect_user_functions(tokens);
     analyze_explicit_casts(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_variable_initializers(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -2133,6 +2155,39 @@ fn prefix_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
     Some(index)
 }
 
+fn analyze_variable_initializers(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for initializer in &scopes.initializers {
+        let Some(actual_type) = infer_expression_type(
+            tokens,
+            initializer.expression_start,
+            initializer.expression_end,
+            scopes,
+            user_functions,
+        ) else {
+            continue;
+        };
+
+        if !can_implicitly_convert(&actual_type, &initializer.type_name) {
+            let name = &tokens[initializer.name_index];
+            diagnostics.push(Diagnostic {
+                code: "SEM015",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "initializer for variable '{}' has type {}, expected {}",
+                    name.lexeme, actual_type, initializer.type_name
+                ),
+                span: name.span,
+            });
+        }
+    }
+}
+
 fn analyze_explicit_casts(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -2909,6 +2964,72 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM014"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_global_and_local_variable_initializers() {
+        let diagnostics = analyze_source(
+            r#"integer global_integer = 1.5;
+               float global_float = 1;
+               key global_key = "00000000-0000-0000-0000-000000000000";
+               default {
+                   state_entry() {
+                       integer local_integer = 2.5;
+                       string local_string = 2;
+                       vector position = <1, 2, 3>;
+                       list values = [1, "one"];
+                   }
+               }"#,
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM015")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 3, "{diagnostics:?}");
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("global_integer")
+                    && item.message.contains("float, expected integer")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("local_integer")
+                    && item.message.contains("float, expected integer")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("local_string")
+                    && item.message.contains("integer, expected string")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_each_comma_separated_variable_initializer() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer first = 1, second = 2.0, third = 3; } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM015")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(mismatches[0].message.contains("second"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn leaves_unknown_variable_initializer_types_conservative() {
+        let diagnostics =
+            analyze_source("default { state_entry() { integer value = llExtensionValue(); } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM015"),
             "{diagnostics:?}"
         );
     }
