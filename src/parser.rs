@@ -347,19 +347,22 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Less => {
                 self.advance();
-                self.parse_expression(1);
+                // A top-level '>' closes the vector/rotation literal. Use a
+                // precedence floor above relational operators so it is not
+                // consumed as a comparison while parsing a component.
+                self.parse_expression(10);
                 self.expect(
                     TokenKind::Comma,
                     "expected ',' after first vector component",
                 );
-                self.parse_expression(1);
+                self.parse_expression(10);
                 self.expect(
                     TokenKind::Comma,
                     "expected ',' after second vector component",
                 );
-                self.parse_expression(1);
+                self.parse_expression(10);
                 if self.matches(TokenKind::Comma) {
-                    self.parse_expression(1);
+                    self.parse_expression(10);
                 }
                 self.expect(
                     TokenKind::Greater,
