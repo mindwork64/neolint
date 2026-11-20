@@ -2648,6 +2648,76 @@ mod tests {
     }
 
     #[test]
+    fn explicit_cast_matrix_matches_lsl_supported_pairs() {
+        let valid = [
+            ("integer", "integer"),
+            ("integer", "float"),
+            ("integer", "string"),
+            ("integer", "list"),
+            ("float", "integer"),
+            ("float", "float"),
+            ("float", "string"),
+            ("float", "list"),
+            ("string", "integer"),
+            ("string", "float"),
+            ("string", "string"),
+            ("string", "key"),
+            ("string", "list"),
+            ("string", "vector"),
+            ("string", "rotation"),
+            ("key", "string"),
+            ("key", "key"),
+            ("key", "list"),
+            ("list", "string"),
+            ("list", "list"),
+            ("vector", "string"),
+            ("vector", "list"),
+            ("vector", "vector"),
+            ("rotation", "string"),
+            ("rotation", "list"),
+            ("rotation", "rotation"),
+        ];
+        for (source, target) in valid {
+            assert!(
+                is_explicit_cast_supported(source, target),
+                "{source} -> {target} should be supported"
+            );
+        }
+
+        let invalid = [
+            ("integer", "key"),
+            ("integer", "vector"),
+            ("integer", "rotation"),
+            ("float", "key"),
+            ("float", "vector"),
+            ("float", "rotation"),
+            ("key", "integer"),
+            ("key", "float"),
+            ("key", "vector"),
+            ("key", "rotation"),
+            ("list", "integer"),
+            ("list", "float"),
+            ("list", "key"),
+            ("list", "vector"),
+            ("list", "rotation"),
+            ("vector", "integer"),
+            ("vector", "float"),
+            ("vector", "key"),
+            ("vector", "rotation"),
+            ("rotation", "integer"),
+            ("rotation", "float"),
+            ("rotation", "key"),
+            ("rotation", "vector"),
+        ];
+        for (source, target) in invalid {
+            assert!(
+                !is_explicit_cast_supported(source, target),
+                "{source} -> {target} should be unsupported"
+            );
+        }
+    }
+
+    #[test]
     fn reports_explicit_casts_not_supported_by_lsl() {
         let diagnostics = analyze_source(
             "default { state_entry() { vector position; llSleep((integer)position); llSetPos((vector)\"<1, 2, 3>\"); llOwnerSay((string)position); } }",
