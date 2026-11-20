@@ -19,7 +19,7 @@ impl<'a> Parser<'a> {
     fn run(mut self) -> Vec<Diagnostic> {
         while !self.at_end() {
             let before = self.current;
-            if self.is_type() || self.check(TokenKind::KwVoid) {
+            if self.is_type() || self.is_untyped_function_declaration() {
                 self.parse_global_declaration();
             } else if self.check(TokenKind::KwDefault) || self.check(TokenKind::KwState) {
                 self.parse_state();
@@ -38,8 +38,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_global_declaration(&mut self) {
-        let is_void = self.matches(TokenKind::KwVoid);
-        if !is_void {
+        // A value type before the name denotes a returning function or global variable.
+        // LSL void functions omit the return type entirely.
+        if self.is_type() {
             self.advance();
         }
 
@@ -52,9 +53,6 @@ impl<'a> Parser<'a> {
             self.parse_parameters();
             self.parse_block();
         } else {
-            if is_void {
-                self.error_previous("PAR002", "a void declaration must be a function");
-            }
             self.finish_variable_declaration();
         }
     }
@@ -420,6 +418,10 @@ impl<'a> Parser<'a> {
         is_type_token(self.peek_kind())
     }
 
+    fn is_untyped_function_declaration(&self) -> bool {
+        self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen
+    }
+
     fn expect(&mut self, kind: TokenKind, message: &'static str) -> bool {
         if self.matches(kind) {
             true
@@ -609,6 +611,28 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_user_functions_without_return_type() {
+        let diagnostics = parse_source(
+            r#"
+            say_message(string message) { llOwnerSay(message); }
+            default { state_entry() { say_message("ready"); } }
+            "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_explicit_void_return_type() {
+        let diagnostics = parse_source(
+            "void say_message(string message) { llOwnerSay(message); } default {}",
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR001"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
