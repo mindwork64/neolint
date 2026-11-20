@@ -256,32 +256,38 @@ impl<'a> Parser<'a> {
             {
                 self.advance();
             }
-        } else {
-            self.parse_for_expression_list();
+            self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
+        } else if self.parse_for_expression_list(TokenKind::Semicolon) {
+            self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
         }
-        self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
+
         if !self.parse_expression(1) {
             self.synchronize_for_condition();
         } else {
             self.expect(TokenKind::Semicolon, "expected ';' after for condition");
         }
-        self.parse_for_expression_list();
-        self.expect(TokenKind::RParen, "expected ')' after for clauses");
+
+        if self.parse_for_expression_list(TokenKind::RParen) {
+            self.expect(TokenKind::RParen, "expected ')' after for clauses");
+        }
         self.parse_statement();
     }
 
-    fn parse_for_expression_list(&mut self) {
-        if self.check(TokenKind::Semicolon) || self.check(TokenKind::RParen) {
-            return;
+    fn parse_for_expression_list(&mut self, end: TokenKind) -> bool {
+        if self.check(end) {
+            return true;
         }
         if !self.parse_expression(1) {
-            return;
+            self.synchronize_for_list(end);
+            return false;
         }
         while self.matches(TokenKind::Comma) {
             if !self.parse_expression(1) {
-                break;
+                self.synchronize_for_list(end);
+                return false;
             }
         }
+        true
     }
 
     fn parse_while_statement(&mut self) {
@@ -714,6 +720,32 @@ impl<'a> Parser<'a> {
                     }
                     brace_depth -= 1;
                 }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_for_list(&mut self, end: TokenKind) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(end) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::LBrace) || self.check(TokenKind::RBrace) {
+                    return;
+                }
+            }
+
+            match self.peek_kind() {
                 TokenKind::LParen => paren_depth += 1,
                 TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
                 TokenKind::LBracket => bracket_depth += 1,
@@ -1786,6 +1818,50 @@ mod tests {
                 (diagnostics[0].span.line, diagnostics[0].span.column),
                 (1, column),
                 "source {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_for_initializer_recovers_at_its_semicolon() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer index;\nfor (index + * 2; TRUE; ) { }\nllOwnerSay(\"later\");\n} }",
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR005");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (2, 14)
+        );
+    }
+
+    #[test]
+    fn malformed_for_increment_recovers_at_the_closing_paren() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer index;\nfor (; TRUE; index + * 2) { }\nllOwnerSay(\"later\");\n} }",
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR005");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (2, 22)
+        );
+    }
+
+    #[test]
+    fn malformed_for_lists_do_not_hide_a_later_independent_error() {
+        for source in [
+            "default { state_entry() { integer index;\nfor (index + * 2; TRUE; ) { }\nif () { }\n} }",
+            "default { state_entry() { integer index;\nfor (; TRUE; index + * 2) { }\nif () { }\n} }",
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].code, "PAR005", "{diagnostics:?}");
+            assert_eq!(diagnostics[1].code, "PAR006", "{diagnostics:?}");
+            assert_eq!(
+                (diagnostics[1].span.line, diagnostics[1].span.column),
+                (3, 5),
+                "{diagnostics:?}"
             );
         }
     }
