@@ -104,9 +104,7 @@ impl ScopeModel {
                 }
             }
 
-            let Some(parent) = scope.parent else {
-                return None;
-            };
+            let parent = scope.parent?;
             scope_id = parent;
         }
     }
