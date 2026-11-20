@@ -1379,12 +1379,8 @@ fn build_control_flow_statement(
 
             let body = build_control_flow_statement(tokens, close + 1, limit, graph)?;
             let condition = graph.add_node();
-            let (may_enter_body, may_exit_loop) = condition_possibilities(
-                tokens,
-                condition_start,
-                condition_end,
-                empty_is_true,
-            );
+            let (may_enter_body, may_exit_loop) =
+                condition_possibilities(tokens, condition_start, condition_end, empty_is_true);
 
             if may_enter_body {
                 graph.add_edge(condition, body.entry);
@@ -1421,7 +1417,8 @@ fn build_control_flow_statement(
 
             let condition = graph.add_node();
             connect_exits(graph, &body.exits, condition);
-            let (may_repeat, may_exit_loop) = condition_possibilities(tokens, open + 1, close, false);
+            let (may_repeat, may_exit_loop) =
+                condition_possibilities(tokens, open + 1, close, false);
             if may_repeat {
                 graph.add_edge(condition, body.entry);
             }
