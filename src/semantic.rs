@@ -1491,6 +1491,27 @@ fn build_control_flow_statement(
     }
 }
 
+fn statement_semicolon(tokens: &[Token], start: usize, limit: usize) -> Option<usize> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate().take(limit).skip(start) {
+        match token.kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.checked_sub(1)?,
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.checked_sub(1)?,
+            TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+                return Some(index);
+            }
+            TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return None,
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
     let mut brace_depth = 0usize;
     let mut paren_depth = 0usize;
