@@ -487,11 +487,6 @@ impl<'a> Parser<'a> {
         self.push_error(code, message, span);
     }
 
-    fn error_previous(&mut self, code: &'static str, message: impl Into<String>) {
-        let span = self.previous().span;
-        self.push_error(code, message, span);
-    }
-
     fn push_error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
         self.diagnostics.push(Diagnostic {
             code,
