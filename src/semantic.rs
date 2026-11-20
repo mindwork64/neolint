@@ -2987,10 +2987,17 @@ mod tests {
             .iter()
             .filter(|item| item.code == "SEM015")
             .collect::<Vec<_>>();
-        assert_eq!(mismatches.len(), 2, "{diagnostics:?}");
+        assert_eq!(mismatches.len(), 3, "{diagnostics:?}");
         assert!(
             mismatches.iter().any(|item| {
                 item.message.contains("global_integer")
+                    && item.message.contains("float, expected integer")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("local_integer")
                     && item.message.contains("float, expected integer")
             }),
             "{diagnostics:?}"
