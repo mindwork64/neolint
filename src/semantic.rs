@@ -764,9 +764,14 @@ fn analyze_builtin_calls(
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes, user_functions)
-            else {
+            let Some(actual_type) = infer_expression_type(
+                tokens,
+                range.0,
+                range.1,
+                scopes,
+                user_functions,
+                diagnostics,
+            ) else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -837,7 +842,7 @@ fn analyze_user_function_calls(
             .enumerate()
         {
             let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes, functions)
+                infer_expression_type(tokens, range.0, range.1, scopes, functions, diagnostics)
             else {
                 continue;
             };
@@ -955,9 +960,14 @@ fn analyze_function_returns(
                     ),
                     span: tokens[cursor].span,
                 });
-            } else if let Some(actual_type) =
-                infer_expression_type(tokens, expression_start, semicolon, scopes, functions)
-            {
+            } else if let Some(actual_type) = infer_expression_type(
+                tokens,
+                expression_start,
+                semicolon,
+                scopes,
+                functions,
+                diagnostics,
+            ) {
                 if !can_implicitly_convert(&actual_type, &signature.return_type) {
                     diagnostics.push(Diagnostic {
                         code: "SEM008",
@@ -2022,12 +2032,29 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
     }
 }
 
+fn is_explicit_cast_supported(source: &str, target: &str) -> bool {
+    match source {
+        "integer" => matches!(target, "integer" | "float" | "string" | "list"),
+        "float" => matches!(target, "integer" | "float" | "string" | "list"),
+        "string" => matches!(
+            target,
+            "integer" | "float" | "string" | "key" | "list" | "vector" | "rotation"
+        ),
+        "key" => matches!(target, "string" | "key" | "list"),
+        "list" => matches!(target, "string" | "list"),
+        "vector" => matches!(target, "string" | "list" | "vector"),
+        "rotation" => matches!(target, "string" | "list" | "rotation"),
+        _ => false,
+    }
+}
+
 fn infer_expression_type(
     tokens: &[Token],
     mut start: usize,
     mut end: usize,
     scopes: &ScopeModel,
     user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<String> {
     if start >= end {
         return None;
@@ -2048,19 +2075,33 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
         return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
-        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
         return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
     if let Some(operator_index) = find_top_level_binary_operator(tokens, start, end) {
-        let left_type =
-            infer_expression_type(tokens, start, operator_index, scopes, user_functions)?;
-        let right_type =
-            infer_expression_type(tokens, operator_index + 1, end, scopes, user_functions)?;
+        let left_type = infer_expression_type(
+            tokens,
+            start,
+            operator_index,
+            scopes,
+            user_functions,
+            diagnostics,
+        )?;
+        let right_type = infer_expression_type(
+            tokens,
+            operator_index + 1,
+            end,
+            scopes,
+            user_functions,
+            diagnostics,
+        )?;
         return infer_binary_result_type(tokens[operator_index].kind, &left_type, &right_type)
             .map(str::to_owned);
     }
@@ -2071,8 +2112,30 @@ fn infer_expression_type(
         && tokens[start].kind == TokenKind::LParen
         && tokens[start + 2].kind == TokenKind::RParen
     {
-        if let Some(type_name) = lsl_type_name(tokens[start + 1].kind) {
-            return Some(type_name.to_owned());
+        if let Some(target_type) = lsl_type_name(tokens[start + 1].kind) {
+            let source_type =
+                infer_expression_type(tokens, start + 3, end, scopes, user_functions, diagnostics);
+            if let Some(source_type) = source_type {
+                if !is_explicit_cast_supported(&source_type, target_type) {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM014",
+                        severity: Severity::Error,
+                        kind: DiagnosticKind::Semantic,
+                        message: format!(
+                            "cannot explicitly cast {} to {} in LSL",
+                            source_type, target_type
+                        ),
+                        span: tokens[start + 1].span,
+                    });
+                    return None;
+                }
+            } else if !matches!(target_type, "string" | "list") {
+                // Casting any LSL value type to string or list is supported.
+                // Other targets require a known source type.
+                return None;
+            }
+
+            return Some(target_type.to_owned());
         }
     }
 
@@ -2598,6 +2661,105 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_cast_matrix_matches_lsl_supported_pairs() {
+        let valid = [
+            ("integer", "integer"),
+            ("integer", "float"),
+            ("integer", "string"),
+            ("integer", "list"),
+            ("float", "integer"),
+            ("float", "float"),
+            ("float", "string"),
+            ("float", "list"),
+            ("string", "integer"),
+            ("string", "float"),
+            ("string", "string"),
+            ("string", "key"),
+            ("string", "list"),
+            ("string", "vector"),
+            ("string", "rotation"),
+            ("key", "string"),
+            ("key", "key"),
+            ("key", "list"),
+            ("list", "string"),
+            ("list", "list"),
+            ("vector", "string"),
+            ("vector", "list"),
+            ("vector", "vector"),
+            ("rotation", "string"),
+            ("rotation", "list"),
+            ("rotation", "rotation"),
+        ];
+        for (source, target) in valid {
+            assert!(
+                is_explicit_cast_supported(source, target),
+                "{source} -> {target} should be supported"
+            );
+        }
+
+        let invalid = [
+            ("integer", "key"),
+            ("integer", "vector"),
+            ("integer", "rotation"),
+            ("float", "key"),
+            ("float", "vector"),
+            ("float", "rotation"),
+            ("key", "integer"),
+            ("key", "float"),
+            ("key", "vector"),
+            ("key", "rotation"),
+            ("list", "integer"),
+            ("list", "float"),
+            ("list", "key"),
+            ("list", "vector"),
+            ("list", "rotation"),
+            ("vector", "integer"),
+            ("vector", "float"),
+            ("vector", "key"),
+            ("vector", "rotation"),
+            ("rotation", "integer"),
+            ("rotation", "float"),
+            ("rotation", "key"),
+            ("rotation", "vector"),
+        ];
+        for (source, target) in invalid {
+            assert!(
+                !is_explicit_cast_supported(source, target),
+                "{source} -> {target} should be unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_explicit_casts_not_supported_by_lsl() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector position; llSleep((integer)position); llSetPos((vector)\"<1, 2, 3>\"); llOwnerSay((string)position); } }",
+        );
+        let invalid_casts = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM014")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid_casts.len(), 1, "{diagnostics:?}");
+        assert!(
+            invalid_casts[0]
+                .message
+                .contains("cannot explicitly cast vector to integer"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_cast_source_types_conservative() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llOwnerSay((integer)llExtensionValue()); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM014"),
             "{diagnostics:?}"
         );
     }

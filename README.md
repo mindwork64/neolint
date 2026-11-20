@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with thirteen conservative semantic checks (SEM001–SEM013). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with fourteen conservative semantic checks (SEM001–SEM014). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -52,6 +52,7 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM011`: value-returning functions that may reach the end without returning a value. A token-derived control-flow graph models sequential blocks, `if/else`, `for`, `while`, `do-while`, `return`, and forward/backward `jump` edges. Simple constant conditions are recognized; unknown conditions conservatively allow both outcomes. Invalid jump structures suppress cascading SEM011 diagnostics.
 - `SEM012`: warning for a variable reference that cannot be resolved to a declaration in the current lexical scope or a canonical built-in constant. Unknown extension function calls (including their argument ranges) and bodies of unknown extension event handlers are deliberately ignored; the rule is a warning because environments may provide extra symbols.
 - `SEM013`: warning when calling one of the 28 LSL functions marked `deprecated` in the pinned official `lsl_definitions.yaml` snapshot. SLua-only deprecation fields are excluded, and no SLua replacement hints are presented as LSL APIs.
+- `SEM014`: error for an explicit cast from a known source type to an unsupported LSL target type; unknown source types are left unchecked.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied.
 
