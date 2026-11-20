@@ -2303,6 +2303,16 @@ fn analyze_component_assignments(
         let result_type = if let Some(binary_operator) = binary_operator {
             let Some(result_type) = infer_binary_result_type(binary_operator, "float", &value_type)
             else {
+                diagnostics.push(Diagnostic {
+                    code: "SEM018",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "compound assignment '{}' is not supported for component types float and {}",
+                        operator.lexeme, value_type
+                    ),
+                    span: component.span,
+                });
                 continue;
             };
             result_type
@@ -2391,6 +2401,16 @@ fn analyze_compound_assignments(
         let Some(result_type) =
             infer_binary_result_type(binary_operator, &target_type, &value_type)
         else {
+            diagnostics.push(Diagnostic {
+                code: "SEM017",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "compound assignment '{}' is not supported for operand types {} and {}",
+                    operator.lexeme, target_type, value_type
+                ),
+                span: name.span,
+            });
             continue;
         };
 
@@ -3338,6 +3358,30 @@ mod tests {
     }
 
     #[test]
+    fn reports_component_compound_assignments_with_known_unsupported_operand_pairs() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    position.x += "wrong";
+                    position.y %= 2;
+                }
+            }"#,
+        );
+        let invalid = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM018")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid.len(), 2, "{diagnostics:?}");
+        assert!(
+            invalid
+                .iter()
+                .all(|item| item.message.contains("not supported")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn skips_component_assignments_with_unknown_base_or_rhs_types() {
         let diagnostics = analyze_source(
             "default { state_entry() { llExtensionVector().x = 1.0; vector position; position.x = llExtensionValue(); } }",
@@ -3367,7 +3411,7 @@ mod tests {
                        ratio += 1;
                        label += " units";
                        values += [1, "one"];
-                       position += 1.0;
+                       position += <1.0, 1.0, 1.0>;
                        orientation += orientation;
                    }
                }"#,
@@ -3385,6 +3429,45 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM016"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_compound_assignments_with_known_unsupported_operand_pairs() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    integer count;
+                    float ratio;
+                    string label;
+                    count += "wrong";
+                    ratio %= 2;
+                    label -= "wrong";
+                }
+            }"#,
+        );
+        let invalid = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM017")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid.len(), 3, "{diagnostics:?}");
+        assert!(
+            invalid
+                .iter()
+                .any(|item| item.message.contains("integer and string")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            invalid
+                .iter()
+                .any(|item| item.message.contains("float and integer")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            invalid
+                .iter()
+                .any(|item| item.message.contains("string and string")),
             "{diagnostics:?}"
         );
     }
