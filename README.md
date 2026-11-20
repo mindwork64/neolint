@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with seven conservative semantic checks (SEM001–SEM007). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with eight conservative semantic checks (SEM001–SEM008). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
