@@ -6,7 +6,6 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
