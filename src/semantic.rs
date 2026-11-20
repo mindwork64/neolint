@@ -2154,7 +2154,9 @@ fn analyze_explicit_casts(
             continue;
         }
 
-        let Some(target_type) = tokens.get(index + 1).and_then(|item| lsl_type_name(item.kind))
+        let Some(target_type) = tokens
+            .get(index + 1)
+            .and_then(|item| lsl_type_name(item.kind))
         else {
             continue;
         };
@@ -2898,7 +2900,10 @@ mod tests {
             "default { state_entry() { vector position; integer invalid = (integer)position; } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM014").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM014")
+                .count(),
             1,
             "{diagnostics:?}"
         );
