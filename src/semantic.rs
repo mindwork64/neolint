@@ -327,6 +327,80 @@ fn matching_paren(tokens: &[Token], open_index: usize) -> Option<usize> {
 
     None
 }
+ 
+#[derive(Debug, Clone)]
+struct UserFunctionSignature {
+    return_type: String,
+    parameter_types: Vec<String>,
+    declaration_index: usize,
+}
+
+fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSignature> {
+    let mut functions = HashMap::new();
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            TokenKind::LParen => {
+                paren_depth += 1;
+                continue;
+            }
+            TokenKind::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if brace_depth != 0 || paren_depth != 0 || !is_declaration_type(token.kind) {
+            continue;
+        }
+
+        let Some(name) = tokens.get(index + 1) else {
+            continue;
+        };
+        if name.kind != TokenKind::Identifier
+            || tokens.get(index + 2).map(|item| item.kind) != Some(TokenKind::LParen)
+        {
+            continue;
+        }
+
+        let open = index + 2;
+        let Some(close) = matching_paren(tokens, open) else {
+            continue;
+        };
+        if tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+
+        let return_type = if token.kind == TokenKind::KwVoid {
+            "void".to_owned()
+        } else {
+            let Some(type_name) = lsl_type_name(token.kind) else {
+                continue;
+            };
+            type_name.to_owned()
+        };
+
+        functions.entry(name.lexeme.clone()).or_insert(UserFunctionSignature {
+            return_type,
+            parameter_types: parameter_types(tokens, open, close),
+            declaration_index: index + 1,
+        });
+    }
+
+    functions
+}
+
 
 /// Perform conservative semantic checks that do not require a full symbol table.
 ///
@@ -388,12 +462,19 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     }
 
     let scopes = ScopeModel::build(tokens);
-    analyze_builtin_calls(tokens, &scopes, &mut diagnostics);
+    let user_functions = collect_user_functions(tokens);
+    analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
 }
 
-fn analyze_builtin_calls(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut Vec<Diagnostic>) {
+fn analyze_builtin_calls(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let builtins = definitions();
 
     for (index, token) in tokens.iter().enumerate() {
@@ -436,7 +517,9 @@ fn analyze_builtin_calls(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mu
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) = infer_expression_type(tokens, range.0, range.1, scopes) else {
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1, scopes, user_functions)
+            else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -455,6 +538,76 @@ fn analyze_builtin_calls(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mu
                         parameter.type_name
                     ),
                     span,
+                });
+            }
+        }
+    }
+}
+
+fn analyze_user_function_calls(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        let Some(signature) = functions.get(token.lexeme.as_str()) else {
+            continue;
+        };
+        if signature.declaration_index == index
+            || tokens.get(index + 1).map(|next| next.kind) != Some(TokenKind::LParen)
+        {
+            continue;
+        }
+
+        let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1) else {
+            continue;
+        };
+        if actual_count != signature.parameter_types.len() {
+            diagnostics.push(Diagnostic {
+                code: "SEM005",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "{} expects {} argument(s), but received {}",
+                    token.lexeme,
+                    signature.parameter_types.len(),
+                    actual_count
+                ),
+                span: token.span,
+            });
+            continue;
+        }
+
+        let ranges = call_argument_ranges(tokens, index + 1, closing_index);
+        for (argument_index, (range, expected_type)) in ranges
+            .iter()
+            .zip(signature.parameter_types.iter())
+            .enumerate()
+        {
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1, scopes, functions)
+            else {
+                continue;
+            };
+
+            if !can_implicitly_convert(&actual_type, expected_type) {
+                diagnostics.push(Diagnostic {
+                    code: "SEM006",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "{} argument {} has type {}, expected {}",
+                        token.lexeme,
+                        argument_index + 1,
+                        actual_type,
+                        expected_type
+                    ),
+                    span: tokens[range.0].span,
                 });
             }
         }
@@ -600,6 +753,7 @@ fn infer_expression_type(
     mut start: usize,
     mut end: usize,
     scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
 ) -> Option<String> {
     if start >= end {
         return None;
@@ -629,7 +783,7 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        return infer_expression_type(tokens, start + 1, end, scopes);
+        return infer_expression_type(tokens, start + 1, end, scopes, user_functions);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
         return Some("integer".to_owned());
@@ -700,6 +854,9 @@ fn infer_expression_type(
     {
         if let Some((_, closing_index)) = count_call_arguments(tokens, start + 1) {
             if closing_index + 1 == end {
+                if let Some(signature) = user_functions.get(tokens[start].lexeme.as_str()) {
+                    return Some(signature.return_type.clone());
+                }
                 return definitions()
                     .functions
                     .get(tokens[start].lexeme.as_str())
