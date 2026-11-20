@@ -1994,6 +1994,40 @@ mod tests {
     }
 
     #[test]
+    fn accepts_jump_to_label_inside_event_handler() {
+        let diagnostics =
+            analyze_source("default { state_entry() { jump done; @done; } }");
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM009" | "SEM010")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_undefined_jump_target_inside_event_handler() {
+        let diagnostics = analyze_source("default { state_entry() { jump missing; } }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM010"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn allows_same_jump_label_name_in_separate_event_handlers() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { @done; } touch_end() { @done; } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM009" | "SEM010")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_value_function_without_a_return_statement() {
         let diagnostics = analyze_source(
             "integer get_value() { llOwnerSay(\"missing\"); } default { state_entry() { } }",
