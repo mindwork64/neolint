@@ -738,11 +738,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_ternary_operator() {
-        let diagnostics =
-            parse_source("default { state_entry() { integer value = 1 ? 2 : 3; } }");
-        assert!(
-            !diagnostics.is_empty(),
-            "ternary syntax is not part of LSL"
-        );
+        let diagnostics = parse_source("default { state_entry() { integer value = 1 ? 2 : 3; } }");
+        assert!(!diagnostics.is_empty(), "ternary syntax is not part of LSL");
     }
 }
