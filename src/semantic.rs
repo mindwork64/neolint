@@ -641,7 +641,10 @@ mod tests {
         let diagnostics = analyze_source(
             r#"default { state_entry() { llOwnerSay((string)123); llOwnerSay(llGetRegionName()); } }"#,
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
