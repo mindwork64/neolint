@@ -60,9 +60,9 @@ The current CLI performs lexical analysis, syntax validation, and the following 
 - `SEM001`: duplicate top-level variable/function declarations.
 - `SEM002`: wrong argument count for a known built-in LSL function.
 - `SEM003`: incorrect parameter count/type for a known LSL event handler.
-- `SEM004`: provable argument type mismatch for a known built-in function. Type inference recognizes literals, built-in constants, explicit casts, list/vector/rotation literals, built-in call return types, and variables resolved through the lexical scope model.
+- `SEM004`: provable argument type mismatch for a known built-in function. Type inference recognizes literals, built-in constants, explicit casts, list/vector/rotation literals, built-in/user-function call return types, variables resolved through the lexical scope model, and supported binary-expression result types.
 - `SEM005`: wrong argument count for a known user-defined function.
-- `SEM006`: provable argument type mismatch for a known user-defined function.
+- `SEM006`: provable argument type mismatch for a known user-defined function, including supported binary-expression result types.
 - `SEM007`: duplicate variable declaration in the same lexical scope, including redeclaration of a function parameter. Shadowing a name in a nested block is allowed.
 - `SEM008`: explicit return-statement validation in user-defined functions: return-value presence and provable return-expression type compatibility.
 - `SEM009`: duplicate jump labels within a single function or event-handler code scope.
@@ -77,6 +77,6 @@ Built-in function, event, and constant metadata is vendored in `data/lsl-builtin
 
 Not implemented yet: complete user-symbol resolution across all scripting extensions, broader CFG coverage for uncommon or malformed control-flow constructs and more precise expression analysis, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
 
-LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 and SEM006 respect those conversions and do not guess the type of unresolved expressions.
+Binary-expression inference covers confirmed operand/result combinations: numeric promotion, string/list concatenation, comparisons/logical results, vector dot/cross products and direction-sensitive vector/rotation operations. It leaves unknown or incompatible combinations unresolved; for example, scalar-plus-vector and scalar-times-vector are not assigned vector result types. LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 and SEM006 respect those conversions and do not guess the type of unresolved expressions.
 
 A clean result means only that the implemented checks found no issue. It is not a claim that the official LSL compiler would accept the script.
