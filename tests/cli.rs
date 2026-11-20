@@ -222,6 +222,26 @@ fn stdin_is_supported_with_json_output() {
 }
 
 #[test]
+fn empty_stdin_is_a_syntax_error_for_missing_default_state() {
+    let mut child = neolint()
+        .arg("--format")
+        .arg("json")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child.stdin.take().unwrap().write_all(b"").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"PAR013\""), "{stdout}");
+}
+
+#[test]
 fn invalid_configuration_returns_input_error_exit_code() {
     let directory = temporary_directory();
     let source = directory.join("neolint.conf");
