@@ -4,7 +4,7 @@ This document records the initial language model used by neolint. It is intentio
 
 ## Source structure
 
-An LSL script contains global declarations and user-defined functions, plus state definitions. Every script has a `default` state. Other states are introduced with `state name`. Event handlers are declared inside states and contain ordinary statement blocks. User-defined functions must appear before state definitions; functions with no return value omit the return type.
+An LSL script contains global declarations and user-defined functions, plus state definitions. Every script has a `default` state. Other states are introduced with `state name`. Event handlers are declared inside states and contain ordinary statement blocks. User-defined functions must appear before state definitions; a later function declaration is rejected with `PAR009`. Functions with no return value omit the return type.
 
 ## Built-in value types
 
