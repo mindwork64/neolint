@@ -40,6 +40,19 @@ Built-in functions, constants, and related metadata should come from the officia
 
 The lexer preserves UTF-8 byte offsets and one-based line/column positions. Unicode is accepted in comments and string contents. Identifiers are currently ASCII-only; unsupported non-ASCII characters outside comments/strings receive a lexical diagnostic until verified against the official language implementation.
 
+## CLI configuration and inputs
+
+The CLI accepts explicit files, stdin (`-`), and directories. Directories are traversed recursively for `.lsl` files, sorted deterministically, with symlinks skipped. Explicit file paths are accepted regardless of extension.
+
+A config file can disable rules or override severity:
+
+```ini
+disable = SEM001, SEM003
+severity.SEM004 = warning
+```
+
+Command-line `--disable` and `--severity RULE=LEVEL` settings override the file settings. Severity levels: `error`, `warning`, `info`.
+
 ## Current implementation and limitations
 
 The current CLI performs lexical analysis, syntax validation, and these conservative semantic checks:
