@@ -5,6 +5,7 @@ struct Parser<'a> {
     tokens: &'a [Token],
     current: usize,
     diagnostics: Vec<Diagnostic>,
+    states_started: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -13,6 +14,7 @@ impl<'a> Parser<'a> {
             tokens,
             current: 0,
             diagnostics: Vec::new(),
+            states_started: false,
         }
     }
 
@@ -20,8 +22,15 @@ impl<'a> Parser<'a> {
         while !self.at_end() {
             let before = self.current;
             if self.is_type() || self.is_untyped_function_declaration() {
+                if self.states_started && self.is_function_declaration() {
+                    self.error_here(
+                        "PAR009",
+                        "user-defined functions must be declared before state definitions",
+                    );
+                }
                 self.parse_global_declaration();
             } else if self.check(TokenKind::KwDefault) || self.check(TokenKind::KwState) {
+                self.states_started = true;
                 self.parse_state();
             } else {
                 self.error_here(
@@ -422,7 +431,16 @@ impl<'a> Parser<'a> {
         self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen
     }
 
-    fn expect(&mut self, kind: TokenKind, message: &'static str) -> bool {
+    fn is_function_declaration(&self) -> bool {
+        if self.is_type() {
+            self.peek_kind_at(1) == TokenKind::Identifier
+                && self.peek_kind_at(2) == TokenKind::LParen
+        } else {
+            self.is_untyped_function_declaration()
+        }
+    }
+
+    fn expect(&mut self, kind: TokenKind, message: &'static str) {
         if self.matches(kind) {
             true
         } else {
@@ -606,6 +624,17 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_user_functions_declared_after_states() {
+        let diagnostics = parse_source(
+            "default { state_entry() { } } later() { }",
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR009"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
