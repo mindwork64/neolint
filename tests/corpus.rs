@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -13,7 +15,7 @@ struct DiagnosticKey {
 #[derive(Debug)]
 struct Fixture {
     id: String,
-    size: String,
+    category: String,
     path: String,
     origin: String,
     license: String,
@@ -108,10 +110,10 @@ fn parse_manifest() -> Result<Vec<Fixture>, String> {
                 "manifest line {line_number}: empty or duplicate fixture id {id:?}"
             ));
         }
-        let size = fields[1].trim();
-        if !matches!(size, "small" | "medium" | "large" | "invalid") {
+        let category = fields[1].trim();
+        if !matches!(category, "small" | "medium" | "large" | "invalid") {
             return Err(format!(
-                "manifest line {line_number}: invalid size category {size:?}"
+                "manifest line {line_number}: invalid category {category:?}"
             ));
         }
         let path = fields[2].trim();
@@ -174,7 +176,7 @@ fn parse_manifest() -> Result<Vec<Fixture>, String> {
 
         fixtures.push(Fixture {
             id: id.to_owned(),
-            size: size.to_owned(),
+            category: category.to_owned(),
             path: path.to_owned(),
             origin: origin.to_owned(),
             license: license.to_owned(),
@@ -281,6 +283,85 @@ fn parse_output(stdout: &str) -> BTreeMap<DiagnosticKey, usize> {
     diagnostics
 }
 
+const FIXTURE_TIMEOUT: Duration = Duration::from_secs(10);
+const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[derive(Debug)]
+struct CommandResult {
+    stdout: String,
+    stderr: String,
+    status: i32,
+    elapsed: Duration,
+}
+
+fn run_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<CommandResult, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{label}: cannot start process: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{label}: missing stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{label}: missing stderr pipe"))?;
+    let stdout_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut buffer = Vec::new();
+        let _ = stdout.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    return Err(format!("{label}: timed out after {timeout:?}"));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(format!("{label}: cannot poll process: {error}"));
+            }
+        }
+    };
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| format!("{label}: stdout reader panicked"))?;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| format!("{label}: stderr reader panicked"))?;
+
+    Ok(CommandResult {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        status: status.code().unwrap_or(-1),
+        elapsed: started.elapsed(),
+    })
+}
+
 fn neolint() -> Command {
     Command::new(env!("CARGO_BIN_EXE_neolint"))
 }
@@ -290,24 +371,40 @@ fn corpus_manifest_is_valid_and_complete() {
     let fixtures = parse_manifest().expect("valid manifest");
     assert_manifest_is_valid(&fixtures);
 
-    let mut sizes = BTreeMap::new();
+    let mut categories = BTreeMap::new();
     for fixture in &fixtures {
-        *sizes.entry(fixture.size.as_str()).or_insert(0) += 1;
+        *categories.entry(fixture.category.as_str()).or_insert(0) += 1;
     }
     assert_eq!(
         fixtures.len(),
         25,
         "update corpus report when adding fixtures"
     );
-    assert_eq!(sizes.get("small"), Some(&9));
-    assert_eq!(sizes.get("medium"), Some(&6));
-    assert_eq!(sizes.get("large"), Some(&3));
-    assert_eq!(sizes.get("invalid"), Some(&7));
+    assert_eq!(categories.get("small"), Some(&9));
+    assert_eq!(categories.get("medium"), Some(&6));
+    assert_eq!(categories.get("large"), Some(&3));
+    assert_eq!(categories.get("invalid"), Some(&7));
     assert!(
         fixtures
             .iter()
             .all(|fixture| fixture.origin == "original" && fixture.license == "project-authored"),
         "this corpus contains only project-authored fixtures"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_runner_kills_a_timed_out_child() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 5"]);
+    let started = Instant::now();
+    let error = run_with_timeout(command, Duration::from_millis(50), "timeout fixture")
+        .expect_err("sleeping child should time out");
+    assert!(error.contains("timeout fixture"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "killing a timed-out child took too long: {:?}",
+        started.elapsed()
     );
 }
 
@@ -318,11 +415,15 @@ fn every_fixture_matches_manifest_through_cli() {
 
     for fixture in &fixtures {
         let path = root.join(&fixture.path);
-        let output = neolint()
-            .arg(&path)
-            .output()
-            .unwrap_or_else(|error| panic!("{}: cannot run CLI: {error}", fixture.id));
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut command = neolint();
+        command.arg(&path);
+        let output = run_with_timeout(
+            command,
+            FIXTURE_TIMEOUT,
+            &format!("fixture {} ({})", fixture.id, path.display()),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let stdout = output.stdout;
         let actual = parse_output(&stdout);
         assert_eq!(
             actual, fixture.expected,
@@ -330,12 +431,9 @@ fn every_fixture_matches_manifest_through_cli() {
             fixture.id, fixture.path
         );
         assert_eq!(
-            output.status.code(),
-            Some(fixture.exit),
+            output.status, fixture.exit,
             "{} ({}) exit mismatch\nstdout:\n{stdout}\nstderr:\n{}",
-            fixture.id,
-            fixture.path,
-            String::from_utf8_lossy(&output.stderr)
+            fixture.id, fixture.path, output.stderr
         );
         let has_syntax_error = actual
             .keys()
@@ -352,10 +450,15 @@ fn every_fixture_matches_manifest_through_cli() {
 fn recursive_directory_run_matches_manifest_aggregate() {
     let fixtures = parse_manifest().expect("valid manifest");
     let root = corpus_root();
-    let started = Instant::now();
-    let output = neolint().arg(&root).output().expect("run corpus directory");
-    let elapsed = started.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut command = neolint();
+    command.arg(&root);
+    let output = run_with_timeout(
+        command,
+        DIRECTORY_TIMEOUT,
+        &format!("corpus directory ({})", root.display()),
+    )
+    .expect("run corpus directory");
+    let stdout = output.stdout;
     let actual = parse_output(&stdout);
 
     let mut expected = BTreeMap::new();
@@ -368,11 +471,7 @@ fn recursive_directory_run_matches_manifest_aggregate() {
         actual, expected,
         "recursive corpus diagnostics mismatch\nstdout:\n{stdout}"
     );
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "corpus contains error fixtures"
-    );
+    assert_eq!(output.status, 1, "corpus contains error fixtures");
     for fixture in &fixtures {
         let path = root.join(&fixture.path);
         assert!(
@@ -383,7 +482,8 @@ fn recursive_directory_run_matches_manifest_aggregate() {
         );
     }
     assert!(
-        elapsed < Duration::from_secs(10),
-        "corpus directory run exceeded smoke budget: {elapsed:?}"
+        output.elapsed < DIRECTORY_TIMEOUT,
+        "corpus directory run exceeded smoke budget: {:?}",
+        output.elapsed
     );
 }

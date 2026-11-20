@@ -1,5 +1,5 @@
 # neolint LSL corpus manifest v1
-# id|size|path|origin|license|syntax|diagnostics|exit|limitations|purpose
+# id|category|path|origin|license|syntax|diagnostics|exit|limitations|purpose
 small_states_timer|small|small/states_and_timer.lsl|original|project-authored|valid|none|0|none|States, timer, touch handler and global state
 small_vector_math|small|small/vector_math.lsl|original|project-authored|valid|none|0|none|Vector and rotation arithmetic and component access
 small_lists_strings|small|small/lists_strings.lsl|original|project-authored|valid|none|0|none|Lists, strings, keys, built-in calls and loops

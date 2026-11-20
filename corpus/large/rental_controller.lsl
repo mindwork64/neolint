@@ -67,7 +67,13 @@ default
 
     listen(integer channel, string name, key id, string message)
     {
-        if (message == "Monthly")
+        if (message == "Daily")
+        {
+            gExpiry = llGetUnixTime() + 86400;
+            llGiveInventory(id, "Rental Agreement");
+            announce("Daily rental started for " + llKey2Name(id));
+        }
+        else if (message == "Monthly")
         {
             gExpiry = llGetUnixTime() + 2592000;
             llGiveInventory(id, "Rental Agreement");

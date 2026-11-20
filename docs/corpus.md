@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The corpus exercises neolint against complete, project-authored LSL scripts rather than isolated unit-test fragments. It checks that valid programs remain free of syntax errors, that intentionally invalid programs produce the documented diagnostics, and that recursive directory processing remains deterministic and offline.
+The corpus exercises neolint against complete, project-authored LSL scripts rather than isolated unit-test fragments. It checks parser-level validity, semantic-negative diagnostics, and recursive directory processing deterministically and offline. `syntax` and `category` are independent: a syntax-valid fixture may still be a semantic-negative example.
 
 The corpus does **not** claim to be an official LSL compiler suite. Expected results describe the current merged implementation, not every behavior of Second Life or another simulator.
 
@@ -25,7 +25,7 @@ tests/corpus.rs
 * 25 original project-authored fixtures.
 * 0 third-party fixtures.
 
-Every valid fixture is expected to produce no diagnostics. The seven invalid fixtures cover:
+Fixtures marked `diagnostics=none` are expected to be clean. Syntax-valid semantic-negative fixtures may intentionally emit SEM diagnostics. The seven `category=invalid` fixtures cover:
 
 * `PAR006` — empty `for` condition;
 * `PAR007` — unclosed state;
@@ -52,10 +52,11 @@ The invalid fixtures exercise representative parser, symbol, type, component and
 `corpus/manifest.txt` is a compact pipe-delimited manifest. Each non-comment line has ten fields:
 
 ```text
-id|size|path|origin|license|syntax|diagnostics|exit|limitations|purpose
+id|category|path|origin|license|syntax|diagnostics|exit|limitations|purpose
 ```
 
-* `syntax` is `valid` or `invalid`.
+* `category` is `small`, `medium`, `large` or `invalid`; `invalid` denotes a deliberately negative example, not a size.
+* `syntax` is parser-level `valid` or `invalid`; it is independent of expected semantic diagnostics. A syntax-valid fixture may still intentionally emit SEM diagnostics.
 * `diagnostics` is `none` or comma-separated `CODE:COUNT:SEVERITY` entries.
 * `exit` is the expected CLI exit code (`0` or `1`).
 * `origin` and `license` are mandatory. The current corpus uses `original` and `project-authored`.
@@ -85,7 +86,7 @@ All fixtures were written specifically for neolint and are marked `original` / `
 ## Adding a fixture
 
 1. Add the `.lsl` file under the appropriate corpus directory.
-2. Add exactly one manifest row with a unique ID, size, provenance, license, syntax classification, expected diagnostics, exit code, limitations and purpose.
+2. Add exactly one manifest row with a unique ID, category, provenance, license, syntax classification, expected diagnostics, exit code, limitations and purpose.
 3. Keep expected results deterministic and limited to implemented behavior.
 4. Run `cargo test --test corpus` and inspect any mismatch by fixture ID.
 5. Run the full required CI before opening a PR.

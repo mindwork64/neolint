@@ -2,6 +2,7 @@ key gOwner;
 integer gChannel = -12001;
 integer gListener;
 integer gBusy;
+string gDestination = "Home";
 list gDestinations = ["Home", "Market", "Workshop"];
 vector gHome = <128.0, 128.0, 22.0>;
 rotation gHomeRotation = <0.0, 0.0, 0.0, 1.0>;
@@ -54,6 +55,7 @@ default
         integer index = findDestination(message);
         if (index >= 0)
         {
+            gDestination = message;
             state traveling;
         }
         else
@@ -76,7 +78,7 @@ state traveling
     {
         llSetTimerEvent(0.0);
         gBusy = FALSE;
-        moveTo(destinationPosition("Home"));
+        moveTo(destinationPosition(gDestination));
         llSetText("Teleporter ready", <1.0, 1.0, 1.0>, 1.0);
         state default;
     }

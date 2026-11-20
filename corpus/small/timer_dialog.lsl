@@ -6,7 +6,7 @@ default
     state_entry()
     {
         gOwner = llGetOwner();
-        llListen(42, "", gOwner, "");
+        gListener = llListen(42, "", gOwner, "");
     }
 
     touch_start(integer total)
