@@ -168,7 +168,10 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Identifier, "expected a label name after 'jump'");
             self.expect(TokenKind::Semicolon, "expected ';' after jump statement");
         } else if self.matches(TokenKind::KwState) {
-            self.expect(TokenKind::Identifier, "expected a state name after 'state'");
+            // `default` is a state name when used as a state-change target.
+            if !self.matches(TokenKind::Identifier) && !self.matches(TokenKind::KwDefault) {
+                self.error_here("PAR007", "expected a state name after 'state'");
+            }
             self.expect(TokenKind::Semicolon, "expected ';' after state change");
         } else if self.matches(TokenKind::At) {
             self.expect(TokenKind::Identifier, "expected a label name after '@'");
@@ -1003,5 +1006,23 @@ mod tests {
     fn rejects_unsupported_ternary_operator() {
         let diagnostics = parse_source("default { state_entry() { integer value = 1 ? 2 : 3; } }");
         assert!(!diagnostics.is_empty(), "ternary syntax is not part of LSL");
+    }
+
+    #[test]
+    fn accepts_state_change_to_default() {
+        let diagnostics = parse_source(
+            "default { state_entry() { state default; } } \
+             state running { state_entry() { state default; } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_state_change_without_target() {
+        let diagnostics = parse_source("default { state_entry() { state ; } }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "PAR007"),
+            "{diagnostics:?}"
+        );
     }
 }
