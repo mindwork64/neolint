@@ -368,6 +368,28 @@ fn matching_paren(tokens: &[Token], open_index: usize) -> Option<usize> {
     None
 }
 
+fn matching_brace(tokens: &[Token], open_index: usize) -> Option<usize> {
+    if tokens.get(open_index)?.kind != TokenKind::LBrace {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.kind {
+            TokenKind::LBrace => depth += 1,
+            TokenKind::RBrace => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, Clone)]
 struct UserFunctionSignature {
     return_type: String,
@@ -502,6 +524,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     let user_functions = collect_user_functions(tokens);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
 }
@@ -647,6 +670,126 @@ fn analyze_user_function_calls(
                     span: tokens[range.0].span,
                 });
             }
+        }
+    }
+}
+
+fn analyze_function_returns(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            TokenKind::LParen => {
+                paren_depth += 1;
+                continue;
+            }
+            TokenKind::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if brace_depth != 0 || paren_depth != 0 {
+            continue;
+        }
+
+        let Some((name_index, open, _)) = function_header_at(tokens, index) else {
+            continue;
+        };
+        let Some(parameter_close) = matching_paren(tokens, open) else {
+            continue;
+        };
+        let body_open = parameter_close + 1;
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+        let Some(body_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+
+        let name = &tokens[name_index].lexeme;
+        let Some(signature) = functions.get(name) else {
+            continue;
+        };
+
+        let mut cursor = body_open + 1;
+        while cursor < body_close {
+            if tokens[cursor].kind != TokenKind::KwReturn {
+                cursor += 1;
+                continue;
+            }
+
+            let expression_start = cursor + 1;
+            let mut semicolon = expression_start;
+            while semicolon < body_close && tokens[semicolon].kind != TokenKind::Semicolon {
+                semicolon += 1;
+            }
+            if semicolon == body_close {
+                break;
+            }
+
+            let has_value = expression_start < semicolon;
+            if signature.return_type == "void" {
+                if has_value {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM008",
+                        severity: Severity::Error,
+                        kind: DiagnosticKind::Semantic,
+                        message: format!(
+                            "function {} does not return a value, but this return statement has one",
+                            name
+                        ),
+                        span: tokens[expression_start].span,
+                    });
+                }
+            } else if !has_value {
+                diagnostics.push(Diagnostic {
+                    code: "SEM008",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "function {} returns {}, but this return statement has no value",
+                        name, signature.return_type
+                    ),
+                    span: tokens[cursor].span,
+                });
+            } else if let Some(actual_type) = infer_expression_type(
+                tokens,
+                expression_start,
+                semicolon,
+                scopes,
+                functions,
+            ) {
+                if !can_implicitly_convert(&actual_type, &signature.return_type) {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM008",
+                        severity: Severity::Error,
+                        kind: DiagnosticKind::Semantic,
+                        message: format!(
+                            "function {} returns {}, but this return expression has type {}",
+                            name, signature.return_type, actual_type
+                        ),
+                        span: tokens[expression_start].span,
+                    });
+                }
+            }
+
+            cursor = semicolon + 1;
         }
     }
 }
@@ -1327,6 +1470,58 @@ mod tests {
             analyze_source("say_message() { } say_message() { } default { state_entry() { } }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM001"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_missing_value_from_typed_function_return() {
+        let diagnostics =
+            analyze_source("integer get_value() { return; } default { state_entry() { } }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_wrong_typed_function_return_expression() {
+        let diagnostics =
+            analyze_source(r#"integer get_value() { return "wrong"; } default { }"#);
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_value_returned_from_no_return_function() {
+        let diagnostics =
+            analyze_source("do_work() { return 1; } default { state_entry() { } }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_matching_and_bare_function_returns() {
+        let diagnostics = analyze_source(
+            r#"integer get_count() { return 1; } float get_float() { return 2; } do_work() { return; } default { state_entry() { } }"#,
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn checks_return_expression_types_using_local_variables() {
+        let diagnostics = analyze_source(
+            "integer get_count() { string name; return name; } default { state_entry() { } }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM008"),
             "{diagnostics:?}"
         );
     }
