@@ -142,11 +142,7 @@ fn print_human(results: &[FileResult], show_tokens: bool) {
             for token in &result.tokens {
                 println!(
                     "{}:{}:{}: {:?} {:?}",
-                    result.path,
-                    token.span.line,
-                    token.span.column,
-                    token.kind,
-                    token.lexeme
+                    result.path, token.span.line, token.span.column, token.kind, token.lexeme
                 );
             }
         }
@@ -227,9 +223,6 @@ mod tests {
 
     #[test]
     fn json_escaping_handles_quotes_slashes_and_control_chars() {
-        assert_eq!(
-            json_escape("a\"b\\c\n"),
-            "a\\\"b\\\\c\\n"
-        );
+        assert_eq!(json_escape("a\"b\\c\n"), "a\\\"b\\\\c\\n");
     }
 }
