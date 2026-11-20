@@ -1784,10 +1784,7 @@ fn expression_binary_precedence(kind: TokenKind) -> Option<u8> {
         TokenKind::Xor => 6,
         TokenKind::And => 7,
         TokenKind::EqualEqual | TokenKind::BangEqual => 8,
-        TokenKind::Less
-        | TokenKind::LessEqual
-        | TokenKind::Greater
-        | TokenKind::GreaterEqual => 9,
+        TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual => 9,
         TokenKind::ShiftLeft | TokenKind::ShiftRight => 10,
         TokenKind::Plus | TokenKind::Minus => 11,
         TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 12,
@@ -1800,7 +1797,10 @@ fn is_unary_operator_position(tokens: &[Token], index: usize, start: usize) -> b
         return true;
     }
 
-    let Some(previous) = index.checked_sub(1).and_then(|position| tokens.get(position)) else {
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|position| tokens.get(position))
+    else {
         return true;
     };
 
@@ -1844,11 +1844,7 @@ fn is_unary_operator_position(tokens: &[Token], index: usize, start: usize) -> b
 /// Find the rightmost operator at the lowest (weakest) precedence level.
 /// Choosing the rightmost equal-precedence operator preserves LSL's
 /// left-associative grouping.
-fn find_top_level_binary_operator(
-    tokens: &[Token],
-    start: usize,
-    end: usize,
-) -> Option<usize> {
+fn find_top_level_binary_operator(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
     let mut brace_depth = 0usize;
@@ -1909,17 +1905,21 @@ fn numeric_result_type(left: &str, right: &str) -> Option<&'static str> {
     }
 }
 
-fn infer_binary_result_type(
-    operator: TokenKind,
-    left: &str,
-    right: &str,
-) -> Option<&'static str> {
+fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Option<&'static str> {
     match operator {
-        TokenKind::OrOr | TokenKind::AndAnd | TokenKind::EqualEqual | TokenKind::BangEqual
-        | TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater
+        TokenKind::OrOr
+        | TokenKind::AndAnd
+        | TokenKind::EqualEqual
+        | TokenKind::BangEqual
+        | TokenKind::Less
+        | TokenKind::LessEqual
+        | TokenKind::Greater
         | TokenKind::GreaterEqual => Some("integer"),
 
-        TokenKind::And | TokenKind::Or | TokenKind::Xor | TokenKind::ShiftLeft
+        TokenKind::And
+        | TokenKind::Or
+        | TokenKind::Xor
+        | TokenKind::ShiftLeft
         | TokenKind::ShiftRight => {
             if left == "integer" && right == "integer" {
                 Some("integer")
@@ -2388,7 +2388,10 @@ mod tests {
             "default { state_entry() { llOwnerSay(1 + 2); llOwnerSay(1 > 2); llSleep(1 + 2.0); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2,
             "{diagnostics:?}"
         );
@@ -2408,9 +2411,8 @@ mod tests {
 
     #[test]
     fn preserves_unary_operators_inside_binary_expressions() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { llOwnerSay(1 + -2); llSleep(1 * -2.0); } }",
-        );
+        let diagnostics =
+            analyze_source("default { state_entry() { llOwnerSay(1 + -2); llSleep(1 * -2.0); } }");
         assert_eq!(
             diagnostics.iter().filter(|item| item.code == "SEM004").count(),
             1,
