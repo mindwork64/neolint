@@ -2067,6 +2067,19 @@ fn collect_state_info(tokens: &[Token], scopes: &ScopeModel) -> Vec<StateInfo> {
     states
 }
 
+// These built-ins are marked god-mode in the pinned lsl-definitions snapshot.
+// Their availability is restricted, so a state-name collision with them is not
+// treated as a portable semantic error.
+const GOD_ONLY_BUILTIN_FUNCTIONS: &[&str] = &[
+    "llGodLikeRezObject",
+    "llSetInventoryPermMask",
+    "llSetObjectPermMask",
+];
+
+fn is_god_only_builtin_function(name: &str) -> bool {
+    GOD_ONLY_BUILTIN_FUNCTIONS.contains(&name)
+}
+
 fn analyze_state_topology(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -2122,6 +2135,19 @@ fn analyze_state_topology(
                 message: format!(
                     "state '{}' conflicts with a function declared at {}:{}",
                     state.name, previous.line, previous.column
+                ),
+                span: state.span,
+            });
+        } else if definitions().functions.contains_key(state.name.as_str())
+            && !is_god_only_builtin_function(state.name.as_str())
+        {
+            diagnostics.push(Diagnostic {
+                code: "SEM021",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "state '{}' conflicts with a canonical built-in function",
+                    state.name
                 ),
                 span: state.span,
             });
@@ -5962,6 +5988,32 @@ mod tests {
             collisions
                 .iter()
                 .any(|item| item.message.contains("idle") && item.message.contains("function")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_state_collisions_with_canonical_builtin_functions() {
+        let diagnostics = analyze_source("default { } state llOwnerSay { }");
+        let collisions = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM021")
+            .collect::<Vec<_>>();
+        assert_eq!(collisions.len(), 1, "{diagnostics:?}");
+        assert!(
+            collisions[0].message.contains("llOwnerSay")
+                && collisions[0].message.contains("built-in function"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_god_only_builtin_namespace_collisions() {
+        let diagnostics = analyze_source(
+            "default { } state llGodLikeRezObject { } state llSetInventoryPermMask { } state llSetObjectPermMask { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM021"),
             "{diagnostics:?}"
         );
     }
