@@ -1289,9 +1289,8 @@ fn build_control_flow_statement(
                     return None;
                 }
 
-                if let Some(previous_entry) = entry {
+                if entry.is_some() {
                     connect_exits(graph, &exits, statement.entry);
-                    let _ = previous_entry;
                 } else {
                     entry = Some(statement.entry);
                 }
@@ -2386,11 +2385,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_duplicate_labels_across_nested_blocks() {
-        let diagnostics =
-            analyze_source("integer get_value() { @same; { @same; } return 1; } default { }");
+    fn reports_duplicate_labels_without_cascading_missing_return() {
+        let diagnostics = analyze_source("integer get_value() { @same; { @same; } } default { }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
