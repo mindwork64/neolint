@@ -235,9 +235,7 @@ impl<'a> Parser<'a> {
             self.parse_for_expression_list();
         }
         self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
-        if !self.check(TokenKind::Semicolon) {
-            self.parse_expression(1);
-        }
+        self.parse_expression(1);
         self.expect(TokenKind::Semicolon, "expected ';' after for condition");
         self.parse_for_expression_list();
         self.expect(TokenKind::RParen, "expected ')' after for clauses");
@@ -1000,6 +998,27 @@ mod tests {
             "default { state_entry() { integer i; integer j; for (i = 0, j = 0; i < 1; ++i, ++j) { } } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_empty_for_initializer_and_increment_with_condition() {
+        let diagnostics =
+            parse_source("default { state_entry() { integer i; for (; i < 1; ) ; } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_empty_for_condition_without_cascading_errors() {
+        let diagnostics = parse_source("default { state_entry() { for (;;) ; } }");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR006")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     }
 
     #[test]

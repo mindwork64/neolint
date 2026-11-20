@@ -183,6 +183,23 @@ fn for_expression_lists_inventory_positive() {
 }
 
 #[test]
+fn for_condition_is_required_inventory() {
+    assert_has_code(
+        &parse_source("default { state_entry() { for (;;) ; } }"),
+        "PAR006",
+    );
+
+    for source in [
+        "default { state_entry() { integer i; for (; i < 10; ) ; } }",
+        "default { state_entry() { integer i; for (i = 0; i < 10; ++i) ; } }",
+        "default { state_entry() { integer i; integer j; for (i = 0, j = 0; i < 10; ++i, ++j) ; } }",
+    ] {
+        let diagnostics = parse_source(source);
+        assert!(diagnostics.is_empty(), "unexpected diagnostics for {source:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
 fn focused_malformed_statement_diagnostics() {
     assert_has_code(
         &parse_source("default { state_entry() { integer value = 1 + ; } }"),

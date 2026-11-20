@@ -33,9 +33,11 @@ The pinned viewer grammar uses Bison/Yacc syntax. It is an important cross-check
 [Official][Compiler grammar][Tested]
 
 ```text
-program          := { global-declaration } state-definition { state-definition }
-state-definition := "default" block
-                  | "state" identifier block
+program          := { global-declaration } default-state { named-state }
+default-state    := "default" state-body
+named-state      := "state" identifier state-body
+state-body       := "{" { event-handler } "}"
+event-handler    := identifier "(" [ parameter-list ] ")" statement-block
 ```
 
 Rules:
@@ -83,7 +85,10 @@ The seven LSL value types are:
 ### Global and local declarations
 
 ```text
-declaration := type identifier [ "=" initializer ] { "," identifier [ "=" initializer ] } ";"
+global-declaration := global-variable | function
+global-variable    := type identifier [ "=" expression ] { "," identifier [ "=" expression ] } ";"
+declaration        := type identifier [ "=" initializer ] { "," identifier [ "=" initializer ] } ";"
+initializer        := expression
 ```
 
 - [Official] Global variables are declared at script scope, above state declarations.
@@ -101,8 +106,10 @@ Tests:
 ### Functions and parameters
 
 ```text
-function := [ type ] identifier "(" [ parameter { "," parameter } ] ")" block
-parameter := type identifier
+function       := [ type ] identifier "(" [ parameter-list ] ")" statement-block
+parameter-list := parameter { "," parameter }
+parameter      := type identifier
+type           := "integer" | "float" | "string" | "key" | "list" | "vector" | "rotation"
 ```
 
 - [Official] A function that returns no value omits the return type; it does not use `void`.
@@ -118,9 +125,7 @@ Tests:
 
 ### Event handlers
 
-```text
-event-handler := identifier "(" [ parameter { "," parameter } ] ")" block
-```
+`event-handler` is defined in Section C; it uses `parameter-list` and `statement-block`.
 
 - [Official] Event handlers live directly inside a state body.
 - [Tested] The parser accepts event handlers; SEM003 checks known event signatures against canonical metadata.
@@ -135,18 +140,34 @@ Tests:
 ## E. Statements
 
 ```text
-statement := block
-           | ";"
-           | declaration
-           | expression ";"
-           | "if" "(" expression ")" statement [ "else" statement ]
-           | "for" "(" for-initializer ";" [ expression ] ";" for-increment ")" statement
-           | "while" "(" expression ")" statement
-           | "do" statement "while" "(" expression ")" ";"
-           | "return" [ expression ] ";"
-           | "jump" identifier ";"
-           | "@" identifier ";"
-           | "state" ( identifier | "default" ) ";"
+statement             := statement-block
+                       | empty-statement
+                       | local-declaration
+                       | expression-statement
+                       | if-statement
+                       | for-statement
+                       | while-statement
+                       | do-while-statement
+                       | return-statement
+                       | jump-statement
+                       | label-statement
+                       | state-change-statement
+
+statement-block       := "{" { statement } "}"
+empty-statement       := ";"
+local-declaration     := declaration
+expression-statement  := expression ";"
+if-statement          := "if" "(" expression ")" statement [ "else" statement ]
+for-statement         := "for" "(" for-initializer ";" for-condition ";" for-increment ")" statement
+for-initializer       := [ expression-list ]
+for-condition         := expression
+for-increment         := [ expression-list ]
+while-statement       := "while" "(" expression ")" statement
+do-while-statement    := "do" statement "while" "(" expression ")" ";"
+return-statement      := "return" [ expression ] ";"
+jump-statement        := "jump" identifier ";"
+label-statement       := "@" identifier ";"
+state-change-statement := "state" ( identifier | "default" ) ";"
 ```
 
 | Construct | neolint support | Tests / notes |
@@ -157,7 +178,7 @@ statement := block
 | Expression statement | Yes | `tests/grammar_inventory.rs::expressions_inventory_positive` |
 | Assignment / compound assignment | Yes, restricted operators | `src/parser.rs::tests::accepts_variable_assignment_targets_and_chained_assignments` |
 | `if` / `else` | Yes | `tests/grammar_inventory.rs::statements_inventory_positive` |
-| `for` | Yes; initializer/increment may be comma-separated expression lists | [Compiler grammar] `forexpressionlist`; `src/parser.rs::tests::accepts_for_expression_lists` |
+| `for` | Yes; condition required, initializer/increment optional and may be comma-separated expression lists | [Compiler grammar] `forexpressionlist`; `src/parser.rs::tests::accepts_for_expression_lists`; `src/parser.rs::tests::rejects_empty_for_condition_without_cascading_errors` |
 | `while` | Yes | `tests/grammar_inventory.rs::statements_inventory_positive` |
 | `do-while` | Yes | `tests/grammar_inventory.rs::statements_inventory_positive` |
 | `return` with/without value | Yes | `tests/grammar_inventory.rs::statements_inventory_positive` |
@@ -167,13 +188,17 @@ statement := block
 ### `for` restrictions
 
 - [Tested] A typed variable declaration in the initializer is rejected with `PAR008`; declare the loop variable before the loop.
+- [Official][Tested] The condition is mandatory. `for (;;)` is rejected with `PAR006`; empty initializer and increment are still accepted.
 - [Compiler grammar][Tested] Initializer and increment accept comma-separated expression lists. The official For page describes the three clauses and optional empty clauses but does not demonstrate the comma-list form; modern compiler behavior is therefore not independently confirmed.
-- [Tested] Empty clauses and empty bodies are accepted.
+- [Tested] Empty initializer, increment, and body are accepted; the condition is not optional.
 
 Tests:
 
 - `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers`
 - `src/parser.rs::tests::accepts_for_expression_lists`
+- `src/parser.rs::tests::accepts_empty_for_initializer_and_increment_with_condition`
+- `src/parser.rs::tests::rejects_empty_for_condition_without_cascading_errors`
+- `tests/grammar_inventory.rs::for_condition_is_required_inventory`
 - `src/parser.rs::tests::accepts_empty_statements`
 
 ### `return`
@@ -194,28 +219,47 @@ Tests:
 ## F. Expressions
 
 ```text
-expression := assignment-expression
-assignment-expression := unary-expression
-                       | lvalue assignment-operator expression
-unary-expression := primary
-                  | unary-operator unary-expression
-                  | ("++" | "--") lvalue
-primary := identifier
-         | literal
-         | "(" expression ")"
-         | call
-         | cast
-         | list-literal
-         | vector-or-rotation-literal
-         | primary "." identifier
-         | primary ("++" | "--")
-call := identifier "(" [ expression { "," expression } ] ")"
-cast := "(" type ")" unary-expression
+expression              := assignment-expression
+assignment-expression   := logical-expression [ assignment-operator expression ]
+logical-expression      := bitwise-or-expression { ( "&&" | "||" ) bitwise-or-expression }
+bitwise-or-expression   := bitwise-xor-expression { "|" bitwise-xor-expression }
+bitwise-xor-expression  := bitwise-and-expression { "^" bitwise-and-expression }
+bitwise-and-expression  := equality-expression { "&" equality-expression }
+equality-expression     := relational-expression { ( "==" | "!=" ) relational-expression }
+relational-expression   := shift-expression { ( "<" | "<=" | ">" | ">=" ) shift-expression }
+shift-expression        := additive-expression { ( "<<" | ">>" ) additive-expression }
+additive-expression     := subtractive-expression { "+" subtractive-expression }
+subtractive-expression  := multiplicative-expression { "-" multiplicative-expression }
+multiplicative-expression := unary-expression { ( "*" | "/" | "%" ) unary-expression }
+unary-expression        := primary-expression
+                         | ( "!" | "~" | "+" | "-" ) unary-expression
+                         | ( "++" | "--" ) lvalue
+primary-expression      := identifier
+                         | literal
+                         | "(" expression ")"
+                         | call-expression
+                         | cast-expression
+                         | list-literal
+                         | vector-or-rotation-literal
+                         | primary-expression "." identifier
+                         | primary-expression ( "++" | "--" )
+call-expression         := identifier "(" [ expression-list ] ")"
+cast-expression         := "(" type ")" unary-expression
+list-literal            := "[" [ expression-list ] "]"
+vector-or-rotation-literal := "<" expression "," expression "," expression [ "," expression ] ">"
+expression-list         := expression { "," expression }
+lvalue                  := identifier
+                         | identifier "." identifier
+                         | "(" lvalue ")"
+assignment-operator     := "=" | "+=" | "-=" | "*=" | "/=" | "%="
+literal                 := integer-literal | float-literal | string-literal
 ```
+
+`vector-or-rotation-literal` components are parsed at a precedence floor above relational operators; the production above intentionally over-approximates the component expression syntax.
 
 ### Precedence and associativity
 
-[Tested][Compiler grammar]
+[Official][Tested]
 
 | Precedence (low to high) | Operators | Associativity |
 |---|---|---|
@@ -238,6 +282,15 @@ Important distinctions:
 - `<` and `>` are both relational operators and vector/rotation literal delimiters. The parser resolves them by context; see `docs/vector-literal-contexts.md`.
 - `&&` and `||` have equal precedence and are left-grouped by neolint. The official operator page separately states that evaluation order is right-to-left and both operands are evaluated; precedence/grouping and runtime evaluation order are different claims.
 - Subtraction binds more tightly than addition in LSL. This is locked by `src/parser.rs::tests::logical_and_or_operators_share_lsl_precedence` and `src/parser.rs::tests::subtraction_has_higher_precedence_than_addition`.
+
+### Precedence source conflict: `+` and `-`
+
+The sources disagree:
+
+- [Official] [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators) places unary/binary subtraction above addition; the current neolint table follows that order.
+- [Compiler grammar] The pinned [`indra.y`](https://github.com/Sei-Lisa/LSL-compiler/blob/62a75b11f084be6aa94cab4a5a57b39909c4dfa9/indra.y) declares `%left '+' '-'`, which gives `+` and `-` equal precedence in that snapshot.
+
+neolint deliberately follows the official operator page and its regression test, not the conflicting pinned-grammar declaration. This is not evidence about modern simulator behavior. Do not treat the precedence table as simultaneously confirmed by both sources.
 
 ### Assignment restrictions
 
@@ -268,6 +321,23 @@ Tests:
 
 [Tested]
 
+Lexical terminals used by the expression grammar:
+
+```text
+identifier      := ( letter | "_" ) { letter | digit | "_" }
+integer-literal := digits
+float-literal   := digits "." [ digits ] [ exponent ]
+                 | "." digits [ exponent ]
+                 | digits exponent
+string-literal  := '"' { string-character } '"'
+digits          := digit { digit }
+exponent        := ( "e" | "E" ) [ "+" | "-" ] digits
+letter          := "A"..."Z" | "a"..."z"
+digit           := "0"..."9"
+string-character := "a character other than an unescaped quote or line break"
+                  | "\" "any character"
+```
+
 - Integers are decimal digit sequences; floats include `.5`, `1.`, and exponent forms such as `1e-3`.
 - Strings are double-quoted; escaped quotes are retained as string content by the lexer.
 - List literals use `[ ... ]`.
@@ -297,7 +367,7 @@ Actual syntax codes in `src/parser.rs` are listed below. There is no `PAR002` in
 | `PAR003` | expected parameter type | `integer f(void) {}` | `src/parser.rs::tests::rejects_void_as_a_parameter_list_marker` |
 | `PAR004` | expected event handler inside state | `default { integer value; }` | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` |
 | `PAR005` | expected expression after operator | `integer x = 1 + ;` | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` |
-| `PAR006` | expected expression | `if () {}` | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` |
+| `PAR006` | expected expression, including an empty `for` condition | `if () {}` or `for (;;) ;` | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics`; `tests/grammar_inventory.rs::for_condition_is_required_inventory` |
 | `PAR007` | required token missing or unexpected | `integer x = 1 }` | `src/parser.rs::tests::reports_missing_semicolon` |
 | `PAR008` | typed declaration in `for` initializer | `for (integer i = 0; ...)` | `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers` |
 | `PAR009` | global declaration/function after states | `default {} integer x;` | `src/parser.rs::tests::rejects_global_variables_declared_after_states` |
@@ -359,18 +429,18 @@ See:
 | Expression statement | `tests/grammar_inventory.rs::expressions_inventory_positive` | — | Tested |
 | Assignment / compound | `src/parser.rs::tests::accepts_variable_assignment_targets_and_chained_assignments` | `src/parser.rs::tests::rejects_assignment_to_non_variable_expressions` | Tested |
 | `if` / `else` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Tested |
-| `for` | `tests/grammar_inventory.rs::statements_inventory_positive`; `src/parser.rs::tests::accepts_for_expression_lists` | `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers` | Tested; comma list from compiler grammar |
+| `for` | `tests/grammar_inventory.rs::statements_inventory_positive`; `src/parser.rs::tests::accepts_for_expression_lists`; `tests/grammar_inventory.rs::for_condition_is_required_inventory` | `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers` | Tested; comma list from compiler grammar |
 | `while` / `do-while` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Tested |
-| `return` | `tests/grammar_inventory.rs::statements_inventory_positive` | `src/parser.rs::tests::rejects_explicit_void_return_type` (type syntax) | Tested; value rules semantic |
+| `return` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Syntax tested; value rules semantic |
 | `jump` / label | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Syntax tested; scope semantically checked |
 | State change | `src/parser.rs::tests::accepts_state_change_to_default`; `tests/state_change_contexts.rs::event_handlers_accept_named_and_default_state_changes` | `src/parser.rs::tests::rejects_state_change_without_target` | Tested; context caveat |
-| Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals` | `src/lexer.rs::tests::unexpected_unicode_outside_string_is_reported_without_panic` | Tested |
-| Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested |
+| Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals` | — | Tested |
+| Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | — | Tested |
 | Unary/binary/logical/comparison | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::logical_and_or_operators_share_lsl_precedence` | — | Tested |
 | Increment/decrement | `src/parser.rs::tests::accepts_increment_and_decrement_of_variables` | `src/parser.rs::tests::rejects_increment_and_decrement_of_non_variables` | Tested |
-| List/vector/rotation literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::declaration_initializers_cover_literal_expressions_and_commas` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested |
+| List/vector/rotation literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::declaration_initializers_cover_literal_expressions_and_commas` | — | Tested |
 | Component access | `src/parser.rs::tests::accepts_component_access_on_vector_and_rotation_variables` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested |
-| `<`/`>` ambiguity | `tests/vector_literal_contexts.rs::relational_angle_brackets_remain_conservative` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested; inference conservative |
+| `<`/`>` ambiguity | `tests/vector_literal_contexts.rs::relational_angle_brackets_remain_conservative` | — | Tested; inference conservative |
 | Malformed delimiters | — | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` | Tested |
 
 ## References
