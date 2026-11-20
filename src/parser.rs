@@ -719,14 +719,8 @@ mod tests {
 
     #[test]
     fn logical_and_or_operators_share_lsl_precedence() {
-        assert_eq!(
-            binary_precedence(TokenKind::OrOr),
-            Some((3, false))
-        );
-        assert_eq!(
-            binary_precedence(TokenKind::AndAnd),
-            Some((3, false))
-        );
+        assert_eq!(binary_precedence(TokenKind::OrOr), Some((3, false)));
+        assert_eq!(binary_precedence(TokenKind::AndAnd), Some((3, false)));
 
         let diagnostics =
             parse_source("default { state_entry() { integer result = 1 || 1 && 0; } }");
