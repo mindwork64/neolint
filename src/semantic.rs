@@ -32,6 +32,7 @@ fn function_header_at(tokens: &[Token], index: usize) -> Option<(usize, usize, S
             return Some((name_index, open_index, return_type.to_owned()));
         }
     } else if tokens[index].kind == TokenKind::Identifier
+        && (index == 0 || !is_value_type(tokens[index - 1].kind))
         && tokens.get(index + 1)?.kind == TokenKind::LParen
     {
         return Some((index, index + 1, "void".to_owned()));
@@ -466,6 +467,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
         let name = if is_declaration_type(token.kind) {
             tokens.get(index + 1)
         } else if token.kind == TokenKind::Identifier
+            && (index == 0 || !is_declaration_type(tokens[index - 1].kind))
             && tokens.get(index + 1).map(|item| item.kind) == Some(TokenKind::LParen)
         {
             Some(token)
