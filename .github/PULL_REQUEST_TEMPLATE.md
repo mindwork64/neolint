@@ -24,9 +24,9 @@ Describe the behavior or documentation change and the reason for it.
 
 - [ ] Relevant repository docs are updated.
 - [ ] Relevant GitHub Wiki pages are updated in the Wiki repository, or this PR explains why no Wiki change is needed.
-- [ ] Relevant Linear issues reflect the shipped scope, acceptance criteria and remaining work.
-- [ ] Parent issues remain open while required subtasks are incomplete.
-- [ ] After merge, record the PR number, merge commit SHA and CI run in Linear; update Wiki and milestone progress.
+- [ ] Relevant GitHub Issues reflect the shipped scope, acceptance criteria and remaining work.
+- [ ] Dependencies and related work use GitHub issue references; parent issues remain open while required subtasks are incomplete.
+- [ ] After merge, record the PR number, merge commit SHA and CI run in the affected GitHub Issues; update Wiki and configured GitHub milestone/project tracking.
 
 ## Scope control
 
