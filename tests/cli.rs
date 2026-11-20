@@ -26,11 +26,7 @@ fn severity_override_changes_exit_code_and_output() {
     let source = directory.join("wrong-argument.lsl");
     let config = directory.join("neolint.conf");
 
-    fs::write(
-        &source,
-        r#"default { state_entry() { llOwnerSay(42); } }"#,
-    )
-    .unwrap();
+    fs::write(&source, r#"default { state_entry() { llOwnerSay(42); } }"#).unwrap();
     fs::write(&config, "severity.SEM004 = warning\n").unwrap();
 
     let output = neolint()
