@@ -69,6 +69,10 @@ Binary expression inference is deliberately conservative. It covers supported nu
 
 A clean result does not mean full semantic validation or complete lint-rule coverage has passed.
 
+## Regression corpus
+
+The repository includes a project-authored, offline regression corpus of small, medium, large and intentionally invalid LSL scripts. See [docs/corpus.md](docs/corpus.md) for provenance, coverage, manifest format and runner details.
+
 ## Configuration
 
 A configuration file is a small text file:
