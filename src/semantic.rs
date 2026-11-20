@@ -2924,31 +2924,48 @@ fn count_call_arguments(tokens: &[Token], open_index: usize) -> Option<(usize, u
     None
 }
 
+fn closes_explicit_cast_parentheses(tokens: &[Token], close_index: usize) -> bool {
+    if tokens.get(close_index).map(|token| token.kind) != Some(TokenKind::RParen) {
+        return false;
+    }
+
+    let Some(open_index) = close_index.checked_sub(2) else {
+        return false;
+    };
+    tokens.get(open_index).map(|token| token.kind) == Some(TokenKind::LParen)
+        && tokens
+            .get(open_index + 1)
+            .is_some_and(|token| lsl_type_name(token.kind).is_some())
+}
+
 fn starts_vector_literal(tokens: &[Token], index: usize) -> bool {
     let Some(previous) = index.checked_sub(1).and_then(|index| tokens.get(index)) else {
         return true;
     };
 
-    matches!(
-        previous.kind,
+    match previous.kind {
         TokenKind::LParen
-            | TokenKind::RParen
-            | TokenKind::LBracket
-            | TokenKind::Comma
-            | TokenKind::Equal
-            | TokenKind::Question
-            | TokenKind::Colon
-            | TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Star
-            | TokenKind::Slash
-            | TokenKind::Percent
-            | TokenKind::And
-            | TokenKind::Or
-            | TokenKind::Xor
-            | TokenKind::AndAnd
-            | TokenKind::OrOr
-    )
+        | TokenKind::LBracket
+        | TokenKind::Comma
+        | TokenKind::Equal
+        | TokenKind::Question
+        | TokenKind::Colon
+        | TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::And
+        | TokenKind::Or
+        | TokenKind::Xor
+        | TokenKind::AndAnd
+        | TokenKind::OrOr => true,
+        // Only an explicit cast such as `(vector)<...>` can put a vector
+        // literal immediately after a closing parenthesis. Otherwise this is
+        // a relational operator, e.g. `(left) < right`.
+        TokenKind::RParen => closes_explicit_cast_parentheses(tokens, index - 1),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -4372,5 +4389,93 @@ mod tests {
             "integer first(integer value) { return value; } float second(float amount) { return amount; }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn does_not_treat_parenthesized_comparison_as_vector_literal() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer left; string text = (left) < 2, other = 3.5; } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM015")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 2, "{diagnostics:?}");
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("'text'") && item.message.contains("integer, expected string")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("'other'") && item.message.contains("float, expected string")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_treat_call_result_comparison_as_vector_literal() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { string text; text = llGetListLength([]) < 1; } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM016")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0].message.contains("integer, expected string"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_count_call_arguments_past_parenthesized_comparison() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer left; llOwnerSay((left) < 2, \"second\"); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM002")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_vector_literal_after_explicit_cast_whole() {
+        let (tokens, lexical_diagnostics) = lex(
+            "default { state_entry() { vector first = (vector)<1, 2, 3>, second = <4, 5, 6>; } }",
+        );
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+
+        let scopes = ScopeModel::build(&tokens);
+        assert_eq!(scopes.initializers.len(), 2);
+        assert_eq!(
+            tokens[scopes.initializers[0].expression_start].kind,
+            TokenKind::LParen
+        );
+        assert_eq!(
+            tokens[scopes.initializers[1].expression_start].kind,
+            TokenKind::Less
+        );
+        for initializer in &scopes.initializers {
+            assert_eq!(
+                tokens[initializer.expression_end - 1].kind,
+                TokenKind::Greater
+            );
+        }
+        assert_eq!(
+            tokens[scopes.initializers[0].expression_end].kind,
+            TokenKind::Comma
+        );
+        assert_eq!(
+            tokens[scopes.initializers[1].expression_end].kind,
+            TokenKind::Semicolon
+        );
     }
 }
