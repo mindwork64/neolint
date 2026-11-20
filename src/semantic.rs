@@ -601,12 +601,40 @@ fn unknown_event_body_ranges(tokens: &[Token], scopes: &ScopeModel) -> Vec<(usiz
     ranges
 }
 
+fn unknown_function_argument_ranges(tokens: &[Token]) -> Vec<(usize, usize)> {
+    let builtins = &definitions().functions;
+    let events = &definitions().events;
+    let user_functions = collect_user_functions(tokens);
+    let mut ranges = Vec::new();
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Identifier
+            || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            || builtins.contains_key(token.lexeme.as_str())
+            || events.contains_key(token.lexeme.as_str())
+            || user_functions.contains_key(token.lexeme.as_str())
+        {
+            continue;
+        }
+
+        let Some(close) = matching_paren(tokens, index + 1) else {
+            continue;
+        };
+        if close > index + 2 {
+            ranges.push((index + 2, close));
+        }
+    }
+
+    ranges
+}
+
 fn analyze_unresolved_variables(
     tokens: &[Token],
     scopes: &ScopeModel,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let unknown_event_ranges = unknown_event_body_ranges(tokens, scopes);
+    let unknown_call_argument_ranges = unknown_function_argument_ranges(tokens);
     let constants = &definitions().constants;
 
     for (index, token) in tokens.iter().enumerate() {
@@ -616,6 +644,7 @@ fn analyze_unresolved_variables(
 
         if unknown_event_ranges
             .iter()
+            .chain(unknown_call_argument_ranges.iter())
             .any(|(start, end)| (*start..*end).contains(&index))
         {
             continue;
@@ -2240,9 +2269,10 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unknown_extension_function_names() {
-        let diagnostics =
-            analyze_source("default { state_entry() { llExtensionSpecificCall(); } }");
+    fn ignores_unknown_extension_function_names_and_arguments() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llExtensionSpecificCall(extension_value); } }",
+        );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM012"),
             "{diagnostics:?}"
