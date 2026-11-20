@@ -1053,6 +1053,12 @@ mod tests {
     }
 
     #[test]
+    fn accepts_hex_integer_literal_as_function_argument() {
+        let diagnostics = parse_source(r#"default { state_entry() { llSay(0x0, "hex"); } }"#);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
     fn rejects_malformed_hex_prefixes_as_syntax_errors() {
         for source in [
             "integer value = 0x; default { }",

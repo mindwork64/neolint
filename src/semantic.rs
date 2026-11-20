@@ -4726,6 +4726,8 @@ mod tests {
             integer false_zero() { while (0x0) { } }
             integer wrap_zero() { while (0xFFFFFFFF + 1) { } }
             integer exponent_digit() { while (0x1e3 == 483) { } }
+            integer bitwise() { while (0xFF & 0x0F) { } }
+            integer shifted() { while ((0x10 << 1) == 0x20) { } }
             default { }"#,
         );
         assert_eq!(
