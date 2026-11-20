@@ -25,6 +25,7 @@ fn is_value_type(kind: TokenKind) -> bool {
 struct VariableBinding {
     type_name: String,
     declaration_index: usize,
+    span: crate::diagnostic::Span,
 }
 
 #[derive(Debug, Default)]
@@ -36,6 +37,7 @@ struct LexicalScope {
 struct ScopeModel {
     scopes: Vec<LexicalScope>,
     scope_at: Vec<usize>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl ScopeModel {
@@ -64,7 +66,11 @@ impl ScopeModel {
             }
         }
 
-        let mut model = Self { scopes, scope_at };
+        let mut model = Self {
+            scopes,
+            scope_at,
+            diagnostics: Vec::new(),
+        };
         model.register_function_parameters(tokens);
         model.register_event_parameters(tokens);
         model.register_variables(tokens);
@@ -74,18 +80,39 @@ impl ScopeModel {
     fn add_variable(
         &mut self,
         scope_id: usize,
-        name: &str,
+        name: &Token,
         type_name: &str,
         declaration_index: usize,
     ) {
+        if scope_id != 0 {
+            if let Some(previous) = self
+                .scopes
+                .get(scope_id)
+                .and_then(|scope| scope.variables.get(&name.lexeme))
+                .and_then(|bindings| bindings.last())
+            {
+                self.diagnostics.push(Diagnostic {
+                    code: "SEM007",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "duplicate variable '{}' in the same scope; first declared at {}:{}",
+                        name.lexeme, previous.span.line, previous.span.column
+                    ),
+                    span: name.span,
+                });
+            }
+        }
+
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             scope
                 .variables
-                .entry(name.to_owned())
+                .entry(name.lexeme.clone())
                 .or_default()
                 .push(VariableBinding {
                     type_name: type_name.to_owned(),
                     declaration_index,
+                    span: name.span,
                 });
         }
     }
@@ -195,7 +222,7 @@ impl ScopeModel {
             if let Some(type_name) = lsl_type_name(tokens[index].kind) {
                 if let Some(name) = tokens.get(index + 1) {
                     if name.kind == TokenKind::Identifier {
-                        self.add_variable(scope_id, &name.lexeme, type_name, index + 1);
+                        self.add_variable(scope_id, name, type_name, index + 1);
                         index += 2;
                         continue;
                     }
@@ -255,7 +282,7 @@ impl ScopeModel {
         let Some(first_name) = tokens.get(type_index + 1) else {
             return;
         };
-        self.add_variable(scope_id, &first_name.lexeme, type_name, type_index + 1);
+        self.add_variable(scope_id, first_name, type_name, type_index + 1);
 
         let mut index = type_index + 2;
         let mut paren_depth = 0usize;
@@ -282,7 +309,7 @@ impl ScopeModel {
             {
                 if let Some(name) = tokens.get(index + 1) {
                     if name.kind == TokenKind::Identifier {
-                        self.add_variable(scope_id, &name.lexeme, type_name, index + 1);
+                        self.add_variable(scope_id, name, type_name, index + 1);
                         index += 2;
                         continue;
                     }
@@ -462,7 +489,8 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
         }
     }
 
-    let scopes = ScopeModel::build(tokens);
+    let mut scopes = ScopeModel::build(tokens);
+    diagnostics.extend(std::mem::take(&mut scopes.diagnostics));
     let user_functions = collect_user_functions(tokens);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -1186,6 +1214,36 @@ mod tests {
             !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn reports_duplicate_local_variables_in_the_same_scope() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer count; integer count; } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM007").count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_local_variable_redeclaration_of_a_parameter() {
+        let diagnostics = analyze_source(
+            "integer process(integer value) { integer value; return value; }",
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "SEM007" && item.message.contains("value")));
+    }
+
+    #[test]
+    fn allows_shadowing_in_a_nested_block() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { integer value; { string value; llOwnerSay(value); } } }"#,
+        );
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM007"), "{diagnostics:?}");
     }
 
     #[test]
