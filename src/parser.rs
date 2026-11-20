@@ -6,6 +6,7 @@ struct Parser<'a> {
     current: usize,
     diagnostics: Vec<Diagnostic>,
     states_started: bool,
+    default_state_seen: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -15,6 +16,7 @@ impl<'a> Parser<'a> {
             current: 0,
             diagnostics: Vec::new(),
             states_started: false,
+            default_state_seen: false,
         }
     }
 
@@ -101,9 +103,19 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_state(&mut self) {
-        if self.matches(TokenKind::KwDefault) {
-            // The default state has no explicit name.
+        if self.check(TokenKind::KwDefault) {
+            if self.default_state_seen {
+                self.error_here("PAR014", "only one default state is allowed");
+            }
+            self.advance();
+            self.default_state_seen = true;
         } else {
+            if !self.default_state_seen {
+                self.error_here(
+                    "PAR013",
+                    "the default state must be defined before other states",
+                );
+            }
             self.advance(); // state
             self.expect(TokenKind::Identifier, "expected a state name after 'state'");
         }
@@ -801,6 +813,7 @@ mod tests {
         let diagnostics = parse_source(
             r#"
             float add(float a, float b) { return a + b; }
+            default { state_entry() { } }
             state running
             {
                 state_entry() { vector p = <1.0, 2.0, 3.0>; }
@@ -808,6 +821,41 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_named_state_before_default() {
+        let diagnostics =
+            parse_source("state running { state_entry() { } } default { state_entry() { } }");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_named_state_without_default() {
+        let diagnostics = parse_source("state running { state_entry() { } }");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_default_states() {
+        let diagnostics =
+            parse_source("default { state_entry() { } } default { state_entry() { } }");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR014"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
