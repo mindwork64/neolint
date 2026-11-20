@@ -2083,9 +2083,7 @@ fn infer_expression_type(
         let component = tokens[start + 2].lexeme.as_str();
         return match base_type.as_str() {
             "vector" if matches!(component, "x" | "y" | "z") => Some("float".to_owned()),
-            "rotation" if matches!(component, "x" | "y" | "z" | "s") => {
-                Some("float".to_owned())
-            }
+            "rotation" if matches!(component, "x" | "y" | "z" | "s") => Some("float".to_owned()),
             _ => None,
         };
     }
