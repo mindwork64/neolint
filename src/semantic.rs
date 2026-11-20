@@ -2197,10 +2197,7 @@ fn assignment_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
     Some(tokens.len())
 }
 
-fn component_assignment_target(
-    tokens: &[Token],
-    operator_index: usize,
-) -> Option<(usize, usize)> {
+fn component_assignment_target(tokens: &[Token], operator_index: usize) -> Option<(usize, usize)> {
     let mut end = operator_index;
     let mut grouped_start = None;
 
@@ -2295,9 +2292,13 @@ fn analyze_component_assignments(
             continue;
         }
 
-        let Some(value_type) =
-            infer_expression_type(tokens, expression_start, expression_end, scopes, user_functions)
-        else {
+        let Some(value_type) = infer_expression_type(
+            tokens,
+            expression_start,
+            expression_end,
+            scopes,
+            user_functions,
+        ) else {
             continue;
         };
 
@@ -3350,7 +3351,10 @@ mod tests {
         let diagnostics = analyze_source(
             "default { state_entry() { llExtensionVector().x = 1.0; vector position; position.x = llExtensionValue(); } }",
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM018"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM018"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
