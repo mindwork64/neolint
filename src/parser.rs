@@ -7,6 +7,7 @@ struct Parser<'a> {
     diagnostics: Vec<Diagnostic>,
     states_started: bool,
     default_state_seen: bool,
+    missing_default_reported: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -17,6 +18,7 @@ impl<'a> Parser<'a> {
             diagnostics: Vec::new(),
             states_started: false,
             default_state_seen: false,
+            missing_default_reported: false,
         }
     }
 
@@ -45,6 +47,11 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
+
+        if !self.default_state_seen && !self.missing_default_reported {
+            self.error_here("PAR013", "the default state must be defined");
+        }
+
         self.diagnostics
     }
 
@@ -110,11 +117,12 @@ impl<'a> Parser<'a> {
             self.advance();
             self.default_state_seen = true;
         } else {
-            if !self.default_state_seen {
+            if !self.default_state_seen && !self.missing_default_reported {
                 self.error_here(
                     "PAR013",
                     "the default state must be defined before other states",
                 );
+                self.missing_default_reported = true;
             }
             self.advance(); // state
             self.expect(TokenKind::Identifier, "expected a state name after 'state'");
@@ -824,13 +832,54 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_source_without_default_state() {
+        let diagnostics = parse_source("");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_global_variables_without_states() {
+        let diagnostics = parse_source("integer value;");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_global_functions_without_states() {
+        let diagnostics = parse_source("integer value() { return 1; }");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn rejects_named_state_before_default() {
         let diagnostics =
             parse_source("state running { state_entry() { } } default { state_entry() { } }");
-        assert!(
+        assert_eq!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "PAR013"),
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            1,
             "{diagnostics:?}"
         );
     }
@@ -838,10 +887,12 @@ mod tests {
     #[test]
     fn rejects_named_state_without_default() {
         let diagnostics = parse_source("state running { state_entry() { } }");
-        assert!(
+        assert_eq!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "PAR013"),
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            1,
             "{diagnostics:?}"
         );
     }
@@ -850,12 +901,36 @@ mod tests {
     fn rejects_duplicate_default_states() {
         let diagnostics =
             parse_source("default { state_entry() { } } default { state_entry() { } }");
-        assert!(
+        assert_eq!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "PAR014"),
+                .filter(|diagnostic| diagnostic.code == "PAR014")
+                .count(),
+            1,
             "{diagnostics:?}"
         );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR013")
+                .count(),
+            0,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_single_default_state_without_named_states() {
+        let diagnostics = parse_source("default { state_entry() { } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_default_followed_by_multiple_named_states() {
+        let diagnostics = parse_source(
+            "default { state_entry() { } } state first { state_entry() { } } state second { state_entry() { } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
@@ -901,12 +976,6 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "PAR007"));
-    }
-
-    #[test]
-    fn accepts_global_declarations_without_state_during_parser_pass() {
-        let diagnostics = parse_source("integer x = 1;");
-        assert!(diagnostics.is_empty());
     }
 
     #[test]
