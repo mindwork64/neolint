@@ -560,8 +560,8 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
         | TokenKind::XorEqual
         | TokenKind::ShiftLeftEqual
         | TokenKind::ShiftRightEqual => return Some((1, true)),
-        TokenKind::OrOr => 3,
-        TokenKind::AndAnd => 4,
+        // LSL gives && and || equal precedence; both are left-associative.
+        TokenKind::OrOr | TokenKind::AndAnd => 3,
         TokenKind::Or => 5,
         TokenKind::Xor => 6,
         TokenKind::And => 7,
@@ -715,6 +715,22 @@ mod tests {
     fn accepts_global_declarations_without_state_during_parser_pass() {
         let diagnostics = parse_source("integer x = 1;");
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn logical_and_or_operators_share_lsl_precedence() {
+        assert_eq!(
+            binary_precedence(TokenKind::OrOr),
+            Some((3, false))
+        );
+        assert_eq!(
+            binary_precedence(TokenKind::AndAnd),
+            Some((3, false))
+        );
+
+        let diagnostics =
+            parse_source("default { state_entry() { integer result = 1 || 1 && 0; } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
