@@ -804,7 +804,6 @@ fn analyze_function_returns(
     }
 }
 
-
 struct CodeScopeRange {
     name: String,
     start: usize,
@@ -892,8 +891,7 @@ fn collect_jump_code_scopes(tokens: &[Token], scopes: &ScopeModel) -> Vec<CodeSc
             if scopes.scope_at.get(event_index) != Some(&state_scope_id)
                 || event_token.kind != TokenKind::Identifier
                 || !events.contains_key(event_token.lexeme.as_str())
-                || tokens.get(event_index + 1).map(|item| item.kind)
-                    != Some(TokenKind::LParen)
+                || tokens.get(event_index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
             {
                 event_index += 1;
                 continue;
@@ -926,11 +924,7 @@ fn collect_jump_code_scopes(tokens: &[Token], scopes: &ScopeModel) -> Vec<CodeSc
     code_scopes
 }
 
-fn analyze_jump_labels(
-    tokens: &[Token],
-    scopes: &ScopeModel,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn analyze_jump_labels(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut Vec<Diagnostic>) {
     for code_scope in collect_jump_code_scopes(tokens, scopes) {
         let mut labels: HashMap<String, JumpLabel> = HashMap::new();
 
@@ -952,10 +946,7 @@ fn analyze_jump_labels(
                     kind: DiagnosticKind::Semantic,
                     message: format!(
                         "duplicate jump label '{}' in {}; first declared at {}:{}",
-                        label.lexeme,
-                        code_scope.name,
-                        previous.span.line,
-                        previous.span.column
+                        label.lexeme, code_scope.name, previous.span.line, previous.span.column
                     ),
                     span: label.span,
                 });
@@ -1982,9 +1973,8 @@ mod tests {
 
     #[test]
     fn reports_duplicate_labels_across_nested_blocks() {
-        let diagnostics = analyze_source(
-            "integer get_value() { @same; { @same; } return 1; } default { }",
-        );
+        let diagnostics =
+            analyze_source("integer get_value() { @same; { @same; } return 1; } default { }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM009"),
             "{diagnostics:?}"
