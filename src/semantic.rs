@@ -3374,7 +3374,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(invalid.len(), 2, "{diagnostics:?}");
         assert!(
-            invalid.iter().all(|item| item.message.contains("not supported")),
+            invalid
+                .iter()
+                .all(|item| item.message.contains("not supported")),
             "{diagnostics:?}"
         );
     }
@@ -3451,15 +3453,21 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(invalid.len(), 3, "{diagnostics:?}");
         assert!(
-            invalid.iter().any(|item| item.message.contains("integer and string")),
+            invalid
+                .iter()
+                .any(|item| item.message.contains("integer and string")),
             "{diagnostics:?}"
         );
         assert!(
-            invalid.iter().any(|item| item.message.contains("float and integer")),
+            invalid
+                .iter()
+                .any(|item| item.message.contains("float and integer")),
             "{diagnostics:?}"
         );
         assert!(
-            invalid.iter().any(|item| item.message.contains("string and string")),
+            invalid
+                .iter()
+                .any(|item| item.message.contains("string and string")),
             "{diagnostics:?}"
         );
     }
