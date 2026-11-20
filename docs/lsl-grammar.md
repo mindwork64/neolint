@@ -91,17 +91,18 @@ declaration        := type identifier [ "=" initializer ] { "," identifier [ "="
 initializer        := expression
 ```
 
-- [Official] Global variables are declared at script scope, above state declarations.
-- [Tested] neolint accepts global and local declarations, initializers, and all seven types.
-- [Limitation] The pinned compiler grammar describes one declarator per declaration; neolint accepts comma-separated declarators such as `integer a, b;`. The official Variables page does not demonstrate the comma form. This is a permissive implementation extension, not a confirmed modern LSL rule.
-- [Unverified] neolint accepts arbitrary expressions in global initializers; the pinned grammar describes `simple_assignable`, which is narrower. Constant-expression restrictions are not enforced by the parser.
-- [Unverified] The parser accepts a declaration as the single body of a control statement; the pinned compiler marks declarations as disallowed for such bodies. Compiler/runtime behavior is not established here.
+- [Official] Global variables are declared at script scope, above state declarations. The official [LSL Variables](https://wiki.secondlife.com/wiki/LSL_Variables) page shows one declarator per declaration and does not demonstrate the comma form.
+- [Tested] neolint accepts global and local declarations, initializers, and all seven types, including comma-separated declarators with independent initializers.
+- [Compiler grammar][Limitation] The pinned [`indra.y`](https://github.com/Sei-Lisa/LSL-compiler/blob/62a75b11f084be6aa94cab4a5a57b39909c4dfa9/indra.y) grammar has a single `name_type` per `global_variable`; neolint's comma-separated form is a permissive implementation extension. Modern compiler support is not established.
+- [Official][Compiler grammar][Limitation] The official [LSL 101 variable-initialization page](https://wiki.secondlife.com/wiki/LSL_101/Variable_Initialization) says a global initializer can only be a simple value, not a function result or operator expression; the pinned grammar narrows this to `simple_assignable`. neolint currently accepts arbitrary expressions and does not enforce the historical constant-expression restriction. Modern compiler behavior is not established.
+- [Compiler grammar][Unverified] The pinned grammar marks declarations as disallowed as the single body of `if`/`else`/`for`/`while`/`do` statements (`mAllowDeclarations = FALSE`). The official [If](https://wiki.secondlife.com/wiki/If) page says a branch may be a single statement but does not resolve whether declarations qualify. neolint currently accepts the form and leaves this unverified.
 
 Tests:
 
 - `tests/grammar_inventory.rs::declared_types_and_declarations_inventory_positive`
 - `src/parser.rs::tests::accepts_lists_casts_loops_and_conditionals`
 - `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers`
+- `src/parser.rs::tests::malformed_declarations_recover_without_losing_later_declarations`
 
 ### Functions and parameters
 
@@ -398,6 +399,20 @@ Actual syntax codes in `src/parser.rs` are listed below. There is no `PAR002` in
 
 Malformed delimiter and missing-token cases without a more specific code are expected to produce a syntax diagnostic; `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` checks representative cases.
 
+## H.1 Parser recovery contract
+
+The parser is token-based and has no AST. Recovery is intentionally local and deterministic:
+
+- [Tested] `synchronize_top_level` tracks brace/paren/bracket nesting before resuming at a top-level type, `void`, `default`, or `state`; malformed function bodies do not swallow the next state.
+- [Tested] Malformed event headers and event bodies are skipped with balanced delimiters. Recovery stops at the containing state's closing brace or at the next event-like `identifier "("` at state depth, so later handlers and states remain parseable.
+- [Tested] Expression failures at the first token consume one token and continue; failures after a partial expression synchronize to the enclosing statement boundary. Malformed argument lists consume through their matching `)`.
+- [Tested] Every loop has a progress guarantee: it consumes a token, returns, or reaches a delimiter boundary.
+- [Tested] EOF inside blocks, states, parameter lists, lists, and vector/rotation literals produces syntax diagnostics. Once the first EOF error is emitted, later missing-closing-token checks in the same parse are suppressed, so one truncated construct does not produce a brace cascade.
+- [Tested] `src/parser.rs::tests::incomplete_list_at_eof_reports_one_primary_diagnostic` and `src/parser.rs::tests::incomplete_block_at_eof_reports_one_primary_diagnostic` assert exact EOF positions.
+- [Tested] No malformed input panics in the bounded regression set.
+- [Tested] `src/parser.rs::tests::repeated_malformed_statements_are_bounded` exercises 64 repeated malformed statements; `src/parser.rs::tests::deeply_nested_expressions_do_not_panic` exercises 128 nested parentheses.
+- [Limitation] Recovery is heuristic at malformed outer constructs. Unbalanced braces can still make an inner construct appear to belong to the outer context; the parser reports that context rather than reconstructing the missing syntax.
+
 ## I. Semantic boundary
 
 The parser validates syntax and produces `DiagnosticKind::Syntax`. It does not construct a full AST. It deliberately does not enforce:
@@ -422,9 +437,9 @@ See:
 - [Official] `?:` is not LSL syntax; the parser rejects it.
 - [Official] `void` is not a source type; both `void f()` and `f(void)` are rejected.
 - [Tested] Typed declarations in `for` initializers are rejected (`PAR008`).
-- [Limitation] Comma-separated declarations are accepted by neolint but not described by the pinned viewer grammar; modern compiler support is unverified.
-- [Unverified] Global initializer constant-expression restrictions are not enforced.
-- [Unverified] Declarations as single control-statement bodies are accepted by neolint, while the extracted compiler marks declarations disallowed for those bodies.
+- [Limitation] Comma-separated declarations are accepted by neolint but are not described by the pinned viewer grammar; modern compiler support is unverified.
+- [Official][Compiler grammar][Limitation] Global initializer constant-expression restrictions are documented for historical LSL but are not enforced by neolint; modern compiler behavior is unverified.
+- [Compiler grammar][Unverified] Declarations as single control-statement bodies are accepted by neolint, while the extracted compiler marks declarations disallowed for those bodies.
 - [Compiler grammar][Tested] Comma-separated `for` initializer/increment lists are accepted; the official For page does not demonstrate them.
 - [Limitation] ASCII-only identifiers are an implementation limit, not established as an LSL requirement.
 - [Unverified] State changes inside user-defined functions and their historical `if` workaround; see the dedicated state document.
@@ -460,7 +475,11 @@ See:
 | List/vector/rotation literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::declaration_initializers_cover_literal_expressions_and_commas` | — | Tested |
 | Component access | `src/parser.rs::tests::accepts_component_access_on_vector_and_rotation_variables` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested |
 | `<`/`>` ambiguity | `tests/vector_literal_contexts.rs::relational_angle_brackets_remain_conservative` | — | Tested; inference conservative |
-| Malformed delimiters | — | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics` | Tested |
+| Malformed delimiters | — | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics`; `tests/grammar_inventory.rs::extra_closing_delimiters_are_rejected_without_large_cascades` | Tested |
+| Parser recovery after malformed handler | `tests/grammar_inventory.rs::recovery_keeps_later_event_and_state_after_malformed_handler` | `src/parser.rs::tests::recovers_from_a_malformed_event_body_before_a_valid_event`; `src/parser.rs::tests::recovers_from_a_malformed_handler_before_a_valid_state` | Tested; balanced event/state recovery |
+| Malformed declarations / parameters | — | `src/parser.rs::tests::malformed_declarations_recover_without_losing_later_declarations`; `src/parser.rs::tests::recovers_from_a_malformed_function_parameter_list_before_a_state` | Tested |
+| Malformed expressions / arguments | — | `src/parser.rs::tests::malformed_expression_reports_one_primary_diagnostic`; `src/parser.rs::tests::malformed_argument_list_recovers_to_the_outer_statement`; `tests/grammar_inventory.rs::adjacent_binary_operators_are_rejected_without_cascades` | Tested |
+| EOF / bounded stress | — | `tests/grammar_inventory.rs::incomplete_constructs_near_eof_report_syntax_errors`; `src/parser.rs::tests::incomplete_list_at_eof_reports_one_primary_diagnostic`; `src/parser.rs::tests::incomplete_block_at_eof_reports_one_primary_diagnostic`; `src/parser.rs::tests::repeated_malformed_statements_are_bounded`; `src/parser.rs::tests::deeply_nested_expressions_do_not_panic` | Tested; no timing assertions |
 
 ## References
 
@@ -469,6 +488,8 @@ See:
 - [LSL Wiki — State](https://wiki.secondlife.com/wiki/State)
 - [LSL Wiki — For](https://wiki.secondlife.com/wiki/For)
 - [LSL Wiki — LSL Variables](https://wiki.secondlife.com/wiki/LSL_Variables)
+- [LSL 101 — Variable Initialization](https://wiki.secondlife.com/wiki/LSL_101/Variable_Initialization)
+- [LSL Wiki — If](https://wiki.secondlife.com/wiki/If)
 - [LSL Wiki — User-Defined Functions](https://wiki.secondlife.com/wiki/Category:LSL_User-Defined_Functions)
 - [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators)
 - [Linden Lab LSL Guide](https://static-secondlife-com.s3.amazonaws.com/downloads/textures/guides/LSLGuide.pdf)
