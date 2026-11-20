@@ -2177,8 +2177,9 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("float")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
-            } else if left == "vector"
-                && (matches!(right, "integer" | "float") || right == "rotation")
+            } else if (left == "vector"
+                && (matches!(right, "integer" | "float") || right == "rotation"))
+                || (matches!(left, "integer" | "float") && right == "vector")
             {
                 Some("vector")
             } else {
@@ -2840,7 +2841,11 @@ fn infer_expression_type(
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
         let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
-        return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
+        return match operand_type.as_str() {
+            "integer" | "float" => Some(operand_type),
+            "vector" | "rotation" if tokens[start].kind == TokenKind::Minus => Some(operand_type),
+            _ => None,
+        };
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
         let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
@@ -3307,7 +3312,117 @@ mod tests {
                 .iter()
                 .filter(|item| item.code == "SEM004")
                 .count(),
-            4,
+            5,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn covers_confirmed_binary_type_matrix_rows() {
+        let cases: &[(TokenKind, &str, &str, Option<&'static str>)] = &[
+            (TokenKind::Plus, "integer", "list", Some("list")),
+            (TokenKind::Plus, "list", "integer", Some("list")),
+            (TokenKind::Plus, "string", "list", Some("list")),
+            (TokenKind::Plus, "list", "string", Some("list")),
+            (TokenKind::Plus, "vector", "list", Some("list")),
+            (TokenKind::Plus, "list", "rotation", Some("list")),
+            (TokenKind::Plus, "string", "key", None),
+            (TokenKind::Percent, "vector", "vector", Some("vector")),
+            (TokenKind::Percent, "integer", "integer", Some("integer")),
+            (TokenKind::And, "integer", "integer", Some("integer")),
+            (TokenKind::Or, "integer", "integer", Some("integer")),
+            (TokenKind::Xor, "integer", "integer", Some("integer")),
+            (TokenKind::ShiftLeft, "integer", "integer", Some("integer")),
+            (TokenKind::ShiftRight, "integer", "integer", Some("integer")),
+            (TokenKind::AndAnd, "integer", "integer", Some("integer")),
+            (TokenKind::OrOr, "integer", "integer", Some("integer")),
+            (TokenKind::And, "integer", "float", None),
+            (TokenKind::ShiftLeft, "integer", "float", None),
+            (TokenKind::Star, "integer", "vector", Some("vector")),
+            (TokenKind::Star, "float", "vector", Some("vector")),
+            (TokenKind::Star, "vector", "integer", Some("vector")),
+            (TokenKind::Star, "vector", "float", Some("vector")),
+            (TokenKind::Star, "vector", "vector", Some("float")),
+            (TokenKind::Star, "rotation", "vector", None),
+            (TokenKind::Slash, "vector", "vector", None),
+            (TokenKind::Minus, "list", "list", None),
+            (TokenKind::Plus, "vector", "integer", None),
+        ];
+
+        for &(operator, left, right, expected) in cases {
+            assert_eq!(
+                infer_binary_result_type(operator, left, right),
+                expected,
+                "{operator:?} {left} {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn infers_matrix_rows_in_typed_contexts() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() {
+                llDumpList2String("x" + [1], ",");
+                llDumpList2String([1] + "x", ",");
+                llSetPos(<1, 2, 3> % <4, 5, 6>);
+                llOwnerSay("x" + [1]);
+                llOwnerSay([1] + "x");
+                llOwnerSay(<1, 2, 3> % <4, 5, 6>);
+                llOwnerSay(1 & 2);
+                llOwnerSay(1 | 2);
+                llOwnerSay(1 ^ 2);
+                llOwnerSay(1 << 2);
+                llOwnerSay(1 >> 2);
+                llOwnerSay(1 && 2);
+                llOwnerSay(1 || 2);
+            } }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            10,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_scalar_vector_multiplication_both_orders() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llSetPos(2 * <1, 2, 3>); llSetPos(2.0 * <1, 2, 3>); llOwnerSay(2 * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_vector_and_rotation_unary_minus() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llSetPos(-<1, 2, 3>); llSetRot(-llGetRot()); llOwnerSay(-<1, 2, 3>); llOwnerSay(-llGetRot()); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_rotation_times_vector_unresolved() {
+        let diagnostics =
+            analyze_source("default { state_entry() { llOwnerSay(llGetRot() * <1, 2, 3>); } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
         );
     }
@@ -4042,12 +4157,92 @@ mod tests {
             !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
         );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
     fn unresolved_variable_types_remain_conservative() {
         let diagnostics =
             analyze_source(r#"default { state_entry() { llOwnerSay(notDeclared); } }"#);
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_initializer_mismatches_for_resolved_scope_names() {
+        let diagnostics = analyze_source(
+            "integer global_integer = 1; string bad_global = global_integer; default { state_entry() { integer prior; string bad_prior = prior; integer i; for (i = 0; i < 1; i++) { integer inner = 1; string bad_inner = inner; } { float nested; string bad_nested = nested; } } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM015")
+                .count(),
+            4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_parameter_and_nested_shadowing_before_globals() {
+        let diagnostics = analyze_source(
+            "string shadowed; integer process(integer shadowed) { { float shadowed; llSleep(shadowed); } llOwnerSay(shadowed); return shadowed; } default { touch_start(integer shadowed) { llOwnerSay(shadowed); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_names_in_complex_initializers_and_loop_bodies() {
+        let diagnostics = analyze_source(
+            "integer global = 1; default { state_entry() { integer first = global + 1; integer second = first + 1; integer i; for (i = 0; i < second; i++) { integer inner = i; llOwnerSay(inner); } llOwnerSay(second); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_extension_calls_in_initializers_conservative() {
+        let diagnostics = analyze_source(
+            "integer global = extensionOuter(extensionInner(missing)); default { state_entry() { integer local = extensionOuter(extensionInner(missing)); llOwnerSay((string)local); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_unresolved_initializer_without_guessing_type() {
+        let diagnostics =
+            analyze_source("default { state_entry() { integer value = missing + 1; } }");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.code == "SEM012" && item.severity == Severity::Warning),
+            "{diagnostics:?}"
+        );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
@@ -5066,9 +5261,14 @@ mod tests {
                 .filter(|item| item.code == "SEM017")
                 .collect::<Vec<_>>();
             assert_eq!(mismatches.len(), 1, "{operator}: {diagnostics:?}");
+            let expected = if operator == "*=" {
+                "yields type vector, expected integer"
+            } else {
+                "integer and vector"
+            };
             assert!(
                 mismatches[0].message.contains(operator)
-                    && mismatches[0].message.contains("integer and vector"),
+                    && mismatches[0].message.contains(expected),
                 "{operator}: {diagnostics:?}"
             );
         }
