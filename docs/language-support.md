@@ -4,7 +4,7 @@ This document records the initial language model used by neolint. It is intentio
 
 ## Source structure
 
-An LSL script contains global declarations and user-defined functions, plus state definitions. Every script has a `default` state. Other states are introduced with `state name`. A state-change statement targets either a named state or the default state: `state running;` and `state default;` are both valid. Event handlers are declared inside states and contain ordinary statement blocks. User-defined functions must appear before state definitions; a later function declaration is rejected with `PAR009`. Functions with no return value omit the return type. See [State](https://wiki.secondlife.com/wiki/State) for the state-change grammar.
+An LSL script contains global declarations and user-defined functions, plus state definitions. Every script has a `default` state. Other states are introduced with `state name`. A state-change statement targets either a named state or the default state: `state running;` and `state default;` are both valid. Event handlers are declared inside states and contain ordinary statement blocks. User-defined functions must appear before state definitions; a later function declaration is rejected with `PAR009`. Functions with no return value omit the return type. See [State](https://wiki.secondlife.com/wiki/State) for the state-change grammar. Compiler context restrictions and the unresolved historical workaround are documented in [state-change-contexts.md](state-change-contexts.md).
 
 ## Built-in value types
 
