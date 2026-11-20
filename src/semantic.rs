@@ -2948,6 +2948,11 @@ fn starts_vector_literal(tokens: &[Token], index: usize) -> bool {
         | TokenKind::LBracket
         | TokenKind::Comma
         | TokenKind::Equal
+        | TokenKind::PlusEqual
+        | TokenKind::MinusEqual
+        | TokenKind::StarEqual
+        | TokenKind::SlashEqual
+        | TokenKind::PercentEqual
         | TokenKind::Question
         | TokenKind::Colon
         | TokenKind::Plus
@@ -4477,5 +4482,47 @@ mod tests {
             tokens[scopes.initializers[1].expression_end].kind,
             TokenKind::Semicolon
         );
+    }
+
+    #[test]
+    fn reports_compound_assignment_with_direct_vector_literal_rhs() {
+        for operator in ["+=", "-=", "*=", "/=", "%="] {
+            let source = format!(
+                "default {{ state_entry() {{ integer count; count {operator} <1, 2, 3>; }} }}"
+            );
+            let diagnostics = analyze_source(&source);
+            let mismatches = diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM017")
+                .collect::<Vec<_>>();
+            assert_eq!(mismatches.len(), 1, "{operator}: {diagnostics:?}");
+            assert!(
+                mismatches[0].message.contains(operator)
+                    && mismatches[0].message.contains("integer and vector"),
+                "{operator}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_compound_assignment_vector_literal_in_for_increment() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer i; integer count; for (i = 0; i < 1; count += <1, 2, 3>) { } } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM017")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_vector_compound_assignment_with_direct_literal() {
+        let diagnostics =
+            analyze_source("default { state_entry() { vector offset; offset += <1, 2, 3>; } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }
