@@ -50,7 +50,9 @@ fn parse_definitions(source: &str) -> LslDefinitions {
         }
 
         if let Some(constant) = parse_constant(line) {
-            definitions.constants.insert(constant.name.clone(), constant);
+            definitions
+                .constants
+                .insert(constant.name.clone(), constant);
             continue;
         }
 
