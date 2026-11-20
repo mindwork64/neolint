@@ -1935,11 +1935,10 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("string")
             } else if left == "list" || right == "list" {
                 Some("list")
-            } else if left == "vector"
-                && (right == "vector" || matches!(right, "integer" | "float"))
+            } else if (left == "vector"
+                && (right == "vector" || matches!(right, "integer" | "float")))
+                || (right == "vector" && matches!(left, "integer" | "float"))
             {
-                Some("vector")
-            } else if right == "vector" && matches!(left, "integer" | "float") {
                 Some("vector")
             } else {
                 None
@@ -1963,9 +1962,9 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("float")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
-            } else if left == "vector" && matches!(right, "integer" | "float") {
-                Some("vector")
-            } else if right == "vector" && matches!(left, "integer" | "float") {
+            } else if (left == "vector" && matches!(right, "integer" | "float"))
+                || (right == "vector" && matches!(left, "integer" | "float"))
+            {
                 Some("vector")
             } else {
                 None
