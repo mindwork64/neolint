@@ -18,7 +18,7 @@ The LSL Portal lists seven value types:
 - `vector`
 - `rotation`
 
-A user-defined function that returns no value omits its return type entirely; do not write `void` before the function name. This is not an eighth value type.
+A user-defined function that returns no value omits its return type entirely; do not write `void` before the function name. This is not an eighth value type. Parameter lists use only the seven LSL value types; a function with no parameters uses empty parentheses `()`, not a C-style `(void)` marker.
 
 ## Control flow
 
