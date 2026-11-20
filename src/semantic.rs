@@ -2219,10 +2219,11 @@ mod tests {
 
     #[test]
     fn warns_about_unresolved_variable_references() {
-        let diagnostics =
-            analyze_source("default { state_entry() { llOwnerSay(missing_name); } }");
+        let diagnostics = analyze_source("default { state_entry() { llOwnerSay(missing_name); } }");
         assert!(
-            diagnostics.iter().any(|item| item.code == "SEM012" && item.severity == Severity::Warning),
+            diagnostics
+                .iter()
+                .any(|item| item.code == "SEM012" && item.severity == Severity::Warning),
             "{diagnostics:?}"
         );
     }
