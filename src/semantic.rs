@@ -101,7 +101,8 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
             continue;
         }
 
-        let Some((actual_count, _closing_index)) = count_call_arguments(tokens, index + 1) else {
+        let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1)
+        else {
             continue;
         };
         let expected_count = signature.parameters.len();
@@ -117,6 +118,37 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
                 ),
                 span: token.span,
             });
+            continue;
+        }
+
+        let ranges = call_argument_ranges(tokens, index + 1, closing_index);
+        for (argument_index, (range, parameter)) in
+            ranges.iter().zip(signature.parameters.iter()).enumerate()
+        {
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1)
+            else {
+                // Variables and expressions without a provable type are left
+                // alone until full scope-aware type inference is available.
+                continue;
+            };
+
+            if !can_implicitly_convert(&actual_type, &parameter.type_name) {
+                let span = tokens[range.0].span;
+                diagnostics.push(Diagnostic {
+                    code: "SEM004",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "{} argument {} has type {}, expected {}",
+                        signature.name,
+                        argument_index + 1,
+                        actual_type,
+                        parameter.type_name
+                    ),
+                    span,
+                });
+            }
         }
     }
 }
@@ -205,6 +237,202 @@ fn analyze_event_signatures(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>)
             }
         }
     }
+}
+
+fn call_argument_ranges(
+    tokens: &[Token],
+    open_index: usize,
+    closing_index: usize,
+) -> Vec<(usize, usize)> {
+    if closing_index == open_index + 1 {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut argument_start = open_index + 1;
+    let mut paren_depth = 1usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut vector_depth = 0usize;
+
+    for index in (open_index + 1)..closing_index {
+        match tokens[index].kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+            TokenKind::Less if starts_vector_literal(tokens, index) => vector_depth += 1,
+            TokenKind::Greater if vector_depth > 0 => vector_depth -= 1,
+            TokenKind::Comma
+                if paren_depth == 1
+                    && bracket_depth == 0
+                    && brace_depth == 0
+                    && vector_depth == 0 =>
+            {
+                if argument_start < index {
+                    ranges.push((argument_start, index));
+                }
+                argument_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if argument_start < closing_index {
+        ranges.push((argument_start, closing_index));
+    }
+
+    ranges
+}
+
+fn infer_expression_type(
+    tokens: &[Token],
+    mut start: usize,
+    mut end: usize,
+) -> Option<String> {
+    if start >= end {
+        return None;
+    }
+
+    // Strip grouping parentheses while preserving cast syntax such as
+    // (string)expression.
+    loop {
+        if start + 2 < end
+            && tokens[start].kind == TokenKind::LParen
+            && tokens[start + 2].kind == TokenKind::RParen
+        {
+            if let Some(type_name) = lsl_type_name(tokens[start + 1].kind) {
+                return Some(type_name.to_owned());
+            }
+        }
+
+        if !has_outer_parentheses(tokens, start, end) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+
+    if start >= end {
+        return None;
+    }
+
+    if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
+        return infer_expression_type(tokens, start + 1, end);
+    }
+    if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
+        return Some("integer".to_owned());
+    }
+
+    if start + 1 == end {
+        let token = &tokens[start];
+        return match token.kind {
+            TokenKind::IntegerLiteral => Some("integer".to_owned()),
+            TokenKind::FloatLiteral => Some("float".to_owned()),
+            TokenKind::StringLiteral => Some("string".to_owned()),
+            TokenKind::Identifier => definitions()
+                .constants
+                .get(token.lexeme.as_str())
+                .map(|constant| constant.type_name.clone()),
+            _ => None,
+        };
+    }
+
+    if tokens[start].kind == TokenKind::LBracket
+        && tokens[end - 1].kind == TokenKind::RBracket
+    {
+        return Some("list".to_owned());
+    }
+
+    if tokens[start].kind == TokenKind::Less
+        && tokens[end - 1].kind == TokenKind::Greater
+    {
+        let mut commas = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut nested_vector_depth = 0usize;
+
+        for index in (start + 1)..(end - 1) {
+            match tokens[index].kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less if starts_vector_literal(tokens, index) => {
+                    nested_vector_depth += 1;
+                }
+                TokenKind::Greater if nested_vector_depth > 0 => {
+                    nested_vector_depth -= 1;
+                }
+                TokenKind::Comma
+                    if paren_depth == 0
+                        && bracket_depth == 0
+                        && brace_depth == 0
+                        && nested_vector_depth == 0 =>
+                {
+                    commas += 1;
+                }
+                _ => {}
+            }
+        }
+
+        return match commas {
+            2 => Some("vector".to_owned()),
+            3 => Some("rotation".to_owned()),
+            _ => None,
+        };
+    }
+
+    if tokens[start].kind == TokenKind::Identifier
+        && tokens.get(start + 1).map(|token| token.kind) == Some(TokenKind::LParen)
+    {
+        if let Some((_, closing_index)) = count_call_arguments(tokens, start + 1) {
+            if closing_index + 1 == end {
+                return definitions()
+                    .functions
+                    .get(tokens[start].lexeme.as_str())
+                    .map(|signature| signature.return_type.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn has_outer_parentheses(tokens: &[Token], start: usize, end: usize) -> bool {
+    if end <= start + 1
+        || tokens[start].kind != TokenKind::LParen
+        || tokens[end - 1].kind != TokenKind::RParen
+    {
+        return false;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index == end - 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn can_implicitly_convert(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || (actual == "integer" && expected == "float")
+        || (actual == "string" && expected == "key")
 }
 
 fn parameter_types(tokens: &[Token], open_index: usize, closing_index: usize) -> Vec<String> {
@@ -392,6 +620,41 @@ mod tests {
             r#"default { state_entry() { llSetPos(<llFabs(-1), 2, 3>); llOwnerSay(llDumpList2String([1, 2], ",")); } }"#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn reports_obvious_builtin_argument_type_mismatches() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay(123); llSetPos("not a vector"); } }"#,
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn allows_the_two_lsl_implicit_conversions() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llSleep(1); llGetObjectDetails("01234567-89ab-cdef-0123-456789abcdef", [OBJECT_NAME]); } }"#,
+        );
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_explicit_casts_and_known_builtin_return_types() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay((string)123); llOwnerSay(llGetRegionName()); } }"#,
+        );
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn leaves_unknown_variable_types_unchecked() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { integer amount; llOwnerSay(amount); } }"#,
+        );
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
     }
 
     #[test]
