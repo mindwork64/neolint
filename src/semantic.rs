@@ -1976,9 +1976,7 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("string")
             } else if left == "list" || right == "list" {
                 Some("list")
-            } else if left == "vector"
-                && (right == "vector" || matches!(right, "integer" | "float"))
-            {
+            } else if left == "vector" && right == "vector" {
                 Some("vector")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
@@ -2987,19 +2985,12 @@ mod tests {
     }
 
     #[test]
-    fn infers_vector_plus_scalar_only_in_documented_operand_order() {
+    fn leaves_unlisted_vector_scalar_addition_uninferred() {
         let diagnostics = analyze_source(
-            "default { state_entry() { vector position; llSetPos(position + 1.0); llOwnerSay(position + 1); llOwnerSay(1.0 + position); } }",
+            "default { state_entry() { vector position; llOwnerSay(position + 1.0); llOwnerSay(position + 1); llOwnerSay(1.0 + position); } }",
         );
-        let mismatches = diagnostics
-            .iter()
-            .filter(|item| item.code == "SEM004")
-            .collect::<Vec<_>>();
-        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
         assert!(
-            mismatches[0]
-                .message
-                .contains("has type vector, expected string"),
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
         );
     }
@@ -3022,7 +3013,7 @@ mod tests {
     #[test]
     fn infers_directional_vector_and_rotation_operator_types() {
         let diagnostics = analyze_source(
-            r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); llOwnerSay(<1, 2, 3> + 1.0); llOwnerSay(1.0 + <1, 2, 3>); } }"#,
+            r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }"#,
         );
         assert_eq!(
             diagnostics
