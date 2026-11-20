@@ -22,10 +22,10 @@ impl<'a> Parser<'a> {
         while !self.at_end() {
             let before = self.current;
             if self.is_type() || self.is_untyped_function_declaration() {
-                if self.states_started && self.is_function_declaration() {
+                if self.states_started {
                     self.error_here(
                         "PAR009",
-                        "user-defined functions must be declared before state definitions",
+                        "global declarations and user-defined functions must be declared before state definitions",
                     );
                 }
                 self.parse_global_declaration();
@@ -460,15 +460,6 @@ impl<'a> Parser<'a> {
         self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen
     }
 
-    fn is_function_declaration(&self) -> bool {
-        if self.is_type() {
-            self.peek_kind_at(1) == TokenKind::Identifier
-                && self.peek_kind_at(2) == TokenKind::LParen
-        } else {
-            self.is_untyped_function_declaration()
-        }
-    }
-
     fn expect(&mut self, kind: TokenKind, message: &'static str) -> bool {
         if self.matches(kind) {
             true
@@ -750,6 +741,25 @@ mod tests {
                 .any(|diagnostic| diagnostic.code == "PAR009"),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn rejects_global_variables_declared_after_states() {
+        let diagnostics = parse_source("default { state_entry() { } } integer value;");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "PAR009" && diagnostic.message.contains("global declarations")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_global_declarations_before_states_and_states_after_states() {
+        let diagnostics = parse_source(
+            "integer value; default { state_entry() { } } state other { state_entry() { } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
