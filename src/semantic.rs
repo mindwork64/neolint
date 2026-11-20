@@ -1995,8 +1995,7 @@ mod tests {
 
     #[test]
     fn accepts_jump_to_label_inside_event_handler() {
-        let diagnostics =
-            analyze_source("default { state_entry() { jump done; @done; } }");
+        let diagnostics = analyze_source("default { state_entry() { jump done; @done; } }");
         assert!(
             !diagnostics
                 .iter()
@@ -2016,9 +2015,8 @@ mod tests {
 
     #[test]
     fn allows_same_jump_label_name_in_separate_event_handlers() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { @done; } touch_end() { @done; } }",
-        );
+        let diagnostics =
+            analyze_source("default { state_entry() { @done; } touch_end() { @done; } }");
         assert!(
             !diagnostics
                 .iter()
