@@ -187,6 +187,94 @@ fn relational_angle_brackets_remain_conservative() {
 }
 
 #[test]
+fn rotation_literal_assignment_and_return_contexts() {
+    let diagnostics = analyze_source(
+        "rotation global_orientation = <1, 2, 3, 4>; \
+         rotation make() { return <1, 2, 3, 4>; } \
+         default { state_entry() { \
+             rotation local_orientation; \
+             local_orientation = <1, 2, 3, 4>; \
+         } }",
+    );
+    assert_no_code(&diagnostics, "SEM008");
+    assert_no_code(&diagnostics, "SEM015");
+    assert_no_code(&diagnostics, "SEM016");
+
+    let diagnostics = analyze_source(
+        "vector global_position = <1, 2, 3, 4>; \
+         vector make() { return <1, 2, 3, 4>; } \
+         default { state_entry() { \
+             vector local_position; \
+             local_position = <1, 2, 3, 4>; \
+         } }",
+    );
+    assert_eq!(count_code(&diagnostics, "SEM008"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM015"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM016"), 1, "{diagnostics:?}");
+}
+
+#[test]
+fn rotation_literal_in_llsetrot_arguments() {
+    let diagnostics = analyze_source("default { state_entry() { llSetRot(<1, 2, 3, 4>); } }");
+    assert_no_code(&diagnostics, "SEM002");
+    assert_no_code(&diagnostics, "SEM004");
+
+    let diagnostics = analyze_source("default { state_entry() { llSetRot(<1, 2, 3>); } }");
+    assert_eq!(count_code(&diagnostics, "SEM004"), 1, "{diagnostics:?}");
+
+    let diagnostics = analyze_source("default { state_entry() { llSetRot(<1, 2, 3, 4>, 1); } }");
+    assert_eq!(count_code(&diagnostics, "SEM002"), 1, "{diagnostics:?}");
+}
+
+#[test]
+fn explicit_rotation_cast_contexts() {
+    let diagnostics = analyze_source(
+        "rotation global_orientation = (rotation)<1, 2, 3, 4>; \
+         rotation make() { return (rotation)<1, 2, 3, 4>; } \
+         default { }",
+    );
+    assert_no_code(&diagnostics, "SEM008");
+    assert_no_code(&diagnostics, "SEM014");
+    assert_no_code(&diagnostics, "SEM015");
+
+    let diagnostics = analyze_source(
+        "vector global_position = (rotation)<1, 2, 3, 4>; \
+         vector make() { return (rotation)<1, 2, 3, 4>; } \
+         vector invalid = (integer)<1, 2, 3>; \
+         string text; \
+         default { state_entry() { text = (rotation)<1, 2, 3, 4>; } }",
+    );
+    assert_eq!(count_code(&diagnostics, "SEM008"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM014"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM015"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM016"), 1, "{diagnostics:?}");
+}
+
+#[test]
+fn ambiguous_relational_assignments_and_returns_remain_conservative() {
+    let diagnostics = analyze_source(
+        "string assign_lt; \
+         string assign_gt; \
+         string return_lt() { return <1, 2, 3> < <4, 5, 6>; } \
+         string return_gt() { return 1 > <1, 2, 3>; } \
+         default { state_entry() { \
+             assign_lt = <1, 2, 3> < <4, 5, 6>; \
+             assign_gt = 1 > <1, 2, 3>; \
+         } }",
+    );
+    assert_no_code(&diagnostics, "SEM008");
+    assert_no_code(&diagnostics, "SEM016");
+
+    let diagnostics = analyze_source(
+        "string assign_known; \
+         string return_known() { return (1) < 2; } \
+         default { state_entry() { assign_known = (1) < 2; } }",
+    );
+    assert_eq!(count_code(&diagnostics, "SEM008"), 1, "{diagnostics:?}");
+    assert_eq!(count_code(&diagnostics, "SEM016"), 1, "{diagnostics:?}");
+}
+
+#[test]
 fn unknown_extension_expressions_remain_conservative() {
     let diagnostics = analyze_source(
         "vector make() { return llExtensionValue(); } \
