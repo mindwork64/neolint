@@ -2878,6 +2878,31 @@ mod tests {
     }
 
     #[test]
+    fn scans_casts_in_parenthesized_list_and_nested_expressions() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    integer local_value = (integer)(position + position);
+                    list values = [(integer)position, (string)llGetOwner()];
+                    llOwnerSay((integer)(vector)position);
+                }
+            }"#,
+        );
+        let invalid_casts = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM014")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid_casts.len(), 3, "{diagnostics:?}");
+        assert!(
+            invalid_casts.iter().all(|item| item
+                .message
+                .contains("cannot explicitly cast vector to integer")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn keeps_unknown_cast_source_types_conservative() {
         let diagnostics = analyze_source(
             "default { state_entry() { llOwnerSay((integer)llExtensionValue()); } }",
