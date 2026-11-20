@@ -3338,8 +3338,8 @@ mod tests {
         );
         assert!(
             mismatches.iter().any(|item| {
-                item.message.contains("count.x")
-                    && item.message.contains("not valid")
+                item.message.contains("component 'x'")
+                    && item.message.contains("variable 'count'")
                     && item.message.contains("integer")
             }),
             "{diagnostics:?}"
