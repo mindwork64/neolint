@@ -64,8 +64,9 @@ The current CLI performs lexical analysis, syntax validation, and the following 
 - `SEM005`: wrong argument count for a known user-defined function.
 - `SEM006`: provable argument type mismatch for a known user-defined function.
 - `SEM007`: duplicate variable declaration in the same lexical scope, including redeclaration of a function parameter. Shadowing a name in a nested block is allowed.
+- `SEM008`: explicit return-statement validation in user-defined functions: return-value presence and provable return-expression type compatibility.
 
-The scope model handles function and event parameters, global/local declarations, nested block scopes, and shadowing. Type checks are deliberately conservative: unresolved variables and unknown extension functions are not assigned guessed types and are not reported as undefined symbols.
+The scope model handles function and event parameters, global/local declarations, nested block scopes, and shadowing. Type checks are deliberately conservative: unresolved variables and unknown extension functions are not assigned guessed types and are not reported as undefined symbols. SEM008 checks explicit return statements but does not prove that every control-flow path in a value-returning function returns a value.
 
 Built-in function, event, and constant metadata is vendored in `data/lsl-builtins.txt` from the official `secondlife/lsl-definitions` generator output. It is pinned and licensed; ordinary lint runs do not access the network.
 
