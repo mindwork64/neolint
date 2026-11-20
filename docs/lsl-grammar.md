@@ -336,6 +336,8 @@ Lexical terminals used by the expression grammar:
 ```text
 identifier      := ( letter | "_" ) { letter | digit | "_" }
 integer-literal := digits
+                 | hex-literal
+hex-literal     := "0" ( "x" | "X" ) hex-digit { hex-digit }
 float-literal   := digits "." [ digits ] [ exponent ]
                  | "." digits [ exponent ]
                  | digits exponent
@@ -344,11 +346,14 @@ digits          := digit { digit }
 exponent        := ( "e" | "E" ) [ "+" | "-" ] digits
 letter          := "A"..."Z" | "a"..."z"
 digit           := "0"..."9"
+hex-digit       := digit | "a"..."f" | "A"..."F"
 string-character := "a character other than an unescaped quote or line break"
                   | "\" "any character"
 ```
 
-- Integers are decimal digit sequences; floats include `.5`, `1.`, and exponent forms such as `1e-3`.
+- Integers are decimal digit sequences or `0x`/`0X` hexadecimal literals. Hex digits include `e`/`E`; they are not exponent markers in this form. Hex values in `0..=0xFFFFFFFF` are interpreted as signed two's-complement (`0xFFFFFFFF` is `-1`, `0x80000000` is `i32::MIN`); leading zeros are allowed. Values above `0xFFFFFFFF` remain syntactically valid integer literals, but SEM011 leaves their value unknown.
+- A `0x` prefix without at least one hex digit is not a hex literal; it falls back to decimal `0` followed by an identifier, matching the pinned lexer.
+- Floats include `.5`, `1.`, and exponent forms such as `1e-3`.
 - Strings are double-quoted; escaped quotes are retained as string content by the lexer.
 - List literals use `[ ... ]`.
 - Vector/rotation literals use `< ... >` with 3 or 4 components.
@@ -362,6 +367,10 @@ Tests:
 
 - `src/lexer.rs::tests::recognizes_lsl_keywords_and_identifiers`
 - `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals`
+- `src/lexer.rs::tests::recognizes_hex_integer_literals`
+- `src/lexer.rs::tests::hex_integer_literals_do_not_consume_exponents_or_identifiers`
+- `src/lexer.rs::tests::malformed_hex_prefixes_fall_back_to_decimal_and_identifier_tokens`
+- `src/lexer.rs::tests::hex_integer_literal_spans_cover_the_original_lexeme`
 - `src/lexer.rs::tests::skips_line_and_block_comments`
 - `src/lexer.rs::tests::string_literal_keeps_escaped_quotes`
 - `src/lexer.rs::tests::handles_crlf_and_unicode_in_comments`
@@ -444,7 +453,7 @@ See:
 | `return` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Syntax tested; value rules semantic |
 | `jump` / label | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Syntax tested; scope semantically checked |
 | State change | `src/parser.rs::tests::accepts_state_change_to_default`; `tests/state_change_contexts.rs::event_handlers_accept_named_and_default_state_changes` | `src/parser.rs::tests::rejects_state_change_without_target` | Tested; context caveat |
-| Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals` | — | Tested |
+| Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/grammar_inventory.rs::hex_integer_literals_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals`; `src/lexer.rs::tests::recognizes_hex_integer_literals` | `src/parser.rs::tests::rejects_malformed_hex_prefixes_as_syntax_errors` | Tested |
 | Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::accepts_call_suffixes_only_on_identifiers`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | `src/parser.rs::tests::rejects_call_suffixes_on_non_identifiers` | Tested; call suffix requires an identifier |
 | Unary/binary/logical/comparison | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::logical_and_or_operators_share_lsl_precedence` | — | Tested |
 | Increment/decrement | `src/parser.rs::tests::accepts_increment_and_decrement_of_variables` | `src/parser.rs::tests::rejects_increment_and_decrement_of_non_variables`; `src/parser.rs::tests::rejects_component_increment_and_decrement_targets` | Tested; components are not increment targets |

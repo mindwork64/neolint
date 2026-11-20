@@ -1251,6 +1251,18 @@ struct FlowFragment {
     next_index: usize,
 }
 
+fn parse_hex_integer_digits(digits: &str) -> Option<u32> {
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut bits = 0u32;
+    for ch in digits.chars() {
+        bits = bits.checked_mul(16)?.checked_add(ch.to_digit(16)?)?;
+    }
+    Some(bits)
+}
+
 fn parse_constant_integer_value(value: &str) -> Option<i32> {
     let (negative, magnitude) = match value.strip_prefix('-') {
         Some(magnitude) => (true, magnitude),
@@ -1260,7 +1272,7 @@ fn parse_constant_integer_value(value: &str) -> Option<i32> {
         .strip_prefix("0x")
         .or_else(|| magnitude.strip_prefix("0X"))
     {
-        u32::from_str_radix(hex, 16).ok()? as i32
+        parse_hex_integer_digits(hex)? as i32
     } else {
         magnitude.parse::<u32>().ok()? as i32
     };
@@ -1272,6 +1284,12 @@ fn parse_constant_integer_value(value: &str) -> Option<i32> {
 }
 
 fn parse_integer_literal_value(value: &str) -> Option<i32> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return parse_hex_integer_digits(hex).map(|bits| bits as i32);
+    }
     Some(value.parse::<u64>().ok()? as u32 as i32)
 }
 
@@ -4491,6 +4509,43 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_hex_integer_literals_directly() {
+        assert_eq!(evaluate_constant_source("0xFFFFFFFF"), Some(-1));
+        assert_eq!(evaluate_constant_source("0x80000000"), Some(i32::MIN));
+        assert_eq!(evaluate_constant_source("0x7FFFFFFF"), Some(i32::MAX));
+        assert_eq!(evaluate_constant_source("0x0000000000000001"), Some(1));
+        assert_eq!(evaluate_constant_source("0x00000000FFFFFFFF"), Some(-1));
+        assert_eq!(evaluate_constant_source("0x1e3"), Some(483));
+        assert_eq!(evaluate_constant_source("0x1e+2"), Some(32));
+        assert_eq!(evaluate_constant_source("0x1e-3"), Some(27));
+        assert_eq!(evaluate_constant_source("0X2A"), Some(42));
+        assert_eq!(evaluate_constant_source("0xFFFFFFFF + 1"), Some(0));
+        for source in ["0x", "0xG", "0x1G", "0x1.2"] {
+            assert_eq!(
+                evaluate_constant_source(source),
+                None,
+                "malformed hex was evaluated: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_hex_values_above_u32_max() {
+        for source in [
+            "0x100000000",
+            "0x1FFFFFFFF",
+            "0x0000000100000000",
+            "0x123456789ABCDEF",
+        ] {
+            assert_eq!(
+                evaluate_constant_source(source),
+                None,
+                "out-of-range hex was evaluated: {source:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_long_constant_integer_binary_chains() {
         let source = format!("1{}", " + 1".repeat(MAX_CONSTANT_EXPRESSION_TOKENS / 2 + 1));
         assert_eq!(evaluate_constant_source(&source), None);
@@ -4658,6 +4713,62 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_hex_integer_conditions() {
+        let diagnostics = analyze_source(
+            r#"integer true_high() { while (0xFFFFFFFF) { } }
+            integer true_min() { while (0x80000000) { } }
+            integer true_max() { while (0x7FFFFFFF) { } }
+            integer false_zero() { while (0x0) { } }
+            integer wrap_zero() { while (0xFFFFFFFF + 1) { } }
+            integer exponent_digit() { while (0x1e3 == 483) { } }
+            integer bitwise() { while (0xFF & 0x0F) { } }
+            integer shifted() { while ((0x10 << 1) == 0x20) { } }
+            default { }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_out_of_range_hex_conditions_unknown() {
+        let diagnostics = analyze_source(
+            r#"integer first() { while (0x100000000) { } }
+            integer second() { while (0x1FFFFFFFF) { } }
+            default { }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_hex_integer_literal_types() {
+        let diagnostics =
+            analyze_source("integer whole = 0xFFFFFFFF; float promoted = 0x10; default { }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM015"),
+            "{diagnostics:?}"
+        );
+
+        let diagnostics = analyze_source("string invalid = 0x1; default { }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM015"),
             "{diagnostics:?}"
         );
     }
