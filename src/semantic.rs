@@ -557,6 +557,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     let user_functions = collect_user_functions(tokens);
     analyze_explicit_casts(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_variable_initializers(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_variable_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -2155,6 +2156,114 @@ fn prefix_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
     Some(index)
 }
 
+fn assignment_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
+    if start >= tokens.len() {
+        return None;
+    }
+
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut vector_depth = 0usize;
+
+    for index in start..tokens.len() {
+        let kind = tokens[index].kind;
+        let at_expression_level =
+            paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && vector_depth == 0;
+
+        if at_expression_level
+            && matches!(
+                kind,
+                TokenKind::Comma
+                    | TokenKind::Semicolon
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::RBrace
+            )
+        {
+            return Some(index);
+        }
+
+        match kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+            TokenKind::Less if starts_vector_literal(tokens, index) => vector_depth += 1,
+            TokenKind::Greater if vector_depth > 0 => vector_depth -= 1,
+            _ => {}
+        }
+    }
+
+    Some(tokens.len())
+}
+
+fn analyze_variable_assignments(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (operator_index, operator) in tokens.iter().enumerate() {
+        if operator.kind != TokenKind::Equal || operator_index == 0 {
+            continue;
+        }
+
+        let name_index = operator_index - 1;
+        let name = &tokens[name_index];
+        if name.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        // Declarations are checked by SEM015. Only a plain variable is a valid
+        // assignment target in this deliberately conservative first pass.
+        if tokens
+            .get(name_index.wrapping_sub(1))
+            .is_some_and(|previous| {
+                is_value_type(previous.kind) || previous.kind == TokenKind::Dot
+            })
+            || scopes
+                .initializers
+                .iter()
+                .any(|initializer| initializer.name_index == name_index)
+        {
+            continue;
+        }
+
+        let Some(expected_type) = scopes.resolve(&name.lexeme, name_index) else {
+            continue;
+        };
+        let expression_start = operator_index + 1;
+        let Some(expression_end) = assignment_expression_end(tokens, expression_start) else {
+            continue;
+        };
+        if expression_start >= expression_end {
+            continue;
+        }
+
+        let Some(actual_type) =
+            infer_expression_type(tokens, expression_start, expression_end, scopes, user_functions)
+        else {
+            continue;
+        };
+
+        if !can_implicitly_convert(&actual_type, &expected_type) {
+            diagnostics.push(Diagnostic {
+                code: "SEM016",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "assignment to variable '{}' has type {}, expected {}",
+                    name.lexeme, actual_type, expected_type
+                ),
+                span: name.span,
+            });
+        }
+    }
+}
+
 fn analyze_variable_initializers(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -2964,6 +3073,71 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM014"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_assignments_to_global_and_local_variables() {
+        let diagnostics = analyze_source(
+            r#"integer global_count;
+               key global_id;
+               default {
+                   state_entry() {
+                       integer local_count;
+                       float local_ratio;
+                       local_count = 2.5;
+                       local_ratio = 1;
+                       global_id = "00000000-0000-0000-0000-000000000000";
+                       local_count = "wrong";
+                   }
+               }"#,
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM016")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 2, "{diagnostics:?}");
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("local_count")
+                    && item.message.contains("float, expected integer")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("local_count")
+                    && item.message.contains("string, expected integer")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_assignments_inside_control_flow_and_call_arguments() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer count; if (count = 1.5) llOwnerSay(\"bad\"); llOwnerSay((string)(count = 2.5)); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM016").count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_unknown_assignment_values_and_declaration_initializers() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer first = 1.5, second; second = llExtensionValue(); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM015").count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM016"),
             "{diagnostics:?}"
         );
     }
