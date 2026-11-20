@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with nineteen conservative semantic checks (SEM001–SEM019). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with twenty-two conservative semantic checks (SEM001–SEM022). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -58,6 +58,9 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM017`: type-checks the result of `+=`, `-=`, `*=`, `/=`, and `%=`; reports known unsupported operand combinations and incompatible results, while unresolved right-hand values are skipped.
 - `SEM018`: validates vector/rotation component writes, checks component existence and `float` compatibility, and reports known unsupported compound operand pairs while remaining conservative for unknown expressions.
 - `SEM019`: reports reads of invalid components on variables with known types (for example, `integer count; count.x`, `vector position; position.s`, or `rotation orientation; orientation.w`). Valid vector `.x/.y/.z` and rotation `.x/.y/.z/.s` reads remain `float`; component writes stay with SEM018 and unknown extension values are skipped.
+- `SEM020`: duplicate canonical event handlers within one state; unknown extension event names are ignored.
+- `SEM021`: duplicate named state declarations; parser-owned duplicate `default` remains `PAR014`.
+- `SEM022`: undefined state-change targets in event handlers; `state default` and declared named states are accepted, while function state changes and unknown extension event bodies remain unchecked.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that global declarations and user-defined functions precede state definitions (`PAR009`), that a `default` state is mandatory, first and unique (`PAR013`/`PAR014`), and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Empty statements (`;`) are accepted, and `for` initializer/increment clauses accept comma-separated expression lists while the condition remains required (`PAR006`). Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied. The detailed grammar inventory and test matrix are in [docs/lsl-grammar.md](docs/lsl-grammar.md).
 

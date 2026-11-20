@@ -1,7 +1,7 @@
 use crate::builtins::definitions;
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::lexer::{Token, TokenKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn is_declaration_type(kind: TokenKind) -> bool {
     matches!(
@@ -568,6 +568,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_missing_return_paths(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
+    analyze_state_topology(tokens, &scopes, &mut diagnostics);
     analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
     diagnostics
 }
@@ -1951,6 +1952,190 @@ fn analyze_missing_return_paths(
                 ),
                 span: name.span,
             });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StateInfo {
+    name: String,
+    span: Span,
+    body_open: usize,
+    body_close: usize,
+    events: Vec<EventInfo>,
+}
+
+#[derive(Debug)]
+struct EventInfo {
+    name: String,
+    span: Span,
+    body_start: usize,
+    body_end: usize,
+}
+
+fn collect_state_info(tokens: &[Token], scopes: &ScopeModel) -> Vec<StateInfo> {
+    let mut states = Vec::new();
+    let mut brace_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+        if brace_depth != 0 {
+            continue;
+        }
+
+        let (name, name_index, body_open) = match token.kind {
+            TokenKind::KwDefault => ("default".to_owned(), None, index + 1),
+            TokenKind::KwState => {
+                let Some(name) = tokens.get(index + 1) else {
+                    continue;
+                };
+                if name.kind != TokenKind::Identifier {
+                    continue;
+                }
+                (name.lexeme.clone(), Some(index + 1), index + 2)
+            }
+            _ => continue,
+        };
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+        let Some(body_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+        let span = name_index.map_or(token.span, |index| tokens[index].span);
+        states.push(StateInfo {
+            name,
+            span,
+            body_open,
+            body_close,
+            events: Vec::new(),
+        });
+    }
+
+    let events = &definitions().events;
+    for state in &mut states {
+        let Some(state_scope_id) = scopes.scope_at.get(state.body_open + 1).copied() else {
+            continue;
+        };
+        let mut event_index = state.body_open + 1;
+        while event_index < state.body_close {
+            let event_token = &tokens[event_index];
+            if scopes.scope_at.get(event_index) != Some(&state_scope_id)
+                || event_token.kind != TokenKind::Identifier
+                || !events.contains_key(event_token.lexeme.as_str())
+                || tokens.get(event_index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            {
+                event_index += 1;
+                continue;
+            }
+
+            let open = event_index + 1;
+            let Some(parameter_close) = matching_paren(tokens, open) else {
+                event_index += 1;
+                continue;
+            };
+            let body_open = parameter_close + 1;
+            if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+                event_index += 1;
+                continue;
+            }
+            let Some(body_close) = matching_brace(tokens, body_open) else {
+                event_index += 1;
+                continue;
+            };
+
+            state.events.push(EventInfo {
+                name: event_token.lexeme.clone(),
+                span: event_token.span,
+                body_start: body_open + 1,
+                body_end: body_close,
+            });
+            event_index = body_close + 1;
+        }
+    }
+
+    states
+}
+
+fn analyze_state_topology(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let states = collect_state_info(tokens, scopes);
+    let mut seen_states: HashMap<&str, Span> = HashMap::new();
+    for state in &states {
+        // Parser owns the mandatory/unique default-state checks (PAR013/PAR014).
+        if state.name == "default" {
+            continue;
+        }
+        if let Some(previous) = seen_states.insert(&state.name, state.span) {
+            diagnostics.push(Diagnostic {
+                code: "SEM021",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "duplicate state '{}'; first declared at {}:{}",
+                    state.name, previous.line, previous.column
+                ),
+                span: state.span,
+            });
+        }
+    }
+
+    let mut known_states = HashSet::new();
+    for state in &states {
+        known_states.insert(state.name.as_str());
+        let mut seen_events: HashMap<&str, Span> = HashMap::new();
+        for event in &state.events {
+            if let Some(previous) = seen_events.insert(&event.name, event.span) {
+                diagnostics.push(Diagnostic {
+                    code: "SEM020",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "duplicate event handler '{}' in state '{}'; first declared at {}:{}",
+                        event.name, state.name, previous.line, previous.column
+                    ),
+                    span: event.span,
+                });
+            }
+        }
+    }
+
+    for state in &states {
+        for event in &state.events {
+            for index in event.body_start..event.body_end {
+                if tokens[index].kind != TokenKind::KwState
+                    || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::Identifier)
+                    || tokens.get(index + 2).map(|item| item.kind) != Some(TokenKind::Semicolon)
+                {
+                    continue;
+                }
+                let target = &tokens[index + 1];
+                if !known_states.contains(target.lexeme.as_str()) {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM022",
+                        severity: Severity::Error,
+                        kind: DiagnosticKind::Semantic,
+                        message: format!(
+                            "state target '{}' is not defined; add that state or use state default",
+                            target.lexeme
+                        ),
+                        span: target.span,
+                    });
+                }
+            }
         }
     }
 }
@@ -5614,6 +5799,92 @@ mod tests {
             "default { state_entry() { } touch_start(integer total) { } listen(integer channel, string name, key id, string message) { } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn reports_duplicate_known_event_handlers_in_a_state() {
+        let diagnostics =
+            analyze_source("default { state_entry() { } state_entry() { } state_entry() { } }");
+        let duplicates = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM020")
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 2, "{diagnostics:?}");
+        assert!(
+            duplicates.iter().all(
+                |item| item.message.contains("state_entry") && item.message.contains("default")
+            ),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn allows_the_same_known_event_in_different_states() {
+        let diagnostics =
+            analyze_source("default { state_entry() { } } state running { state_entry() { } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM020"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_duplicate_unknown_extension_events() {
+        let diagnostics = analyze_source("default { custom_event() { } custom_event() { } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM020"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_named_states_but_not_default() {
+        let diagnostics =
+            analyze_source("default { } state running { } state running { } state running { }");
+        let duplicates = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM021")
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 2, "{diagnostics:?}");
+        assert!(
+            duplicates
+                .iter()
+                .all(|item| item.message.contains("running")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_undefined_state_change_targets_in_event_handlers() {
+        let diagnostics = analyze_source("default { state_entry() { state missing; } }");
+        let missing = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM022")
+            .collect::<Vec<_>>();
+        assert_eq!(missing.len(), 1, "{diagnostics:?}");
+        assert!(missing[0].message.contains("missing"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_declared_and_default_state_targets() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { state running; } } state running { state_entry() { state default; } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM022"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_function_state_changes_and_unknown_event_bodies_out_of_scope() {
+        let diagnostics = analyze_source(
+            "change() { state missing; } default { custom_event() { state also_missing; } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM022"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

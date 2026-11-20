@@ -25,3 +25,6 @@ invalid_scope_jumps|invalid|invalid/scope_and_jumps.lsl|original|project-authore
 invalid_syntax_unclosed|invalid|invalid/syntax_unclosed.lsl|original|project-authored|invalid|PAR007:1:error|1|none|Unclosed default state
 invalid_duplicate_globals|invalid|invalid/duplicate_globals.lsl|original|project-authored|valid|SEM001:1:error|1|none|Duplicate top-level declaration
 invalid_malformed_condition|invalid|invalid/malformed_condition.lsl|original|project-authored|invalid|PAR006:1:error|1|none|Empty for condition is rejected
+invalid_duplicate_event|invalid|invalid/duplicate_event.lsl|original|project-authored|valid|SEM020:1:error|1|none|Duplicate canonical event handler in one state
+invalid_duplicate_state|invalid|invalid/duplicate_state.lsl|original|project-authored|valid|SEM021:1:error|1|none|Duplicate named state declaration
+invalid_undefined_state|invalid|invalid/undefined_state.lsl|original|project-authored|valid|SEM022:1:error|1|none|Undefined state-change target in an event handler
