@@ -403,7 +403,6 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
     functions
 }
 
-
 /// Perform conservative semantic checks that do not require a full symbol table.
 ///
 /// The first rule catches duplicate top-level variables and user-defined
@@ -1214,7 +1213,10 @@ mod tests {
         let diagnostics = analyze_source(
             r#"integer makeCount() { return 1; } default { state_entry() { llOwnerSay(makeCount()); } }"#,
         );
-        assert!(diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
