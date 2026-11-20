@@ -1067,8 +1067,7 @@ fn statement_returns_on_all_paths(
             if close >= limit {
                 return None;
             }
-            let (_, body_end) =
-                statement_returns_on_all_paths(tokens, close + 1, limit)?;
+            let (_, body_end) = statement_returns_on_all_paths(tokens, close + 1, limit)?;
             // A for/while body may execute zero times.
             Some((false, body_end))
         }
@@ -1181,7 +1180,7 @@ fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnost
         if !guarantees_return {
             let name = &tokens[name_index];
             diagnostics.push(Diagnostic {
-                code: "SEM009",
+                code: "SEM011",
                 severity: Severity::Error,
                 kind: DiagnosticKind::Semantic,
                 message: format!(
@@ -2000,18 +1999,17 @@ mod tests {
             "integer get_value() { llOwnerSay(\"missing\"); } default { state_entry() { } }",
         );
         assert!(
-            diagnostics.iter().any(|item| item.code == "SEM009"),
+            diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
 
     #[test]
     fn reports_if_branch_that_can_fall_through() {
-        let diagnostics = analyze_source(
-            "integer choose(integer flag) { if (flag) return 1; } default { }",
-        );
+        let diagnostics =
+            analyze_source("integer choose(integer flag) { if (flag) return 1; } default { }");
         assert!(
-            diagnostics.iter().any(|item| item.code == "SEM009"),
+            diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
@@ -2022,7 +2020,7 @@ mod tests {
             "integer choose(integer flag) { if (flag) return 1; else return 2; } default { }",
         );
         assert!(
-            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
@@ -2033,7 +2031,7 @@ mod tests {
             "integer choose(integer flag) { if (flag == 1) return 1; if (flag == 2) return 2; return 0; } default { }",
         );
         assert!(
-            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
@@ -2044,18 +2042,17 @@ mod tests {
             "integer choose(integer flag) { while (flag) { return 1; } } default { }",
         );
         assert!(
-            diagnostics.iter().any(|item| item.code == "SEM009"),
+            diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
 
     #[test]
     fn accepts_do_while_with_an_unconditional_returning_body() {
-        let diagnostics = analyze_source(
-            "integer choose() { do { return 1; } while (1); } default { }",
-        );
+        let diagnostics =
+            analyze_source("integer choose() { do { return 1; } while (1); } default { }");
         assert!(
-            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
@@ -2066,7 +2063,7 @@ mod tests {
             "integer choose(integer flag) { if (flag) jump done; return 1; @done; } default { }",
         );
         assert!(
-            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
@@ -2075,7 +2072,7 @@ mod tests {
     fn does_not_require_value_returns_from_no_return_functions() {
         let diagnostics = analyze_source("do_work() { llOwnerSay(\"done\"); } default { }");
         assert!(
-            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
