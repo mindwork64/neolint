@@ -2074,6 +2074,20 @@ fn infer_expression_type(
         }
     }
 
+    if end == start + 3
+        && tokens[start].kind == TokenKind::Identifier
+        && tokens[start + 1].kind == TokenKind::Dot
+        && tokens[start + 2].kind == TokenKind::Identifier
+    {
+        let base_type = scopes.resolve(&tokens[start].lexeme, start)?;
+        let component = tokens[start + 2].lexeme.as_str();
+        return match base_type.as_str() {
+            "vector" if matches!(component, "x" | "y" | "z") => Some("float".to_owned()),
+            "rotation" if matches!(component, "x" | "y" | "z" | "s") => Some("float".to_owned()),
+            _ => None,
+        };
+    }
+
     if start + 1 == end {
         let token = &tokens[start];
         return match token.kind {
@@ -2465,6 +2479,24 @@ mod tests {
             mismatches[0]
                 .message
                 .contains("argument 1 has type list, expected string"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_vector_and_rotation_component_access_as_float() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector position; rotation orientation; llSleep(position.x); llSleep(orientation.s); llOwnerSay(position.z); llOwnerSay(orientation.y); } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM004")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 2, "{diagnostics:?}");
+        assert!(
+            mismatches
+                .iter()
+                .all(|item| item.message.contains("has type float, expected string")),
             "{diagnostics:?}"
         );
     }

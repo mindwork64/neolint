@@ -26,7 +26,7 @@ The reference includes `if`, `else`, `for`, `while`, `do-while`, `jump`, `return
 
 ## Literals and special syntax
 
-The language includes integer and float literals, quoted strings, list literals, and vector/rotation literals using angle-bracket syntax. Since `<` and `>` are also relational operators, the parser—not the lexer—must resolve their syntactic role.
+The language includes integer and float literals, quoted strings, list literals, and vector/rotation literals using angle-bracket syntax. Since `<` and `>` are also relational operators, the parser—not the lexer—must resolve their syntactic role. Vector and rotation components are accessible only through declared variables: vector variables support `.x`, `.y`, and `.z`; rotation variables support `.x`, `.y`, `.z`, and `.s`. Each component has type `float`. Component access on literals or function return values is invalid in LSL.
 
 ## Comments
 
