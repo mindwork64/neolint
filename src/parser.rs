@@ -258,10 +258,9 @@ impl<'a> Parser<'a> {
         if !self.parse_prefix() {
             return false;
         }
-        loop {
-            let Some((precedence, right_associative)) = binary_precedence(self.peek_kind()) else {
-                break;
-            };
+        while let Some((precedence, right_associative)) =
+            binary_precedence(self.peek_kind())
+        {
             if precedence < min_precedence {
                 break;
             }
