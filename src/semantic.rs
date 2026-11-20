@@ -537,6 +537,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_missing_return_paths(tokens, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
@@ -1006,6 +1007,198 @@ fn analyze_jump_labels(
                     span: target.span,
                 });
             }
+        }
+    }
+}
+
+/// Check whether a statement guarantees that every path through it returns.
+/// Jump statements and labels are handled conservatively by skipping the containing function.
+fn statement_returns_on_all_paths(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+) -> Option<(bool, usize)> {
+    let kind = tokens.get(start)?.kind;
+
+    match kind {
+        TokenKind::LBrace => {
+            let close = matching_brace(tokens, start)?;
+            if close >= limit {
+                return None;
+            }
+
+            let mut cursor = start + 1;
+            let mut guarantees_return = false;
+            while cursor < close {
+                let (statement_returns, next) =
+                    statement_returns_on_all_paths(tokens, cursor, close)?;
+                if next <= cursor {
+                    return None;
+                }
+                if statement_returns {
+                    guarantees_return = true;
+                }
+                cursor = next;
+            }
+
+            Some((guarantees_return, close + 1))
+        }
+        TokenKind::KwReturn => {
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            Some((true, semicolon + 1))
+        }
+        TokenKind::KwIf => {
+            let open = start + 1;
+            if tokens.get(open)?.kind != TokenKind::LParen {
+                return None;
+            }
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
+            }
+
+            let (then_returns, then_end) =
+                statement_returns_on_all_paths(tokens, close + 1, limit)?;
+            if tokens.get(then_end).map(|token| token.kind) == Some(TokenKind::KwElse) {
+                let (else_returns, else_end) =
+                    statement_returns_on_all_paths(tokens, then_end + 1, limit)?;
+                Some((then_returns && else_returns, else_end))
+            } else {
+                Some((false, then_end))
+            }
+        }
+        TokenKind::KwFor | TokenKind::KwWhile => {
+            let open = start + 1;
+            if tokens.get(open)?.kind != TokenKind::LParen {
+                return None;
+            }
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
+            }
+            let (_, body_end) =
+                statement_returns_on_all_paths(tokens, close + 1, limit)?;
+            // A for/while body may execute zero times.
+            Some((false, body_end))
+        }
+        TokenKind::KwDo => {
+            let (body_returns, body_end) =
+                statement_returns_on_all_paths(tokens, start + 1, limit)?;
+            if tokens.get(body_end).map(|token| token.kind) != Some(TokenKind::KwWhile)
+                || tokens.get(body_end + 1).map(|token| token.kind) != Some(TokenKind::LParen)
+            {
+                return None;
+            }
+            let close = matching_paren(tokens, body_end + 1)?;
+            if tokens.get(close + 1).map(|token| token.kind) != Some(TokenKind::Semicolon) {
+                return None;
+            }
+            // A do-body executes at least once.
+            Some((body_returns, close + 2))
+        }
+        TokenKind::KwJump | TokenKind::At => None,
+        _ => {
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            Some((false, semicolon + 1))
+        }
+    }
+}
+
+fn statement_semicolon(tokens: &[Token], start: usize, limit: usize) -> Option<usize> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate().take(limit).skip(start) {
+        match token.kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.checked_sub(1)?,
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.checked_sub(1)?,
+            TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+                return Some(index);
+            }
+            TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return None,
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            TokenKind::LParen => {
+                paren_depth += 1;
+                continue;
+            }
+            TokenKind::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if brace_depth != 0 || paren_depth != 0 {
+            continue;
+        }
+
+        let Some((name_index, open, return_type)) = function_header_at(tokens, index) else {
+            continue;
+        };
+        if return_type == "void" {
+            continue;
+        }
+
+        let Some(parameter_close) = matching_paren(tokens, open) else {
+            continue;
+        };
+        let body_open = parameter_close + 1;
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+        let Some(body_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+
+        // LSL jump/labels can transfer control non-locally. Until those edges
+        // are modeled, skip this rule for the affected function.
+        if tokens[body_open + 1..body_close]
+            .iter()
+            .any(|item| matches!(item.kind, TokenKind::KwJump | TokenKind::At))
+        {
+            continue;
+        }
+
+        let Some((guarantees_return, _)) =
+            statement_returns_on_all_paths(tokens, body_open, body_close + 1)
+        else {
+            continue;
+        };
+
+        if !guarantees_return {
+            let name = &tokens[name_index];
+            diagnostics.push(Diagnostic {
+                code: "SEM009",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "function {} may reach the end without returning a value",
+                    name.lexeme
+                ),
+                span: name.span,
+            });
         }
     }
 }
@@ -1807,6 +2000,92 @@ mod tests {
             !diagnostics
                 .iter()
                 .any(|item| matches!(item.code, "SEM009" | "SEM010")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_value_function_without_a_return_statement() {
+        let diagnostics = analyze_source(
+            "integer get_value() { llOwnerSay(\"missing\"); } default { state_entry() { } }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_if_branch_that_can_fall_through() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { if (flag) return 1; } default { }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_if_else_when_both_branches_return() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { if (flag) return 1; else return 2; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_guard_returns_followed_by_a_fallback_return() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { if (flag == 1) return 1; if (flag == 2) return 2; return 0; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_assume_a_while_loop_returns() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { while (flag) { return 1; } } default { }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_do_while_with_an_unconditional_returning_body() {
+        let diagnostics = analyze_source(
+            "integer choose() { do { return 1; } while (1); } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_missing_return_check_for_functions_using_jump_labels() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { if (flag) jump done; return 1; @done; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_require_value_returns_from_no_return_functions() {
+        let diagnostics = analyze_source("do_work() { llOwnerSay(\"done\"); } default { }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM009"),
             "{diagnostics:?}"
         );
     }
