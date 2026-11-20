@@ -169,6 +169,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) {
+        if self.matches(TokenKind::Semicolon) {
+            return;
+        }
         if self.check(TokenKind::LBrace) {
             self.parse_block();
         } else if self.matches(TokenKind::KwIf) {
@@ -951,6 +954,27 @@ mod tests {
                     while (i > 0) i -= 1;
                     do { i += 1; } while (i < 1);
                     return;
+                }
+            }
+            "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_empty_statements() {
+        let diagnostics = parse_source(
+            r#"
+            default
+            {
+                state_entry()
+                {
+                    ;
+                    integer i;
+                    if (TRUE) ; else ;
+                    for (i = 0; i < 1; ++i) ;
+                    while (i > 0) ;
+                    do ; while (FALSE);
                 }
             }
             "#,
