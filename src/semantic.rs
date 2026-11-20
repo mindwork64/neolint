@@ -3358,6 +3358,28 @@ mod tests {
     }
 
     #[test]
+    fn reports_component_compound_assignments_with_known_unsupported_operand_pairs() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    position.x += "wrong";
+                    position.y %= 2;
+                }
+            }"#,
+        );
+        let invalid = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM018")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid.len(), 2, "{diagnostics:?}");
+        assert!(
+            invalid.iter().all(|item| item.message.contains("not supported")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn skips_component_assignments_with_unknown_base_or_rhs_types() {
         let diagnostics = analyze_source(
             "default { state_entry() { llExtensionVector().x = 1.0; vector position; position.x = llExtensionValue(); } }",
@@ -3405,6 +3427,39 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM016"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_compound_assignments_with_known_unsupported_operand_pairs() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    integer count;
+                    float ratio;
+                    string label;
+                    count += "wrong";
+                    ratio %= 2;
+                    label -= "wrong";
+                }
+            }"#,
+        );
+        let invalid = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM017")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid.len(), 3, "{diagnostics:?}");
+        assert!(
+            invalid.iter().any(|item| item.message.contains("integer and string")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            invalid.iter().any(|item| item.message.contains("float and integer")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            invalid.iter().any(|item| item.message.contains("string and string")),
             "{diagnostics:?}"
         );
     }
