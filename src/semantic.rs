@@ -1188,6 +1188,47 @@ mod tests {
     }
 
     #[test]
+    fn reports_user_function_arity_mismatches() {
+        let diagnostics = analyze_source(
+            "integer add(integer left, integer right) { return left + right; } default { state_entry() { add(1); } }",
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "SEM005" && item.message.contains("expects 2")));
+    }
+
+    #[test]
+    fn reports_user_function_argument_type_mismatches() {
+        let diagnostics = analyze_source(
+            r#"string echo(string message) { return message; } default { state_entry() { echo(42); } }"#,
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "SEM006" && item.message.contains("expected string")));
+    }
+
+    #[test]
+    fn infers_user_function_return_types_for_builtin_calls() {
+        let diagnostics = analyze_source(
+            r#"integer makeCount() { return 1; } default { state_entry() { llOwnerSay(makeCount()); } }"#,
+        );
+        assert!(diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_valid_user_function_calls_and_return_types() {
+        let diagnostics = analyze_source(
+            r#"string getName() { return "Ada"; } integer addOne(integer value) { return value + 1; } default { state_entry() { llOwnerSay(getName()); addOne(2); } }"#,
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM004" | "SEM005" | "SEM006")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_wrong_event_parameter_count() {
         let diagnostics = analyze_source("default { state_entry() { } touch_start() { } }");
         assert!(diagnostics
