@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, a syntax parser, a conservative duplicate-global semantic check, and a console CLI. Broader semantic analysis and lint rules are being added incrementally.
+The current implementation provides a source-aware lexer, a syntax parser, a vendored database of official LSL functions/events/constants, and a console CLI with three conservative semantic checks (SEM001–SEM003). Broader semantic analysis and lint rules are being added incrementally.
 
 ## References
 
@@ -24,7 +24,7 @@ The current implementation provides a source-aware lexer, a syntax parser, a con
 - Conservative semantic checks for duplicate globals/functions, built-in call arity, and known event handler signatures.
 - The canonical LSL definitions are data input; SLua definitions are not part of LSL.
 
-## Planned command line
+## Command line
 
 ```sh
 neolint script.lsl
