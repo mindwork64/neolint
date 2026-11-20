@@ -1251,6 +1251,119 @@ struct FlowFragment {
     next_index: usize,
 }
 
+fn parse_constant_integer_value(value: &str) -> Option<i32> {
+    let (negative, magnitude) = match value.strip_prefix('-') {
+        Some(magnitude) => (true, magnitude),
+        None => (false, value),
+    };
+    let parsed = if let Some(hex) = magnitude
+        .strip_prefix("0x")
+        .or_else(|| magnitude.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()? as i32
+    } else {
+        magnitude.parse::<u32>().ok()? as i32
+    };
+    if negative {
+        Some(parsed.wrapping_neg())
+    } else {
+        Some(parsed)
+    }
+}
+
+fn parse_integer_literal_value(value: &str) -> Option<i32> {
+    Some(value.parse::<u64>().ok()? as u32 as i32)
+}
+
+fn canonical_integer_constant(name: &str) -> Option<i32> {
+    let constant = definitions().constants.get(name)?;
+    if constant.type_name != "integer" {
+        return None;
+    }
+    parse_constant_integer_value(&constant.value)
+}
+
+/// Evaluate a condition expression to a provable 32-bit integer constant.
+/// Unknown identifiers, calls, unsupported syntax, and division/remainder by
+/// zero return None so SEM011 keeps both control-flow outcomes.
+fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usize) -> Option<i32> {
+    if start >= end {
+        return None;
+    }
+
+    let mut left = start;
+    let mut right = end;
+    while left < right && has_outer_parentheses(tokens, left, right) {
+        left += 1;
+        right -= 1;
+    }
+    if left >= right {
+        return None;
+    }
+
+    if let Some(operator) = find_top_level_binary_operator(tokens, left, right) {
+        let left_value = evaluate_constant_integer_expression(tokens, left, operator)?;
+        let right_value = evaluate_constant_integer_expression(tokens, operator + 1, right)?;
+        return match tokens[operator].kind {
+            TokenKind::Plus => Some(left_value.wrapping_add(right_value)),
+            TokenKind::Minus => Some(left_value.wrapping_sub(right_value)),
+            TokenKind::Star => Some(left_value.wrapping_mul(right_value)),
+            TokenKind::Slash => {
+                if right_value == 0 {
+                    None
+                } else {
+                    Some(left_value.wrapping_div(right_value))
+                }
+            }
+            TokenKind::Percent => {
+                if right_value == 0 {
+                    None
+                } else {
+                    Some(left_value.wrapping_rem(right_value))
+                }
+            }
+            TokenKind::ShiftLeft => Some(left_value.wrapping_shl(right_value as u32)),
+            TokenKind::ShiftRight => Some(left_value.wrapping_shr(right_value as u32)),
+            TokenKind::And => Some(left_value & right_value),
+            TokenKind::Or => Some(left_value | right_value),
+            TokenKind::Xor => Some(left_value ^ right_value),
+            TokenKind::AndAnd => Some((left_value != 0 && right_value != 0) as i32),
+            TokenKind::OrOr => Some((left_value != 0 || right_value != 0) as i32),
+            TokenKind::EqualEqual => Some((left_value == right_value) as i32),
+            TokenKind::BangEqual => Some((left_value != right_value) as i32),
+            TokenKind::Less => Some((left_value < right_value) as i32),
+            TokenKind::LessEqual => Some((left_value <= right_value) as i32),
+            TokenKind::Greater => Some((left_value > right_value) as i32),
+            TokenKind::GreaterEqual => Some((left_value >= right_value) as i32),
+            _ => None,
+        };
+    }
+
+    if matches!(
+        tokens[left].kind,
+        TokenKind::Bang | TokenKind::Tilde | TokenKind::Plus | TokenKind::Minus
+    ) {
+        let value = evaluate_constant_integer_expression(tokens, left + 1, right)?;
+        return match tokens[left].kind {
+            TokenKind::Bang => Some((value == 0) as i32),
+            TokenKind::Tilde => Some(!value),
+            TokenKind::Plus => Some(value),
+            TokenKind::Minus => Some(value.wrapping_neg()),
+            _ => None,
+        };
+    }
+
+    if right != left + 1 {
+        return None;
+    }
+
+    match tokens[left].kind {
+        TokenKind::IntegerLiteral => parse_integer_literal_value(&tokens[left].lexeme),
+        TokenKind::Identifier => canonical_integer_constant(&tokens[left].lexeme),
+        _ => None,
+    }
+}
+
 fn condition_possibilities(
     tokens: &[Token],
     start: usize,
@@ -1274,6 +1387,10 @@ fn condition_possibilities(
         } else {
             (true, true)
         };
+    }
+
+    if let Some(value) = evaluate_constant_integer_expression(tokens, left, right) {
+        return (value != 0, value == 0);
     }
 
     if right == left + 1 {
@@ -4271,6 +4388,176 @@ mod tests {
             analyze_source("integer choose() { while (FALSE) return 1; } default { }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_constant_integer_if_conditions() {
+        let diagnostics = analyze_source(
+            "integer yes() { if (1 + 2) return 1; } integer no() { if (1 > 2) return 1; } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function no"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_constant_integer_loop_conditions() {
+        let diagnostics = analyze_source(
+            "integer spin() { while (1 + 2) { } } integer dead() { while (1 > 2) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function dead"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_canonical_integer_constants_in_conditions() {
+        let diagnostics = analyze_source(
+            "integer yes() { while (TRUE + FALSE) { } } integer hex() { while (AGENT_AUTOPILOT) { } } integer no() { while (ALL_SIDES + 1) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function no"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_unary_constant_conditions() {
+        let diagnostics = analyze_source(
+            "integer unary() { while (!0 && (~0 == -1) && (-1 + +1 == 0)) { } } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_bitwise_and_shift_conditions() {
+        let diagnostics = analyze_source(
+            "integer shift() { while ((1 << 3) == 8) { } } integer bits() { while ((7 & 3) == 3 && (1 | 2) == 3 && (5 ^ 1) == 4) { } } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_integer_division_and_remainder_signs() {
+        let diagnostics = analyze_source(
+            "integer division() { while (-15 / 2 == -7) { } } integer remainder() { while (-15 % 4 == -3) { } } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_float_constant_condition_truthiness() {
+        let diagnostics = analyze_source(
+            "integer yes() { while (1.0) { } } integer no() { while (0.0) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function no"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_lsl_precedence_in_constant_conditions() {
+        let diagnostics = analyze_source(
+            "integer subtract_first() { while (1 - 2 + 3 == 2) { } } integer logical_group() { while (1 || 1 && 0) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function logical_group"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_short_circuit_constant_logical_conditions() {
+        let diagnostics = analyze_source(
+            "integer or_division() { while (1 || (1 / 0)) { } } integer and_division() { while (0 && (1 / 0)) { } } default { }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_wrapping_32_bit_conditions() {
+        let diagnostics = analyze_source(
+            "integer overflow() { while (2147483647 + 1) { } }              integer shift() { while (1 << 31) { } } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_wrapping_integer_literals() {
+        let diagnostics = analyze_source(
+            "integer yes() { while (2147483648) { } } integer no() { while (4294967296) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function no"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_division_by_zero_and_unknown_conditions_unresolved() {
+        let diagnostics = analyze_source(
+            "integer division() { while (1 / 0) { } }              integer remainder() { while (1 % 0) { } }              integer unknown() { while (llExtensionValue() + 1) { } } default { }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            3,
             "{diagnostics:?}"
         );
     }
