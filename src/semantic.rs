@@ -1786,8 +1786,9 @@ fn expression_binary_precedence(kind: TokenKind) -> Option<u8> {
         TokenKind::EqualEqual | TokenKind::BangEqual => 8,
         TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual => 9,
         TokenKind::ShiftLeft | TokenKind::ShiftRight => 10,
-        TokenKind::Plus | TokenKind::Minus => 11,
-        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 12,
+        TokenKind::Plus => 11,
+        TokenKind::Minus => 12,
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 13,
         _ => return None,
     })
 }
@@ -2446,6 +2447,24 @@ mod tests {
                 .filter(|item| item.code == "SEM004")
                 .count(),
             4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_lsl_subtraction_before_addition_precedence() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { list values; vector start; vector delta; llOwnerSay(values + start - delta); } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM004")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0]
+                .message
+                .contains("argument 1 has type list, expected string"),
             "{diagnostics:?}"
         );
     }
