@@ -55,8 +55,8 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM014`: error for explicit casts from known source types to unsupported LSL targets, scanned throughout expressions including local initializers; unknown source types are left unchecked.
 - `SEM015`: error for a global or local variable initializer whose known expression type is incompatible with the declared variable type; `integer` to `float` and `string` to `key` implicit conversions are accepted.
 - `SEM016`: error for a plain assignment to a declared variable when the known expression type is incompatible with the variable type. Compound assignments are checked by SEM017; vector/rotation component assignments are checked by SEM018.
-- `SEM017`: type-checks the result of `+=`, `-=`, `*=`, `/=`, and `%=` when the operands and result type are known; unsupported/unknown operator combinations are skipped.
-- `SEM018`: validates vector/rotation component assignments, checks that the component exists for the base type, and enforces `float` compatibility while remaining conservative for unknown expressions.
+- `SEM017`: type-checks the result of `+=`, `-=`, `*=`, `/=`, and `%=`; reports known unsupported operand combinations and incompatible results, while unresolved right-hand values are skipped.
+- `SEM018`: validates vector/rotation component assignments, checks component existence and `float` compatibility, and reports known unsupported compound operand pairs while remaining conservative for unknown expressions.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied.
 
