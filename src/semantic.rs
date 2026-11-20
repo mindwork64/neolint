@@ -2272,6 +2272,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_function_parameters_and_nested_local_variables() {
+        let diagnostics = analyze_source(
+            "integer add(integer left, integer right) { return left + right; } default { state_entry() { { string nested; llOwnerSay(nested); } llOwnerSay((string)add(1, 2)); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn warns_when_local_variable_is_used_before_its_declaration() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llOwnerSay(later); string later; } }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_wrong_event_parameter_count() {
         let diagnostics = analyze_source("default { state_entry() { } touch_start() { } }");
         assert!(diagnostics
