@@ -117,8 +117,8 @@ impl ScopeModel {
                 continue;
             }
 
-            let is_return_type = is_value_type(tokens[index].kind)
-                || tokens[index].kind == TokenKind::KwVoid;
+            let is_return_type =
+                is_value_type(tokens[index].kind) || tokens[index].kind == TokenKind::KwVoid;
             if !is_return_type
                 || tokens.get(index + 1).map(|token| token.kind) != Some(TokenKind::Identifier)
                 || tokens.get(index + 2).map(|token| token.kind) != Some(TokenKind::LParen)
@@ -395,11 +395,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn analyze_builtin_calls(
-    tokens: &[Token],
-    scopes: &ScopeModel,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn analyze_builtin_calls(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut Vec<Diagnostic>) {
     let builtins = definitions();
 
     for (index, token) in tokens.iter().enumerate() {
@@ -442,9 +438,7 @@ fn analyze_builtin_calls(
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes)
-            else {
+            let Some(actual_type) = infer_expression_type(tokens, range.0, range.1, scopes) else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -649,14 +643,12 @@ fn infer_expression_type(
             TokenKind::IntegerLiteral => Some("integer".to_owned()),
             TokenKind::FloatLiteral => Some("float".to_owned()),
             TokenKind::StringLiteral => Some("string".to_owned()),
-            TokenKind::Identifier => scopes
-                .resolve(&token.lexeme, start)
-                .or_else(|| {
-                    definitions()
-                        .constants
-                        .get(token.lexeme.as_str())
-                        .map(|constant| constant.type_name.clone())
-                }),
+            TokenKind::Identifier => scopes.resolve(&token.lexeme, start).or_else(|| {
+                definitions()
+                    .constants
+                    .get(token.lexeme.as_str())
+                    .map(|constant| constant.type_name.clone())
+            }),
             _ => None,
         };
     }
