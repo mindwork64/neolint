@@ -40,6 +40,8 @@ Built-in functions, constants, and related metadata should come from the officia
 
 The lexer preserves UTF-8 byte offsets and one-based line/column positions. Unicode is accepted in comments and string contents. Identifiers are currently ASCII-only; unsupported non-ASCII characters outside comments/strings receive a lexical diagnostic until verified against the official language implementation.
 
-## Current limitations
+## Current implementation and limitations
 
-The initial release implements lexical analysis only. It does not yet parse scripts, validate event signatures, resolve names, check types, or apply lint rules. A clean lexer result is not a claim that the whole script is valid LSL.
+The current CLI performs lexical analysis, syntax validation, and one conservative semantic check: duplicate top-level variable/function declarations. It does not yet validate built-in function signatures, event handler signatures, general name resolution, types, or style/correctness lint rules.
+
+A clean result means only that the implemented checks found no issue. It is not a claim that the official LSL compiler would accept the script.
