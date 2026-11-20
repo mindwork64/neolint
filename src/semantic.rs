@@ -651,7 +651,10 @@ mod tests {
     fn leaves_unknown_variable_types_unchecked() {
         let diagnostics =
             analyze_source(r#"default { state_entry() { integer amount; llOwnerSay(amount); } }"#);
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
