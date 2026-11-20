@@ -750,9 +750,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_bitwise_and_shift_compound_assignments() {
         for operator in ["&=", "|=", "^=", "<<=", ">>="] {
-            let source = format!(
-                "default {{ state_entry() {{ integer value; value {operator} 1; }} }}"
-            );
+            let source =
+                format!("default {{ state_entry() {{ integer value; value {operator} 1; }} }}");
             let diagnostics = parse_source(&source);
             assert!(
                 !diagnostics.is_empty(),
