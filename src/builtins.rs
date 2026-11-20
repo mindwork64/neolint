@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const BUILTIN_SOURCE: &str = include_str!("../data/lsl-builtins.txt");
+const DEPRECATED_SOURCE: &str = include_str!("../data/lsl-deprecated.txt");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
@@ -28,6 +29,7 @@ pub struct LslDefinitions {
     pub functions: HashMap<String, Signature>,
     pub events: HashMap<String, Signature>,
     pub constants: HashMap<String, ConstantDefinition>,
+    pub deprecated_functions: HashSet<String>,
 }
 
 static DEFINITIONS: OnceLock<LslDefinitions> = OnceLock::new();
@@ -96,7 +98,17 @@ fn parse_definitions(source: &str) -> LslDefinitions {
         }
     }
 
+    definitions.deprecated_functions = parse_deprecated_functions(DEPRECATED_SOURCE);
     definitions
+}
+
+fn parse_deprecated_functions(source: &str) -> HashSet<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_constant(line: &str) -> Option<ConstantDefinition> {
@@ -173,6 +185,19 @@ mod tests {
         assert_eq!(definitions.functions.len(), 529);
         assert_eq!(definitions.events.len(), 43);
         assert_eq!(definitions.constants.len(), 1082);
+    }
+
+    #[test]
+    fn parses_only_canonical_lsl_deprecation_metadata() {
+        let definitions = definitions();
+        assert_eq!(definitions.deprecated_functions.len(), 28);
+        assert!(definitions.deprecated_functions.contains("llCloud"));
+        assert!(definitions.deprecated_functions.contains("llSetPrimURL"));
+        assert!(definitions
+            .deprecated_functions
+            .iter()
+            .all(|name| definitions.functions.contains_key(name)));
+        assert!(!definitions.deprecated_functions.contains("ll.GetPos"));
     }
 
     #[test]
