@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Extract canonical deprecated LSL function names from lsl_definitions.yaml.
 
-Only the LSL `deprecated` property inside the `functions` section is read.
-The separate `slua-deprecated` property is intentionally ignored.
+Only the LSL \`deprecated\` property inside the \`functions\` section is read.
+The separate \`slua-deprecated\` property is intentionally ignored.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ import sys
 from pathlib import Path
 
 
-FUNCTION_HEADER = re.compile(r"^  (ll[A-Za-z0-9_]+):\\s*$")
-DEPRECATED_FIELD = re.compile(r"^    deprecated:\\s*(.*?)\\s*$")
-TOP_LEVEL_KEY = re.compile(r"^[a-z][a-z0-9_-]*:\\s*$")
+FUNCTION_HEADER = re.compile(r"^  (ll[A-Za-z0-9_]+):\s*$")
+DEPRECATED_FIELD = re.compile(r"^    deprecated:\s*(.*?)\s*$")
+TOP_LEVEL_KEY = re.compile(r"^[a-z][a-z0-9_-]*:\s*$")
 
 
 def extract_deprecated_functions(source: str) -> list[str]:
@@ -92,7 +92,7 @@ def main() -> int:
         "",
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\\n".join(output), encoding="utf-8")
+    output_path.write_text("\n".join(output), encoding="utf-8")
     print(f"Extracted {len(names)} deprecated LSL function(s) to {output_path}")
     return 0
 
