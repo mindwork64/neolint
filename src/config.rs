@@ -25,16 +25,18 @@ impl LintConfig {
             }
 
             let Some((key, value)) = line.split_once('=') else {
-                return Err(format!(
-                    "line {line_number}: expected 'key = value'"
-                ));
+                return Err(format!("line {line_number}: expected 'key = value'"));
             };
 
             let key = key.trim();
             let value = value.trim();
 
             if key == "disable" {
-                for rule in value.split(',').map(str::trim).filter(|rule| !rule.is_empty()) {
+                for rule in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|rule| !rule.is_empty())
+                {
                     validate_rule_code(rule)
                         .map_err(|error| format!("line {line_number}: {error}"))?;
                     config.disabled_rules.insert(rule.to_owned());
@@ -44,8 +46,7 @@ impl LintConfig {
 
             if let Some(rule) = key.strip_prefix("severity.") {
                 let rule = rule.trim();
-                validate_rule_code(rule)
-                    .map_err(|error| format!("line {line_number}: {error}"))?;
+                validate_rule_code(rule).map_err(|error| format!("line {line_number}: {error}"))?;
                 let severity = parse_severity(value)
                     .ok_or_else(|| format!(
                         "line {line_number}: invalid severity '{value}' (expected error, warning or info)"
@@ -70,8 +71,7 @@ impl LintConfig {
 
     pub fn set_severity(&mut self, rule: &str, severity: Severity) -> Result<(), String> {
         validate_rule_code(rule)?;
-        self.severity_overrides
-            .insert(rule.to_owned(), severity);
+        self.severity_overrides.insert(rule.to_owned(), severity);
         Ok(())
     }
 
