@@ -642,10 +642,11 @@ mod tests {
 
     #[test]
     fn rejects_void_as_a_parameter_list_marker() {
-        let diagnostics =
-            parse_source("integer value(void) { return 1; } default { }");
+        let diagnostics = parse_source("integer value(void) { return 1; } default { }");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR003"),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR003"),
             "{diagnostics:?}"
         );
     }
