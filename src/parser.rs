@@ -1100,6 +1100,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_component_increment_and_decrement_targets() {
+        let diagnostics = parse_source(
+            "default { state_entry() { vector vec; rotation rot; vec.x++; --vec.y; rot.s++; --rot.z; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR011")
+                .count(),
+            4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn accepts_increment_and_decrement_of_variables() {
         let diagnostics = parse_source(
             "default { state_entry() { integer first; integer second; ++first; second++; --(first); (second)--; } }",

@@ -220,7 +220,8 @@ Tests:
 
 ```text
 expression              := assignment-expression
-assignment-expression   := logical-expression [ assignment-operator expression ]
+assignment-expression   := logical-expression
+                         | assignment-target assignment-operator expression
 logical-expression      := bitwise-or-expression { ( "&&" | "||" ) bitwise-or-expression }
 bitwise-or-expression   := bitwise-xor-expression { "|" bitwise-xor-expression }
 bitwise-xor-expression  := bitwise-and-expression { "^" bitwise-and-expression }
@@ -233,31 +234,38 @@ subtractive-expression  := multiplicative-expression { "-" multiplicative-expres
 multiplicative-expression := unary-expression { ( "*" | "/" | "%" ) unary-expression }
 unary-expression        := primary-expression
                          | ( "!" | "~" | "+" | "-" ) unary-expression
-                         | ( "++" | "--" ) lvalue
-primary-expression      := identifier
-                         | literal
+                         | ( "++" | "--" ) increment-target
+primary-expression      := literal
+                         | variable-reference
                          | "(" expression ")"
                          | call-expression
                          | cast-expression
                          | list-literal
                          | vector-or-rotation-literal
-                         | primary-expression "." identifier
-                         | primary-expression ( "++" | "--" )
+                         | component-access
+                         | increment-target ( "++" | "--" )
 call-expression         := identifier "(" [ expression-list ] ")"
 cast-expression         := "(" type ")" unary-expression
 list-literal            := "[" [ expression-list ] "]"
 vector-or-rotation-literal := "<" expression "," expression "," expression [ "," expression ] ">"
 expression-list         := expression { "," expression }
-lvalue                  := identifier
-                         | identifier "." identifier
-                         | "(" lvalue ")"
+assignment-target       := variable-reference
+                         | component-access
+                         | "(" assignment-target ")"
+increment-target        := variable-reference
+component-access        := variable-reference "." component-name
+variable-reference      := identifier
+                         | "(" variable-reference ")"
+component-name          := "x" | "y" | "z" | "s"
 assignment-operator     := "=" | "+=" | "-=" | "*=" | "/=" | "%="
 literal                 := integer-literal | float-literal | string-literal
 ```
 
+Assignment targets and increment/decrement targets are deliberately different in neolint: assignment accepts a variable-reference or a component-access; `++`/`--` accepts only a variable-reference. Component names are syntactically limited to `x`, `y`, `z`, and `s`; whether a component is valid for the actual vector/rotation type is checked by SEM018/SEM019, not by this grammar. The component-increment restriction is covered by `src/parser.rs::tests::rejects_component_increment_and_decrement_targets`.
+
 `vector-or-rotation-literal` components are parsed at a precedence floor above relational operators; the production above intentionally over-approximates the component expression syntax.
 
-### Precedence and associativity
+### Binary operator precedence and associativity
 
 [Official][Tested]
 
@@ -296,8 +304,8 @@ neolint deliberately follows the official operator page and its regression test,
 
 - [Tested] `=`, `+=`, `-=`, `*=`, `/=`, and `%=` are accepted.
 - [Tested] Bitwise/shift compound assignments (`&=`, `|=`, `^=`, `<<=`, `>>=`) are rejected.
-- [Tested] Assignment `LHS` must be a variable or vector/rotation component (`PAR010`).
-- [Tested] Prefix/postfix `++`/`--` require a variable operand (`PAR011`).
+- [Tested] Assignment targets are variable references or a variable with a component selector using `x`, `y`, `z`, or `s`; grouped forms are accepted. `1 = 2` and `first + second = 1` are rejected with `PAR010`.
+- [Tested] Prefix/postfix `++`/`--` accept only a variable reference, not a component. Component increments such as `vec.x++` are rejected with `PAR011`.
 - [Tested] Chained assignments such as `a = b = 1` are accepted.
 
 ### Literals and special expressions
@@ -427,7 +435,7 @@ See:
 | Block / empty statement | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Compiler grammar + tested |
 | Local declaration | `tests/grammar_inventory.rs::declared_types_and_declarations_inventory_positive` | `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers` | Tested |
 | Expression statement | `tests/grammar_inventory.rs::expressions_inventory_positive` | — | Tested |
-| Assignment / compound | `src/parser.rs::tests::accepts_variable_assignment_targets_and_chained_assignments` | `src/parser.rs::tests::rejects_assignment_to_non_variable_expressions` | Tested |
+| Assignment / compound | `src/parser.rs::tests::accepts_variable_assignment_targets_and_chained_assignments`; `src/parser.rs::tests::accepts_vector_and_rotation_component_assignment_targets` | `src/parser.rs::tests::rejects_assignment_to_non_variable_expressions`; `src/parser.rs::tests::rejects_component_assignment_from_non_variable_bases` | Tested |
 | `if` / `else` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Tested |
 | `for` | `tests/grammar_inventory.rs::statements_inventory_positive`; `src/parser.rs::tests::accepts_for_expression_lists`; `tests/grammar_inventory.rs::for_condition_is_required_inventory` | `src/parser.rs::tests::rejects_variable_declarations_in_for_initializers` | Tested; comma list from compiler grammar |
 | `while` / `do-while` | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Tested |
@@ -437,7 +445,7 @@ See:
 | Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals` | — | Tested |
 | Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | — | Tested |
 | Unary/binary/logical/comparison | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::logical_and_or_operators_share_lsl_precedence` | — | Tested |
-| Increment/decrement | `src/parser.rs::tests::accepts_increment_and_decrement_of_variables` | `src/parser.rs::tests::rejects_increment_and_decrement_of_non_variables` | Tested |
+| Increment/decrement | `src/parser.rs::tests::accepts_increment_and_decrement_of_variables` | `src/parser.rs::tests::rejects_increment_and_decrement_of_non_variables`; `src/parser.rs::tests::rejects_component_increment_and_decrement_targets` | Tested; components are not increment targets |
 | List/vector/rotation literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::declaration_initializers_cover_literal_expressions_and_commas` | — | Tested |
 | Component access | `src/parser.rs::tests::accepts_component_access_on_vector_and_rotation_variables` | `src/parser.rs::tests::rejects_component_access_on_literals_and_function_results` | Tested |
 | `<`/`>` ambiguity | `tests/vector_literal_contexts.rs::relational_angle_brackets_remain_conservative` | — | Tested; inference conservative |
