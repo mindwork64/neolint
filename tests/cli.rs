@@ -82,6 +82,52 @@ fn unresolved_variable_warning_can_be_escalated_or_disabled() {
 }
 
 #[test]
+fn deprecated_builtin_warning_can_be_escalated_or_disabled() {
+    let directory = temporary_directory();
+    let source = directory.join("deprecated.lsl");
+
+    fs::write(
+        &source,
+        r#"default { state_entry() { llSoundPreload("sound"); } }"#,
+    )
+    .unwrap();
+
+    let default_output = neolint().arg(&source).output().unwrap();
+    assert!(default_output.status.success());
+    let default_stdout = String::from_utf8(default_output.stdout).unwrap();
+    assert!(default_stdout.contains("warning[SEM013]"), "{default_stdout}");
+
+    let escalated = neolint()
+        .arg("--severity")
+        .arg("SEM013=error")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(escalated.status.code(), Some(1));
+    let escalated_stdout = String::from_utf8(escalated.stdout).unwrap();
+    assert!(
+        escalated_stdout.contains("error[SEM013]"),
+        "{escalated_stdout}"
+    );
+
+    let disabled = neolint()
+        .arg("--disable")
+        .arg("SEM013")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(disabled.status.success());
+    let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
+    assert!(
+        disabled_stdout.contains("no diagnostics"),
+        "{disabled_stdout}"
+    );
+    assert!(!disabled_stdout.contains("SEM013"), "{disabled_stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn severity_override_changes_exit_code_and_output() {
     let directory = temporary_directory();
     let source = directory.join("wrong-argument.lsl");
