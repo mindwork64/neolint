@@ -59,7 +59,10 @@ fn unresolved_variable_warning_can_be_escalated_or_disabled() {
         .unwrap();
     assert_eq!(escalated.status.code(), Some(1));
     let escalated_stdout = String::from_utf8(escalated.stdout).unwrap();
-    assert!(escalated_stdout.contains("error[SEM012]"), "{escalated_stdout}");
+    assert!(
+        escalated_stdout.contains("error[SEM012]"),
+        "{escalated_stdout}"
+    );
 
     let disabled = neolint()
         .arg("--disable")
@@ -69,7 +72,10 @@ fn unresolved_variable_warning_can_be_escalated_or_disabled() {
         .unwrap();
     assert!(disabled.status.success());
     let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
-    assert!(disabled_stdout.contains("no diagnostics"), "{disabled_stdout}");
+    assert!(
+        disabled_stdout.contains("no diagnostics"),
+        "{disabled_stdout}"
+    );
     assert!(!disabled_stdout.contains("SEM012"), "{disabled_stdout}");
 
     fs::remove_dir_all(directory).unwrap();
