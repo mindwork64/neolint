@@ -351,7 +351,7 @@ string-character := "a character other than an unescaped quote or line break"
                   | "\" "any character"
 ```
 
-- Integers are decimal digit sequences or `0x`/`0X` hexadecimal literals. Hex digits include `e`/`E`; they are not exponent markers in this form. Hex values are reduced to 32 bits and interpreted as signed two's-complement (`0xFFFFFFFF` is `-1`, `0x80000000` is `i32::MIN`).
+- Integers are decimal digit sequences or `0x`/`0X` hexadecimal literals. Hex digits include `e`/`E`; they are not exponent markers in this form. Hex values in `0..=0xFFFFFFFF` are interpreted as signed two's-complement (`0xFFFFFFFF` is `-1`, `0x80000000` is `i32::MIN`); leading zeros are allowed. Values above `0xFFFFFFFF` remain syntactically valid integer literals, but SEM011 leaves their value unknown.
 - A `0x` prefix without at least one hex digit is not a hex literal; it falls back to decimal `0` followed by an identifier, matching the pinned lexer.
 - Floats include `.5`, `1.`, and exponent forms such as `1e-3`.
 - Strings are double-quoted; escaped quotes are retained as string content by the lexer.

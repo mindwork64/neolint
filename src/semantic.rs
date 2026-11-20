@@ -1258,7 +1258,7 @@ fn parse_hex_integer_digits(digits: &str) -> Option<u32> {
 
     let mut bits = 0u32;
     for ch in digits.chars() {
-        bits = bits.wrapping_mul(16).wrapping_add(ch.to_digit(16)?);
+        bits = bits.checked_mul(16)?.checked_add(ch.to_digit(16)?)?;
     }
     Some(bits)
 }
@@ -4513,8 +4513,8 @@ mod tests {
         assert_eq!(evaluate_constant_source("0xFFFFFFFF"), Some(-1));
         assert_eq!(evaluate_constant_source("0x80000000"), Some(i32::MIN));
         assert_eq!(evaluate_constant_source("0x7FFFFFFF"), Some(i32::MAX));
-        assert_eq!(evaluate_constant_source("0x100000000"), Some(0));
-        assert_eq!(evaluate_constant_source("0x1FFFFFFFF"), Some(-1));
+        assert_eq!(evaluate_constant_source("0x0000000000000001"), Some(1));
+        assert_eq!(evaluate_constant_source("0x00000000FFFFFFFF"), Some(-1));
         assert_eq!(evaluate_constant_source("0x1e3"), Some(483));
         assert_eq!(evaluate_constant_source("0x1e+2"), Some(32));
         assert_eq!(evaluate_constant_source("0x1e-3"), Some(27));
@@ -4525,6 +4525,22 @@ mod tests {
                 evaluate_constant_source(source),
                 None,
                 "malformed hex was evaluated: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_hex_values_above_u32_max() {
+        for source in [
+            "0x100000000",
+            "0x1FFFFFFFF",
+            "0x0000000100000000",
+            "0x123456789ABCDEF",
+        ] {
+            assert_eq!(
+                evaluate_constant_source(source),
+                None,
+                "out-of-range hex was evaluated: {source:?}"
             );
         }
     }
@@ -4708,7 +4724,6 @@ mod tests {
             integer true_min() { while (0x80000000) { } }
             integer true_max() { while (0x7FFFFFFF) { } }
             integer false_zero() { while (0x0) { } }
-            integer false_wrapped() { while (0x100000000) { } }
             integer wrap_zero() { while (0xFFFFFFFF + 1) { } }
             integer exponent_digit() { while (0x1e3 == 483) { } }
             default { }"#,
@@ -4718,7 +4733,24 @@ mod tests {
                 .iter()
                 .filter(|item| item.code == "SEM011")
                 .count(),
-            3,
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_out_of_range_hex_conditions_unknown() {
+        let diagnostics = analyze_source(
+            r#"integer first() { while (0x100000000) { } }
+            integer second() { while (0x1FFFFFFFF) { } }
+            default { }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            2,
             "{diagnostics:?}"
         );
     }
