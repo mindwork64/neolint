@@ -65,12 +65,15 @@ The current CLI performs lexical analysis, syntax validation, and the following 
 - `SEM006`: provable argument type mismatch for a known user-defined function.
 - `SEM007`: duplicate variable declaration in the same lexical scope, including redeclaration of a function parameter. Shadowing a name in a nested block is allowed.
 - `SEM008`: explicit return-statement validation in user-defined functions: return-value presence and provable return-expression type compatibility.
+- `SEM009`: duplicate jump labels within a single function or event-handler code scope.
+- `SEM010`: jump targets that are missing from the current function/event or inaccessible because they are declared in a nested block.
+- `SEM011`: detects value-returning functions that may reach the end without returning a value. It analyzes sequential blocks and `if/else` branches; `for/while` loops are not considered guaranteed to execute, while a `do-while` body executes at least once. Functions containing `jump` statements or labels are skipped until jump control-flow edges are modeled.
 
-The scope model handles function and event parameters, global/local declarations, nested block scopes, and shadowing. Type checks are deliberately conservative: unresolved variables and unknown extension functions are not assigned guessed types and are not reported as undefined symbols. SEM008 checks explicit return statements but does not prove that every control-flow path in a value-returning function returns a value.
+The scope model handles function and event parameters, global/local declarations, nested block scopes, shadowing, and lexical access checks for jump labels. Type checks are deliberately conservative: unresolved variables and unknown extension functions are not assigned guessed types and are not reported as undefined symbols. SEM008 validates explicit return statements. SEM011 performs limited structured control-flow analysis, not a full control-flow-graph analysis; functions that use jump labels are skipped.
 
 Built-in function, event, and constant metadata is vendored in `data/lsl-builtins.txt` from the official `secondlife/lsl-definitions` generator output. It is pinned and licensed; ordinary lint runs do not access the network.
 
-Not implemented yet: complete user-symbol resolution, undefined-symbol diagnostics, proof that every control-flow path in a value-returning function returns a value, deprecation diagnostics, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
+Not implemented yet: complete user-symbol resolution, undefined-symbol diagnostics, full control-flow-graph analysis including jump edges, deprecation diagnostics, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
 
 LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 and SEM006 respect those conversions and do not guess the type of unresolved expressions.
 
