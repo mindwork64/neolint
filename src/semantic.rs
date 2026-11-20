@@ -976,9 +976,56 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unknown_variable_types_unchecked() {
+    fn resolves_local_and_global_variable_types() {
+        let diagnostics = analyze_source(
+            "integer globalAmount; default { state_entry() { integer localAmount; llOwnerSay(globalAmount); llOwnerSay(localAmount); llSleep(localAmount); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_function_and_event_parameter_types() {
+        let diagnostics = analyze_source(
+            "integer send(integer amount) { llOwnerSay(amount); return amount; } default { touch_start(integer total) { llOwnerSay(total); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn inner_scope_shadowing_uses_the_nearest_variable() {
+        let diagnostics = analyze_source(
+            "string value; default { state_entry() { integer value; llOwnerSay(value); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn inner_block_variables_do_not_leak_into_parent_scope() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { { integer hidden; } llOwnerSay(hidden); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_variable_types_remain_conservative() {
         let diagnostics =
-            analyze_source(r#"default { state_entry() { integer amount; llOwnerSay(amount); } }"#);
+            analyze_source(r#"default { state_entry() { llOwnerSay(notDeclared); } }"#);
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
