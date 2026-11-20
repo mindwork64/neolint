@@ -231,19 +231,31 @@ impl<'a> Parser<'a> {
             {
                 self.advance();
             }
-        } else if !self.check(TokenKind::Semicolon) {
-            self.parse_expression(1);
+        } else {
+            self.parse_for_expression_list();
         }
         self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
         if !self.check(TokenKind::Semicolon) {
             self.parse_expression(1);
         }
         self.expect(TokenKind::Semicolon, "expected ';' after for condition");
-        if !self.check(TokenKind::RParen) {
-            self.parse_expression(1);
-        }
+        self.parse_for_expression_list();
         self.expect(TokenKind::RParen, "expected ')' after for clauses");
         self.parse_statement();
+    }
+
+    fn parse_for_expression_list(&mut self) {
+        if self.check(TokenKind::Semicolon) || self.check(TokenKind::RParen) {
+            return;
+        }
+        if !self.parse_expression(1) {
+            return;
+        }
+        while self.matches(TokenKind::Comma) {
+            if !self.parse_expression(1) {
+                break;
+            }
+        }
     }
 
     fn parse_while_statement(&mut self) {
@@ -978,6 +990,14 @@ mod tests {
                 }
             }
             "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_for_expression_lists() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer i; integer j; for (i = 0, j = 0; i < 1; ++i, ++j) { } } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
