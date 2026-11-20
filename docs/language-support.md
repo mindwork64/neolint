@@ -70,7 +70,7 @@ The scope model handles function and event parameters, global/local declarations
 
 Built-in function, event, and constant metadata is vendored in `data/lsl-builtins.txt` from the official `secondlife/lsl-definitions` generator output. It is pinned and licensed; ordinary lint runs do not access the network.
 
-Not implemented yet: complete user-symbol resolution, undefined-symbol diagnostics, function return-statement/type validation, deprecation diagnostics, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
+Not implemented yet: complete user-symbol resolution, undefined-symbol diagnostics, proof that every control-flow path in a value-returning function returns a value, deprecation diagnostics, and the broader correctness/style lint rule set. The current scope and type model is intentionally partial and should not be mistaken for a complete compiler symbol table.
 
 LSL's implicit conversions are intentionally limited to integer-to-float and string-to-key. SEM004 and SEM006 respect those conversions and do not guess the type of unresolved expressions.
 
