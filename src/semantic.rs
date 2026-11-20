@@ -1299,6 +1299,36 @@ mod tests {
     }
 
     #[test]
+    fn analyzes_untyped_user_function_signatures() {
+        let diagnostics = analyze_source(
+            r#"say_message(string message) { llOwnerSay(message); } default { state_entry() { say_message(42); say_message(); } }"#,
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM005"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM006"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn detects_duplicate_untyped_user_functions() {
+        let diagnostics = analyze_source(
+            "say_message() { } say_message() { } default { state_entry() { } }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM001"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_wrong_event_parameter_count() {
         let diagnostics = analyze_source("default { state_entry() { } touch_start() { } }");
         assert!(diagnostics
