@@ -28,3 +28,4 @@ invalid_malformed_condition|invalid|invalid/malformed_condition.lsl|original|pro
 invalid_duplicate_event|invalid|invalid/duplicate_event.lsl|original|project-authored|valid|SEM020:1:error|1|none|Duplicate canonical event handler in one state
 invalid_duplicate_state|invalid|invalid/duplicate_state.lsl|original|project-authored|valid|SEM021:1:error|1|none|Duplicate named state declaration
 invalid_undefined_state|invalid|invalid/undefined_state.lsl|original|project-authored|valid|SEM022:1:error|1|none|Undefined state-change target in an event handler
+invalid_state_namespace|invalid|invalid/state_namespace.lsl|original|project-authored|valid|SEM021:2:error|1|none|State names collide with a global variable and a user function

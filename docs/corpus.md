@@ -20,12 +20,12 @@ tests/corpus.rs
 
 ## Snapshot
 
-* 28 fixtures total.
-* 9 small, 6 medium, 3 large, 10 invalid.
-* 28 original project-authored fixtures.
+* 29 fixtures total.
+* 9 small, 6 medium, 3 large, 11 invalid.
+* 29 original project-authored fixtures.
 * 0 third-party fixtures.
 
-Fixtures marked `diagnostics=none` are expected to be clean. Syntax-valid semantic-negative fixtures may intentionally emit SEM diagnostics. The ten `category=invalid` fixtures cover:
+Fixtures marked `diagnostics=none` are expected to be clean. Syntax-valid semantic-negative fixtures may intentionally emit SEM diagnostics. The eleven `category=invalid` fixtures cover:
 
 * `PAR006` — empty `for` condition;
 * `PAR007` — unclosed state;
@@ -41,7 +41,7 @@ Fixtures marked `diagnostics=none` are expected to be clean. Syntax-valid semant
 * `SEM018` — invalid vector component write;
 * `SEM019` — invalid vector/integer component read;
 * `SEM020` — duplicate canonical event handler;
-* `SEM021` — duplicate named state;
+* `SEM021` — duplicate named state or state/global/function namespace collision;
 * `SEM022` — undefined state-change target.
 
 ## Language coverage

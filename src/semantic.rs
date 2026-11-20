@@ -568,7 +568,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_missing_return_paths(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
-    analyze_state_topology(tokens, &scopes, &mut diagnostics);
+    analyze_state_topology(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
     diagnostics
 }
@@ -2070,9 +2070,21 @@ fn collect_state_info(tokens: &[Token], scopes: &ScopeModel) -> Vec<StateInfo> {
 fn analyze_state_topology(
     tokens: &[Token],
     scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let states = collect_state_info(tokens, scopes);
+    let global_variables: HashMap<&str, Span> = scopes
+        .scopes
+        .first()
+        .into_iter()
+        .flat_map(|scope| scope.variables.iter())
+        .filter_map(|(name, bindings)| {
+            bindings
+                .first()
+                .map(|binding| (name.as_str(), binding.span))
+        })
+        .collect();
     let mut seen_states: HashMap<&str, Span> = HashMap::new();
     for state in &states {
         // Parser owns the mandatory/unique default-state checks (PAR013/PAR014).
@@ -2086,6 +2098,29 @@ fn analyze_state_topology(
                 kind: DiagnosticKind::Semantic,
                 message: format!(
                     "duplicate state '{}'; first declared at {}:{}",
+                    state.name, previous.line, previous.column
+                ),
+                span: state.span,
+            });
+        } else if let Some(previous) = global_variables.get(state.name.as_str()) {
+            diagnostics.push(Diagnostic {
+                code: "SEM021",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "state '{}' conflicts with a global variable declared at {}:{}",
+                    state.name, previous.line, previous.column
+                ),
+                span: state.span,
+            });
+        } else if let Some(function) = user_functions.get(state.name.as_str()) {
+            let previous = tokens[function.declaration_index].span;
+            diagnostics.push(Diagnostic {
+                code: "SEM021",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "state '{}' conflicts with a function declared at {}:{}",
                     state.name, previous.line, previous.column
                 ),
                 span: state.span,
@@ -5819,6 +5854,42 @@ mod tests {
     }
 
     #[test]
+    fn reports_duplicate_timer_handlers() {
+        let diagnostics = analyze_source("default { timer() { } timer() { } }");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM020")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_event_and_signature_errors_independently() {
+        let diagnostics = analyze_source(
+            "default { touch_start(string total) { } touch_start(string total) { } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM003")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM020")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn allows_the_same_known_event_in_different_states() {
         let diagnostics =
             analyze_source("default { state_entry() { } } state running { state_entry() { } }");
@@ -5850,6 +5921,31 @@ mod tests {
             duplicates
                 .iter()
                 .all(|item| item.message.contains("running")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_state_namespace_collisions_with_globals_and_functions() {
+        let diagnostics = analyze_source(
+            "integer running; integer idle() { return 1; } default { } state running { } state idle { }",
+        );
+        let collisions = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM021")
+            .collect::<Vec<_>>();
+        assert_eq!(collisions.len(), 2, "{diagnostics:?}");
+        assert!(
+            collisions
+                .iter()
+                .any(|item| item.message.contains("running")
+                    && item.message.contains("global variable")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            collisions
+                .iter()
+                .any(|item| item.message.contains("idle") && item.message.contains("function")),
             "{diagnostics:?}"
         );
     }

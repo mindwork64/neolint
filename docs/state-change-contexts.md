@@ -62,14 +62,15 @@ The compiler was not built locally: its README requires `kwdb`, Python 2, `flex`
 
 - `state running;` and `state default;` are accepted in event handlers.
 - Both forms are accepted syntactically in user-defined function bodies, nested blocks, `if`/`else`, `while`, and `for`.
-- No semantic diagnostic is currently emitted for a state change in a user-defined function.
+- SEM022 validates state-change targets in known canonical event handlers. A target must be a declared named state or `default`.
+- SEM022 does not validate state changes in user-defined functions or unknown extension event handlers.
 - A missing state target (`state ;`) remains a syntax error (`PAR007`).
 
 ## Decision
 
-No new semantic diagnostic is introduced. The direct function restriction is documented, but the historical `if`-without-`else` workaround has contradictory status: it was observed working in 2013, described as a compiler quirk, and later said by a Linden to be invalid. Modern server behavior is unknown. The extracted compiler explains the historical compile-time path but is not a server runtime and cannot settle the current rule.
+SEM022 covers the unambiguous event-handler target check: if a known event handler says `state missing;` and no such state exists, that is a compiler-visible undefined name. The target is checked by token span; declarations may appear before or after the event handler.
 
-A rule that flags every function state change could reject a still-working workaround; a rule limited to direct statements would be incomplete. neolint therefore keeps the construct syntax-only and documents the uncertainty until modern compiler behavior can be verified.
+The state-change-in-function restriction remains unresolved. The historical `if`-without-`else` workaround has contradictory status, and the extracted compiler is not a current server runtime. neolint therefore does not reject function state changes and does not infer whether the workaround works. `state default;` remains valid.
 
 ## Sources
 
