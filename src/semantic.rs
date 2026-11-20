@@ -13,12 +13,31 @@ fn is_declaration_type(kind: TokenKind) -> bool {
             | TokenKind::KwList
             | TokenKind::KwVector
             | TokenKind::KwRotation
-            | TokenKind::KwVoid
     )
 }
 
 fn is_value_type(kind: TokenKind) -> bool {
     lsl_type_name(kind).is_some()
+}
+
+/// Return (function-name index, opening-parenthesis index, return type).
+/// LSL void functions omit a return type; "void" is only an internal type marker.
+fn function_header_at(tokens: &[Token], index: usize) -> Option<(usize, usize, String)> {
+    if let Some(return_type) = lsl_type_name(tokens.get(index)?.kind) {
+        let name_index = index + 1;
+        let open_index = index + 2;
+        if tokens.get(name_index)?.kind == TokenKind::Identifier
+            && tokens.get(open_index)?.kind == TokenKind::LParen
+        {
+            return Some((name_index, open_index, return_type.to_owned()));
+        }
+    } else if tokens[index].kind == TokenKind::Identifier
+        && tokens.get(index + 1)?.kind == TokenKind::LParen
+    {
+        return Some((index, index + 1, "void".to_owned()));
+    }
+
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -142,16 +161,9 @@ impl ScopeModel {
                 continue;
             }
 
-            let is_return_type =
-                is_value_type(tokens[index].kind) || tokens[index].kind == TokenKind::KwVoid;
-            if !is_return_type
-                || tokens.get(index + 1).map(|token| token.kind) != Some(TokenKind::Identifier)
-                || tokens.get(index + 2).map(|token| token.kind) != Some(TokenKind::LParen)
-            {
+            let Some((_, open, _)) = function_header_at(tokens, index) else {
                 continue;
-            }
-
-            let open = index + 2;
+            };
             let Some(close) = matching_paren(tokens, open) else {
                 continue;
             };
@@ -388,20 +400,13 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
             _ => {}
         }
 
-        if brace_depth != 0 || paren_depth != 0 || !is_declaration_type(token.kind) {
+        if brace_depth != 0 || paren_depth != 0 {
             continue;
         }
 
-        let Some(name) = tokens.get(index + 1) else {
+        let Some((name_index, open, return_type)) = function_header_at(tokens, index) else {
             continue;
         };
-        if name.kind != TokenKind::Identifier
-            || tokens.get(index + 2).map(|item| item.kind) != Some(TokenKind::LParen)
-        {
-            continue;
-        }
-
-        let open = index + 2;
         let Some(close) = matching_paren(tokens, open) else {
             continue;
         };
@@ -409,22 +414,12 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
             continue;
         }
 
-        let return_type = if token.kind == TokenKind::KwVoid {
-            "void".to_owned()
-        } else {
-            let Some(type_name) = lsl_type_name(token.kind) else {
-                continue;
-            };
-            type_name.to_owned()
-        };
-
-        functions
-            .entry(name.lexeme.clone())
-            .or_insert(UserFunctionSignature {
-                return_type,
-                parameter_types: parameter_types(tokens, open, close),
-                declaration_index: index + 1,
-            });
+        let name = &tokens[name_index];
+        functions.entry(name.lexeme.clone()).or_insert(UserFunctionSignature {
+            return_type,
+            parameter_types: parameter_types(tokens, open, close),
+            declaration_index: name_index,
+        });
     }
 
     functions
@@ -462,11 +457,20 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
             _ => {}
         }
 
-        if brace_depth != 0 || paren_depth != 0 || !is_declaration_type(token.kind) {
+        if brace_depth != 0 || paren_depth != 0 {
             continue;
         }
 
-        let Some(name) = tokens.get(index + 1) else {
+        let name = if is_declaration_type(token.kind) {
+            tokens.get(index + 1)
+        } else if token.kind == TokenKind::Identifier
+            && tokens.get(index + 1).map(|item| item.kind) == Some(TokenKind::LParen)
+        {
+            Some(token)
+        } else {
+            None
+        };
+        let Some(name) = name else {
             continue;
         };
         if name.kind != TokenKind::Identifier {
