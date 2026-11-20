@@ -554,12 +554,7 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
         | TokenKind::MinusEqual
         | TokenKind::StarEqual
         | TokenKind::SlashEqual
-        | TokenKind::PercentEqual
-        | TokenKind::AndEqual
-        | TokenKind::OrEqual
-        | TokenKind::XorEqual
-        | TokenKind::ShiftLeftEqual
-        | TokenKind::ShiftRightEqual => return Some((1, true)),
+        | TokenKind::PercentEqual => return Some((1, true)),
         // LSL gives && and || equal precedence; both are left-associative.
         TokenKind::OrOr | TokenKind::AndAnd => 3,
         TokenKind::Or => 5,
@@ -750,6 +745,20 @@ mod tests {
             "#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_unsupported_bitwise_and_shift_compound_assignments() {
+        for operator in ["&=", "|=", "^=", "<<=", ">>="] {
+            let source = format!(
+                "default {{ state_entry() {{ integer value; value {operator} 1; }} }}"
+            );
+            let diagnostics = parse_source(&source);
+            assert!(
+                !diagnostics.is_empty(),
+                "unsupported LSL compound assignment {operator} was accepted"
+            );
+        }
     }
 
     #[test]
