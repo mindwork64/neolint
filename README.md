@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with eighteen conservative semantic checks (SEM001–SEM018). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with nineteen conservative semantic checks (SEM001–SEM019). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -56,7 +56,8 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM015`: error for a global or local variable initializer whose known expression type is incompatible with the declared variable type; `integer` to `float` and `string` to `key` implicit conversions are accepted.
 - `SEM016`: error for a plain assignment to a declared variable when the known expression type is incompatible with the variable type. Compound assignments are checked by SEM017; vector/rotation component assignments are checked by SEM018.
 - `SEM017`: type-checks the result of `+=`, `-=`, `*=`, `/=`, and `%=`; reports known unsupported operand combinations and incompatible results, while unresolved right-hand values are skipped.
-- `SEM018`: validates vector/rotation component assignments, checks component existence and `float` compatibility, and reports known unsupported compound operand pairs while remaining conservative for unknown expressions.
+- `SEM018`: validates vector/rotation component writes, checks component existence and `float` compatibility, and reports known unsupported compound operand pairs while remaining conservative for unknown expressions.
+- `SEM019`: reports reads of invalid components on variables with known types (for example, `integer count; count.x`, `vector position; position.s`, or `rotation orientation; orientation.w`). Valid vector `.x/.y/.z` and rotation `.x/.y/.z/.s` reads remain `float`; component writes stay with SEM018 and unknown extension values are skipped.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied.
 
