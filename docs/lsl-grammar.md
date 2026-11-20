@@ -405,10 +405,15 @@ The parser is token-based and has no AST. Recovery is intentionally local and de
 
 - [Tested] `synchronize_top_level` tracks brace/paren/bracket nesting before resuming at a top-level type, `void`, `default`, or `state`; malformed function bodies do not swallow the next state.
 - [Tested] Malformed event headers and event bodies are skipped with balanced delimiters. Recovery stops at the containing state's closing brace or at the next event-like `identifier "("` at state depth, so later handlers and states remain parseable.
-- [Tested] Expression failures at the first token consume one token and continue; failures after a partial expression synchronize to the enclosing statement boundary. Malformed argument lists consume through their matching `)`.
+- [Tested] Expression failures at the first token consume one token and continue; failures after a partial expression synchronize to the enclosing statement boundary.
+- [Tested] Nested parenthesized, list, vector/rotation, and argument expressions propagate failure to the containing expression instead of being treated as successful.
+- [Tested] Malformed argument lists consume through a matching `)` when it is present. A top-level semicolon that is not followed by `)` terminates recovery, so a missing call close does not swallow the following independent statement.
+- [Tested] Conditions and `return` expressions synchronize at their clause or statement boundary; malformed `if`, `while`, `for`, `do-while`, and `return` forms produce one primary diagnostic in the focused matrix.
 - [Tested] Every loop has a progress guarantee: it consumes a token, returns, or reaches a delimiter boundary.
 - [Tested] EOF inside blocks, states, parameter lists, lists, and vector/rotation literals produces syntax diagnostics. Once the first EOF error is emitted, later missing-closing-token checks in the same parse are suppressed, so one truncated construct does not produce a brace cascade.
 - [Tested] `src/parser.rs::tests::incomplete_list_at_eof_reports_one_primary_diagnostic` and `src/parser.rs::tests::incomplete_block_at_eof_reports_one_primary_diagnostic` assert exact EOF positions.
+- [Tested] `src/parser.rs::tests::missing_call_close_preserves_later_statement_and_error` proves a missing `)` does not consume the next statement or hide its independent error.
+- [Tested] `src/parser.rs::tests::malformed_parenthesized_expression_recovers_at_statement_boundary`, `malformed_list_and_vector_components_recover_at_statement_boundary`, and `malformed_conditions_and_return_recover_per_statement` lock one-primary-diagnostic behavior and exact spans.
 - [Tested] No malformed input panics in the bounded regression set.
 - [Tested] `src/parser.rs::tests::repeated_malformed_statements_are_bounded` exercises 64 repeated malformed statements; `src/parser.rs::tests::deeply_nested_expressions_do_not_panic` exercises 128 nested parentheses.
 - [Limitation] Recovery is heuristic at malformed outer constructs. Unbalanced braces can still make an inner construct appear to belong to the outer context; the parser reports that context rather than reconstructing the missing syntax.
@@ -478,7 +483,8 @@ See:
 | Malformed delimiters | — | `tests/grammar_inventory.rs::focused_malformed_statement_diagnostics`; `tests/grammar_inventory.rs::extra_closing_delimiters_are_rejected_without_large_cascades` | Tested |
 | Parser recovery after malformed handler | `tests/grammar_inventory.rs::recovery_keeps_later_event_and_state_after_malformed_handler` | `src/parser.rs::tests::recovers_from_a_malformed_event_body_before_a_valid_event`; `src/parser.rs::tests::recovers_from_a_malformed_handler_before_a_valid_state` | Tested; balanced event/state recovery |
 | Malformed declarations / parameters | — | `src/parser.rs::tests::malformed_declarations_recover_without_losing_later_declarations`; `src/parser.rs::tests::recovers_from_a_malformed_function_parameter_list_before_a_state` | Tested |
-| Malformed expressions / arguments | — | `src/parser.rs::tests::malformed_expression_reports_one_primary_diagnostic`; `src/parser.rs::tests::malformed_argument_list_recovers_to_the_outer_statement`; `tests/grammar_inventory.rs::adjacent_binary_operators_are_rejected_without_cascades` | Tested |
+| Malformed expressions / arguments | — | `src/parser.rs::tests::malformed_expression_reports_one_primary_diagnostic`; `src/parser.rs::tests::missing_call_close_preserves_later_statement_and_error`; `src/parser.rs::tests::malformed_parenthesized_expression_recovers_at_statement_boundary`; `src/parser.rs::tests::malformed_list_and_vector_components_recover_at_statement_boundary`; `tests/grammar_inventory.rs::adjacent_binary_operators_are_rejected_without_cascades` | Tested; nested failures propagate |
+| Conditions / return recovery | — | `src/parser.rs::tests::malformed_conditions_and_return_recover_per_statement` | Tested; one primary diagnostic |
 | EOF / bounded stress | — | `tests/grammar_inventory.rs::incomplete_constructs_near_eof_report_syntax_errors`; `src/parser.rs::tests::incomplete_list_at_eof_reports_one_primary_diagnostic`; `src/parser.rs::tests::incomplete_block_at_eof_reports_one_primary_diagnostic`; `src/parser.rs::tests::repeated_malformed_statements_are_bounded`; `src/parser.rs::tests::deeply_nested_expressions_do_not_panic` | Tested; no timing assertions |
 
 ## References

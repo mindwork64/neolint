@@ -331,22 +331,17 @@ fn adjacent_binary_operators_are_rejected_without_cascades() {
     for source in [
         "default { state_entry() { integer value = 1 + * 2; } }",
         "default { state_entry() { integer value = 1 * / 2; } }",
-        "default { state_entry() { integer value = ; } }",
     ] {
         let diagnostics = parse_source(source);
-        assert!(
-            !diagnostics.is_empty(),
-            "adjacent operators were silently accepted: {source:?}"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.kind == DiagnosticKind::Syntax)
-                .count()
-                <= 2,
-            "too many syntax diagnostics for {source:?}: {diagnostics:?}"
+        assert_eq!(
+            syntax_codes(&diagnostics),
+            vec!["PAR005"],
+            "adjacent operators should produce one primary diagnostic for {source:?}"
         );
     }
+
+    let diagnostics = parse_source("default { state_entry() { integer value = ; } }");
+    assert_eq!(syntax_codes(&diagnostics), vec!["PAR006"]);
 }
 
 #[test]

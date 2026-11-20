@@ -197,8 +197,9 @@ impl<'a> Parser<'a> {
         } else if self.matches(TokenKind::KwDo) {
             self.parse_do_while_statement();
         } else if self.matches(TokenKind::KwReturn) {
-            if !self.check(TokenKind::Semicolon) {
-                self.parse_expression(1);
+            if !self.check(TokenKind::Semicolon) && !self.parse_expression(1) {
+                self.synchronize_statement();
+                return false;
             }
             self.expect(TokenKind::Semicolon, "expected ';' after return statement");
         } else if self.matches(TokenKind::KwJump) {
@@ -231,8 +232,11 @@ impl<'a> Parser<'a> {
 
     fn parse_if_statement(&mut self) {
         self.expect(TokenKind::LParen, "expected '(' after 'if'");
-        self.parse_expression(1);
-        self.expect(TokenKind::RParen, "expected ')' after if condition");
+        if !self.parse_expression(1) {
+            self.synchronize_condition();
+        } else {
+            self.expect(TokenKind::RParen, "expected ')' after if condition");
+        }
         self.parse_statement();
         if self.matches(TokenKind::KwElse) {
             self.parse_statement();
@@ -256,8 +260,11 @@ impl<'a> Parser<'a> {
             self.parse_for_expression_list();
         }
         self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
-        self.parse_expression(1);
-        self.expect(TokenKind::Semicolon, "expected ';' after for condition");
+        if !self.parse_expression(1) {
+            self.synchronize_for_condition();
+        } else {
+            self.expect(TokenKind::Semicolon, "expected ';' after for condition");
+        }
         self.parse_for_expression_list();
         self.expect(TokenKind::RParen, "expected ')' after for clauses");
         self.parse_statement();
@@ -279,8 +286,11 @@ impl<'a> Parser<'a> {
 
     fn parse_while_statement(&mut self) {
         self.expect(TokenKind::LParen, "expected '(' after 'while'");
-        self.parse_expression(1);
-        self.expect(TokenKind::RParen, "expected ')' after while condition");
+        if !self.parse_expression(1) {
+            self.synchronize_condition();
+        } else {
+            self.expect(TokenKind::RParen, "expected ')' after while condition");
+        }
         self.parse_statement();
     }
 
@@ -288,8 +298,11 @@ impl<'a> Parser<'a> {
         self.parse_statement();
         self.expect(TokenKind::KwWhile, "expected 'while' after do-body");
         self.expect(TokenKind::LParen, "expected '(' after 'while'");
-        self.parse_expression(1);
-        self.expect(TokenKind::RParen, "expected ')' after do-while condition");
+        if !self.parse_expression(1) {
+            self.synchronize_condition();
+        } else {
+            self.expect(TokenKind::RParen, "expected ')' after do-while condition");
+        }
         self.expect(
             TokenKind::Semicolon,
             "expected ';' after do-while statement",
@@ -346,8 +359,21 @@ impl<'a> Parser<'a> {
             } else {
                 precedence + 1
             };
+            let diagnostic_count = self.diagnostics.len();
             if !self.parse_expression(next_min) {
-                self.error_here("PAR005", "expected an expression after operator");
+                if self.diagnostics.len() == diagnostic_count {
+                    self.error_here("PAR005", "expected an expression after operator");
+                } else if self.diagnostics.len() == diagnostic_count + 1
+                    && self
+                        .diagnostics
+                        .last()
+                        .is_some_and(|diagnostic| diagnostic.code == "PAR006")
+                {
+                    if let Some(diagnostic) = self.diagnostics.last_mut() {
+                        diagnostic.code = "PAR005";
+                        diagnostic.message = "expected an expression after operator".to_owned();
+                    }
+                }
                 return false;
             }
         }
@@ -399,7 +425,9 @@ impl<'a> Parser<'a> {
                     self.error_here("PAR007", "function call suffix requires an identifier");
                 }
                 self.advance();
-                self.parse_argument_list();
+                if !self.parse_argument_list() {
+                    return false;
+                }
                 call_suffix_allowed = false;
             } else if self.matches(TokenKind::Dot) {
                 let base_is_variable =
@@ -414,7 +442,9 @@ impl<'a> Parser<'a> {
                         "vector/rotation component access requires a variable and a valid component name",
                     );
                 }
-                self.expect(TokenKind::Identifier, "expected a component name after '.'");
+                if !self.expect(TokenKind::Identifier, "expected a component name after '.'") {
+                    return false;
+                }
                 call_suffix_allowed = false;
             } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
                 if !is_variable_lvalue(self.tokens, primary_start, self.current) {
@@ -440,39 +470,48 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 self.advance();
-                self.parse_expression(1);
-                self.expect(TokenKind::RParen, "expected ')' after expression");
-                true
+                if !self.parse_expression(1) {
+                    return false;
+                }
+                self.expect(TokenKind::RParen, "expected ')' after expression")
             }
             TokenKind::LBracket => {
                 self.advance();
-                self.parse_delimited_expressions(TokenKind::RBracket);
-                true
+                self.parse_delimited_expressions(TokenKind::RBracket)
             }
             TokenKind::Less => {
                 self.advance();
                 // A top-level '>' closes the vector/rotation literal. Use a
                 // precedence floor above relational operators so it is not
                 // consumed as a comparison while parsing a component.
-                self.parse_expression(10);
-                self.expect(
+                if !self.parse_expression(10) {
+                    return false;
+                }
+                if !self.expect(
                     TokenKind::Comma,
                     "expected ',' after first vector component",
-                );
-                self.parse_expression(10);
-                self.expect(
+                ) {
+                    return false;
+                }
+                if !self.parse_expression(10) {
+                    return false;
+                }
+                if !self.expect(
                     TokenKind::Comma,
                     "expected ',' after second vector component",
-                );
-                self.parse_expression(10);
-                if self.matches(TokenKind::Comma) {
-                    self.parse_expression(10);
+                ) {
+                    return false;
+                }
+                if !self.parse_expression(10) {
+                    return false;
+                }
+                if self.matches(TokenKind::Comma) && !self.parse_expression(10) {
+                    return false;
                 }
                 self.expect(
                     TokenKind::Greater,
                     "expected '>' after vector or rotation literal",
-                );
-                true
+                )
             }
             _ => {
                 self.error_here("PAR006", "expected an expression");
@@ -481,33 +520,35 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_argument_list(&mut self) {
+    fn parse_argument_list(&mut self) -> bool {
         if self.matches(TokenKind::RParen) {
-            return;
+            return true;
         }
         loop {
             if !self.parse_expression(1) {
                 self.synchronize_arguments();
-                return;
+                return false;
             }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
         }
-        self.expect(TokenKind::RParen, "expected ')' after arguments");
+        self.expect(TokenKind::RParen, "expected ')' after arguments")
     }
 
-    fn parse_delimited_expressions(&mut self, closing: TokenKind) {
+    fn parse_delimited_expressions(&mut self, closing: TokenKind) -> bool {
         if self.matches(closing) {
-            return;
+            return true;
         }
         loop {
-            self.parse_expression(1);
+            if !self.parse_expression(1) {
+                return false;
+            }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
         }
-        self.expect(closing, "expected closing delimiter");
+        self.expect(closing, "expected closing delimiter")
     }
 
     fn parse_type(&mut self) -> bool {
@@ -683,6 +724,58 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn synchronize_condition(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RParen) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::LBrace) {
+                    return;
+                }
+            }
+
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_for_condition(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::Semicolon) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::RParen) || self.check(TokenKind::LBrace) {
+                    return;
+                }
+            }
+
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
     fn synchronize_arguments(&mut self) {
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -694,6 +787,15 @@ impl<'a> Parser<'a> {
                     return;
                 }
                 TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return,
+                TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+                    // A semicolon followed by ')' is part of the malformed
+                    // call; otherwise it terminates the containing statement.
+                    if self.peek_kind_at(1) == TokenKind::RParen {
+                        self.advance();
+                        self.advance();
+                    }
+                    return;
+                }
                 TokenKind::LParen => paren_depth += 1,
                 TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
                 TokenKind::LBracket => bracket_depth += 1,
@@ -1599,6 +1701,93 @@ mod tests {
             (diagnostics[0].span.line, diagnostics[0].span.column),
             (1, 40)
         );
+    }
+
+    #[test]
+    fn missing_call_close_preserves_later_statement_and_error() {
+        let diagnostics = parse_source("default { state_entry() { llOwnerSay(1,;\nif () { }\n} }");
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR006");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 40)
+        );
+        assert_eq!(diagnostics[1].code, "PAR006");
+        assert_eq!(
+            (diagnostics[1].span.line, diagnostics[1].span.column),
+            (2, 5)
+        );
+    }
+
+    #[test]
+    fn malformed_parenthesized_expression_recovers_at_statement_boundary() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer value = (1 + * 2);\nllOwnerSay(\"later\");\n} }",
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "PAR005");
+        assert_eq!(
+            (diagnostics[0].span.line, diagnostics[0].span.column),
+            (1, 48)
+        );
+    }
+
+    #[test]
+    fn malformed_list_and_vector_components_recover_at_statement_boundary() {
+        for (source, column) in [
+            (
+                "default { state_entry() { list values = [1, * 2];\nllOwnerSay(\"later\");\n} }",
+                45,
+            ),
+            (
+                "default { state_entry() { vector value = <1, * 2, 3>;\nllOwnerSay(\"later\");\n} }",
+                46,
+            ),
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].code, "PAR006");
+            assert_eq!(
+                (diagnostics[0].span.line, diagnostics[0].span.column),
+                (1, column),
+                "source {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_conditions_and_return_recover_per_statement() {
+        for (source, column) in [
+            (
+                "default { state_entry() { if (1 + * 2) { }\nllOwnerSay(\"later\");\n} }",
+                35,
+            ),
+            (
+                "default { state_entry() { while (1 + * 2) { }\nllOwnerSay(\"later\");\n} }",
+                38,
+            ),
+            (
+                "default { state_entry() { for (; 1 + * 2; ) { }\nllOwnerSay(\"later\");\n} }",
+                38,
+            ),
+            (
+                "default { state_entry() { do { } while (1 + * 2);\nllOwnerSay(\"later\");\n} }",
+                45,
+            ),
+            (
+                "default { state_entry() { return 1 + * 2;\nllOwnerSay(\"later\");\n} }",
+                38,
+            ),
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].code, "PAR005");
+            assert_eq!(
+                (diagnostics[0].span.line, diagnostics[0].span.column),
+                (1, column),
+                "source {source:?}"
+            );
+        }
     }
 
     #[test]
