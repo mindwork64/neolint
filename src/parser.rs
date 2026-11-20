@@ -568,8 +568,10 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
         TokenKind::EqualEqual | TokenKind::BangEqual => 8,
         TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual => 9,
         TokenKind::ShiftLeft | TokenKind::ShiftRight => 10,
-        TokenKind::Plus | TokenKind::Minus => 11,
-        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 12,
+        // In LSL, subtraction binds more tightly than addition.
+        TokenKind::Plus => 11,
+        TokenKind::Minus => 12,
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 13,
         _ => return None,
     };
     Some((precedence, false))
@@ -725,6 +727,13 @@ mod tests {
         let diagnostics =
             parse_source("default { state_entry() { integer result = 1 || 1 && 0; } }");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn subtraction_has_higher_precedence_than_addition() {
+        let addition = binary_precedence(TokenKind::Plus).unwrap().0;
+        let subtraction = binary_precedence(TokenKind::Minus).unwrap().0;
+        assert!(subtraction > addition);
     }
 
     #[test]
