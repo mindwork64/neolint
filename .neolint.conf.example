@@ -1,0 +1,5 @@
+# Disable diagnostics for selected rule codes.
+disable = SEM001, SEM003
+
+# Change severity without hiding the diagnostic.
+severity.SEM004 = warning
