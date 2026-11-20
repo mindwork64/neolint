@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with four conservative semantic checks (SEM001–SEM004). The CLI supports recursive directory scanning and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with seven conservative semantic checks (SEM001–SEM007). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -37,7 +37,17 @@ cat script.lsl | neolint -
 neolint --tokens script.lsl
 ```
 
-The current build reports lexical and syntax errors, duplicate top-level declarations (SEM001), built-in function argument-count mismatches (SEM002), known event handler signature mismatches (SEM003), and provable built-in argument type mismatches (SEM004). A clean result does not yet mean full semantic validation or the wider lint rule set has passed.
+The current build reports lexical and syntax errors, plus these semantic checks:
+
+- `SEM001`: duplicate top-level variable/function declarations.
+- `SEM002`: wrong argument count for a known built-in LSL function.
+- `SEM003`: incorrect parameter count/type for a known LSL event handler.
+- `SEM004`: provable argument type mismatch for a known built-in function, including checks against variables resolved in the current lexical scope.
+- `SEM005`: wrong argument count for a known user-defined function.
+- `SEM006`: provable argument type mismatch for a known user-defined function.
+- `SEM007`: duplicate local declaration in the same lexical scope, including redeclaration of a parameter; shadowing in a nested block is allowed.
+
+A clean result does not mean full semantic validation or complete lint-rule coverage has passed.
 
 ## Configuration
 
