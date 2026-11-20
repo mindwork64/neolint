@@ -2462,7 +2462,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
         assert!(
-            mismatches[0].message.contains("argument 1 has type list, expected string"),
+            mismatches[0]
+                .message
+                .contains("argument 1 has type list, expected string"),
             "{diagnostics:?}"
         );
     }
