@@ -251,7 +251,10 @@ fn collect_input_paths(inputs: &[String]) -> Result<Vec<String>, String> {
                 paths.push(display);
             }
         } else {
-            return Err(format!("'{}' is not a regular file or directory", path.display()));
+            return Err(format!(
+                "'{}' is not a regular file or directory",
+                path.display()
+            ));
         }
     }
 
@@ -399,10 +402,8 @@ mod tests {
 
     fn temporary_directory() -> PathBuf {
         let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "neolint-cli-test-{}-{id}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("neolint-cli-test-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
     }
