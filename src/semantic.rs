@@ -128,9 +128,7 @@ fn analyze_event_signatures(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>)
     let mut pending_state = false;
 
     for (index, token) in tokens.iter().enumerate() {
-        if brace_depth == 0
-            && matches!(token.kind, TokenKind::KwDefault | TokenKind::KwState)
-        {
+        if brace_depth == 0 && matches!(token.kind, TokenKind::KwDefault | TokenKind::KwState) {
             pending_state = true;
         }
 
@@ -398,9 +396,7 @@ mod tests {
 
     #[test]
     fn reports_wrong_event_parameter_count() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { } touch_start() { } }",
-        );
+        let diagnostics = analyze_source("default { state_entry() { } touch_start() { } }");
         assert!(diagnostics
             .iter()
             .any(|item| item.code == "SEM003" && item.message.contains("touch_start")));
@@ -408,9 +404,7 @@ mod tests {
 
     #[test]
     fn reports_wrong_event_parameter_type() {
-        let diagnostics = analyze_source(
-            "default { touch_start(string total) { } }",
-        );
+        let diagnostics = analyze_source("default { touch_start(string total) { } }");
         assert!(diagnostics
             .iter()
             .any(|item| item.code == "SEM003" && item.message.contains("expected integer")));
