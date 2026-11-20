@@ -415,11 +415,13 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
         }
 
         let name = &tokens[name_index];
-        functions.entry(name.lexeme.clone()).or_insert(UserFunctionSignature {
-            return_type,
-            parameter_types: parameter_types(tokens, open, close),
-            declaration_index: name_index,
-        });
+        functions
+            .entry(name.lexeme.clone())
+            .or_insert(UserFunctionSignature {
+                return_type,
+                parameter_types: parameter_types(tokens, open, close),
+                declaration_index: name_index,
+            });
     }
 
     functions
@@ -1319,9 +1321,8 @@ mod tests {
 
     #[test]
     fn detects_duplicate_untyped_user_functions() {
-        let diagnostics = analyze_source(
-            "say_message() { } say_message() { } default { state_entry() { } }",
-        );
+        let diagnostics =
+            analyze_source("say_message() { } say_message() { } default { state_entry() { } }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM001"),
             "{diagnostics:?}"
