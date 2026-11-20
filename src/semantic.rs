@@ -1237,8 +1237,8 @@ fn for_condition_range(tokens: &[Token], open: usize, close: usize) -> Option<(u
     let mut bracket_depth = 0usize;
     let mut first_semicolon = None;
 
-    for index in open + 1..close {
-        match tokens[index].kind {
+    for (index, token) in tokens.iter().enumerate().take(close).skip(open + 1) {
+        match token.kind {
             TokenKind::LParen => paren_depth += 1,
             TokenKind::RParen => paren_depth = paren_depth.checked_sub(1)?,
             TokenKind::LBracket => bracket_depth += 1,
