@@ -1286,8 +1286,26 @@ fn canonical_integer_constant(name: &str) -> Option<i32> {
 /// Evaluate a condition expression to a provable 32-bit integer constant.
 /// Unknown identifiers, calls, unsupported syntax, and division/remainder by
 /// zero return None so SEM011 keeps both control-flow outcomes.
+const MAX_CONSTANT_EXPRESSION_TOKENS: usize = 128;
+const MAX_CONSTANT_EXPRESSION_DEPTH: usize = 64;
+
 fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usize) -> Option<i32> {
-    if start >= end {
+    if end.saturating_sub(start) > MAX_CONSTANT_EXPRESSION_TOKENS {
+        return None;
+    }
+    evaluate_constant_integer_expression_at_depth(tokens, start, end, 0)
+}
+
+fn evaluate_constant_integer_expression_at_depth(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    depth: usize,
+) -> Option<i32> {
+    if start >= end
+        || depth > MAX_CONSTANT_EXPRESSION_DEPTH
+        || end.saturating_sub(start) > MAX_CONSTANT_EXPRESSION_TOKENS
+    {
         return None;
     }
 
@@ -1302,8 +1320,10 @@ fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usi
     }
 
     if let Some(operator) = find_top_level_binary_operator(tokens, left, right) {
-        let left_value = evaluate_constant_integer_expression(tokens, left, operator)?;
-        let right_value = evaluate_constant_integer_expression(tokens, operator + 1, right)?;
+        let left_value =
+            evaluate_constant_integer_expression_at_depth(tokens, left, operator, depth + 1)?;
+        let right_value =
+            evaluate_constant_integer_expression_at_depth(tokens, operator + 1, right, depth + 1)?;
         return match tokens[operator].kind {
             TokenKind::Plus => Some(left_value.wrapping_add(right_value)),
             TokenKind::Minus => Some(left_value.wrapping_sub(right_value)),
@@ -1322,8 +1342,20 @@ fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usi
                     Some(left_value.wrapping_rem(right_value))
                 }
             }
-            TokenKind::ShiftLeft => Some(left_value.wrapping_shl(right_value as u32)),
-            TokenKind::ShiftRight => Some(left_value.wrapping_shr(right_value as u32)),
+            TokenKind::ShiftLeft => {
+                if !(0..32).contains(&right_value) {
+                    None
+                } else {
+                    Some(left_value.wrapping_shl(right_value as u32))
+                }
+            }
+            TokenKind::ShiftRight => {
+                if !(0..32).contains(&right_value) {
+                    None
+                } else {
+                    Some(left_value.wrapping_shr(right_value as u32))
+                }
+            }
             TokenKind::And => Some(left_value & right_value),
             TokenKind::Or => Some(left_value | right_value),
             TokenKind::Xor => Some(left_value ^ right_value),
@@ -1343,7 +1375,8 @@ fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usi
         tokens[left].kind,
         TokenKind::Bang | TokenKind::Tilde | TokenKind::Plus | TokenKind::Minus
     ) {
-        let value = evaluate_constant_integer_expression(tokens, left + 1, right)?;
+        let value =
+            evaluate_constant_integer_expression_at_depth(tokens, left + 1, right, depth + 1)?;
         return match tokens[left].kind {
             TokenKind::Bang => Some((value == 0) as i32),
             TokenKind::Tilde => Some(!value),
@@ -1370,6 +1403,10 @@ fn condition_possibilities(
     end: usize,
     empty_is_true: bool,
 ) -> (bool, bool) {
+    if end.saturating_sub(start) > MAX_CONSTANT_EXPRESSION_TOKENS {
+        return (true, true);
+    }
+
     let mut left = start;
     let mut right = end;
 
@@ -3105,6 +3142,12 @@ mod tests {
         analyze(&tokens)
     }
 
+    fn evaluate_constant_source(source: &str) -> Option<i32> {
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        evaluate_constant_integer_expression(&tokens, 0, tokens.len().saturating_sub(1))
+    }
+
     #[test]
     fn reports_duplicate_global_variables() {
         let diagnostics = analyze_source("integer count; float count;");
@@ -4441,6 +4484,94 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_nested_constant_integer_expressions_directly() {
+        assert_eq!(evaluate_constant_source("((1 + 2) * 3)"), Some(9));
+        assert_eq!(evaluate_constant_source("1 - 2 + 3"), Some(2));
+        assert_eq!(evaluate_constant_source("1 || 1 && 0"), Some(0));
+    }
+
+    #[test]
+    fn rejects_long_constant_integer_binary_chains() {
+        let source = format!("1{}", " + 1".repeat(MAX_CONSTANT_EXPRESSION_TOKENS / 2 + 1));
+        assert_eq!(evaluate_constant_source(&source), None);
+    }
+
+    #[test]
+    fn rejects_long_constant_integer_unary_chains() {
+        let source = format!("{}1", "!".repeat(MAX_CONSTANT_EXPRESSION_DEPTH + 2));
+        assert_eq!(evaluate_constant_source(&source), None);
+    }
+
+    #[test]
+    fn rejects_deeply_nested_constant_integer_parentheses() {
+        let source = format!(
+            "{}1{}",
+            "(".repeat(MAX_CONSTANT_EXPRESSION_TOKENS),
+            ")".repeat(MAX_CONSTANT_EXPRESSION_TOKENS)
+        );
+        assert_eq!(evaluate_constant_source(&source), None);
+    }
+
+    #[test]
+    fn condition_range_limit_keeps_long_conditions_unresolved() {
+        let condition = format!(
+            "{}1{}",
+            "(".repeat(MAX_CONSTANT_EXPRESSION_TOKENS),
+            ")".repeat(MAX_CONSTANT_EXPRESSION_TOKENS)
+        );
+        let diagnostics = analyze_source(&format!(
+            "integer long_condition() {{ while ({condition}) {{ }} }} default {{ }}"
+        ));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_constant_integer_expressions() {
+        for source in ["1 +", "(1 + 2", "()", "1 = 2", "1 &&"] {
+            assert_eq!(
+                evaluate_constant_source(source),
+                None,
+                "unexpected value for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_shift_counts() {
+        let diagnostics = analyze_source(
+            "integer a() { while (1 << -1) { } }              integer b() { while (1 << 32) { } }              integer c() { while (1 >> 32) { } }              integer d() { while (-2147483648 >> -1) { } } default { }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_in_range_shift_counts() {
+        let diagnostics = analyze_source(
+            "integer a() { while (1 << 0) { } }              integer b() { while (1 << 31) { } }              integer c() { while (-1 >> 0) { } }              integer d() { while (-1 >> 31) { } }              integer e() { while (1 >> 31) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(returns[0].message.contains("function e"), "{diagnostics:?}");
+    }
+
+    #[test]
     fn evaluates_unary_constant_conditions() {
         let diagnostics = analyze_source(
             "integer unary() { while (!0 && (~0 == -1) && (-1 + +1 == 0)) { } } default { }",
@@ -4558,6 +4689,43 @@ mod tests {
                 .filter(|item| item.code == "SEM011")
                 .count(),
             3,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_for_loop_conditions_in_cfg() {
+        let diagnostics = analyze_source(
+            "integer for_true() { for (; 1 + 2; ) { } }              integer for_false() { for (; 1 > 2; ) { } }              integer for_unknown(integer flag) { for (; flag; ) { } } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 2, "{diagnostics:?}");
+        assert!(
+            returns
+                .iter()
+                .all(|item| item.message.contains("for_false")
+                    || item.message.contains("for_unknown")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_do_while_conditions_in_cfg() {
+        let diagnostics = analyze_source(
+            "integer do_true() { do { } while (1 + 2); }              integer do_false() { do { } while (1 > 2); }              integer do_unknown(integer flag) { do { } while (flag); } default { }",
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 2, "{diagnostics:?}");
+        assert!(
+            returns.iter().all(
+                |item| item.message.contains("do_false") || item.message.contains("do_unknown")
+            ),
             "{diagnostics:?}"
         );
     }
