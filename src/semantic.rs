@@ -2221,9 +2221,7 @@ fn analyze_variable_assignments(
         // assignment target in this deliberately conservative first pass.
         if tokens
             .get(name_index.wrapping_sub(1))
-            .is_some_and(|previous| {
-                is_value_type(previous.kind) || previous.kind == TokenKind::Dot
-            })
+            .is_some_and(|previous| is_value_type(previous.kind) || previous.kind == TokenKind::Dot)
             || scopes
                 .initializers
                 .iter()
@@ -2243,9 +2241,13 @@ fn analyze_variable_assignments(
             continue;
         }
 
-        let Some(actual_type) =
-            infer_expression_type(tokens, expression_start, expression_end, scopes, user_functions)
-        else {
+        let Some(actual_type) = infer_expression_type(
+            tokens,
+            expression_start,
+            expression_end,
+            scopes,
+            user_functions,
+        ) else {
             continue;
         };
 
@@ -3120,7 +3122,10 @@ mod tests {
             "default { state_entry() { integer count; if (count = 1.5) llOwnerSay(\"bad\"); llOwnerSay((string)(count = 2.5)); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM016").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM016")
+                .count(),
             2,
             "{diagnostics:?}"
         );
@@ -3132,7 +3137,10 @@ mod tests {
             "default { state_entry() { integer first = 1.5, second; second = llExtensionValue(); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM015").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM015")
+                .count(),
             1,
             "{diagnostics:?}"
         );
