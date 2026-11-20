@@ -1236,6 +1236,10 @@ mod tests {
             "default { state_entry() { llGetPos()(); } }",
             "default { state_entry() { vector position; position.x(); } }",
             "default { state_entry() { integer first; integer second; (first + second)(); } }",
+            "default { state_entry() { [](); } }",
+            "default { state_entry() { [1, \"text\"](); } }",
+            "default { state_entry() { <1, 2, 3>(); } }",
+            "default { state_entry() { <1, 2, 3, 4>(); } }",
         ] {
             let diagnostics = parse_source(source);
             assert_eq!(
