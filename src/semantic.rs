@@ -1218,11 +1218,13 @@ mod tests {
 
     #[test]
     fn reports_duplicate_local_variables_in_the_same_scope() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { integer count; integer count; } }",
-        );
+        let diagnostics =
+            analyze_source("default { state_entry() { integer count; integer count; } }");
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM007").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM007")
+                .count(),
             1,
             "{diagnostics:?}"
         );
@@ -1230,9 +1232,8 @@ mod tests {
 
     #[test]
     fn reports_local_variable_redeclaration_of_a_parameter() {
-        let diagnostics = analyze_source(
-            "integer process(integer value) { integer value; return value; }",
-        );
+        let diagnostics =
+            analyze_source("integer process(integer value) { integer value; return value; }");
         assert!(diagnostics
             .iter()
             .any(|item| item.code == "SEM007" && item.message.contains("value")));
@@ -1243,7 +1244,10 @@ mod tests {
         let diagnostics = analyze_source(
             r#"default { state_entry() { integer value; { string value; llOwnerSay(value); } } }"#,
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM007"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM007"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
