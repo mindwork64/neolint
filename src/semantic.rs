@@ -2895,9 +2895,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(invalid_casts.len(), 3, "{diagnostics:?}");
         assert!(
-            invalid_casts
-                .iter()
-                .all(|item| item.message.contains("cannot explicitly cast vector to integer")),
+            invalid_casts.iter().all(|item| item
+                .message
+                .contains("cannot explicitly cast vector to integer")),
             "{diagnostics:?}"
         );
     }
