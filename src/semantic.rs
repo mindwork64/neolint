@@ -5845,6 +5845,14 @@ mod tests {
             .filter(|item| item.code == "SEM020")
             .collect::<Vec<_>>();
         assert_eq!(duplicates.len(), 2, "{diagnostics:?}");
+        assert_eq!(
+            duplicates
+                .iter()
+                .map(|item| (item.span.line, item.span.column))
+                .collect::<Vec<_>>(),
+            vec![(1, 29), (1, 47)],
+            "{diagnostics:?}"
+        );
         assert!(
             duplicates.iter().all(
                 |item| item.message.contains("state_entry") && item.message.contains("default")
@@ -5917,6 +5925,14 @@ mod tests {
             .filter(|item| item.code == "SEM021")
             .collect::<Vec<_>>();
         assert_eq!(duplicates.len(), 2, "{diagnostics:?}");
+        assert_eq!(
+            duplicates
+                .iter()
+                .map(|item| (item.span.line, item.span.column))
+                .collect::<Vec<_>>(),
+            vec![(1, 37), (1, 55)],
+            "{diagnostics:?}"
+        );
         assert!(
             duplicates
                 .iter()
@@ -5958,6 +5974,11 @@ mod tests {
             .filter(|item| item.code == "SEM022")
             .collect::<Vec<_>>();
         assert_eq!(missing.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            (missing[0].span.line, missing[0].span.column),
+            (1, 33),
+            "{diagnostics:?}"
+        );
         assert!(missing[0].message.contains("missing"), "{diagnostics:?}");
     }
 
