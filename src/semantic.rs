@@ -2403,7 +2403,10 @@ mod tests {
             r#"default { state_entry() { llOwnerSay("one" + "two"); llOwnerSay([1] + [2]); llOwnerSay(<1, 2, 3> * <4, 5, 6>); } }"#,
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2,
             "{diagnostics:?}"
         );
@@ -2414,7 +2417,10 @@ mod tests {
         let diagnostics =
             analyze_source("default { state_entry() { llOwnerSay(1 + -2); llSleep(1 * -2.0); } }");
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             1,
             "{diagnostics:?}"
         );
