@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with sixteen conservative semantic checks (SEM001–SEM016). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with seventeen conservative semantic checks (SEM001–SEM017). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -55,6 +55,7 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM014`: error for explicit casts from known source types to unsupported LSL targets, scanned throughout expressions including local initializers; unknown source types are left unchecked.
 - `SEM015`: error for a global or local variable initializer whose known expression type is incompatible with the declared variable type; `integer` to `float` and `string` to `key` implicit conversions are accepted.
 - `SEM016`: error for a plain assignment to a declared variable when the known expression type is incompatible with the variable type. Compound and member assignments are not checked.
+- `SEM017`: type-checks the result of `+=`, `-=`, `*=`, `/=`, and `%=` when the operands and result type are known; member targets and unsupported/unknown operator combinations are skipped.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied.
 
