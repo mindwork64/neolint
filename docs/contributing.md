@@ -28,11 +28,11 @@ Documentation synchronization is part of acceptance, not optional cleanup.
 
 1. Confirm the PR is merged and CI passed on its final head.
 2. Record the PR number, merge commit SHA, CI run URL and concise changed-file summary.
-3. Update the GitHub Wiki pages affected by the change. Wiki pages live in the separate `mindwork64/neolint.wiki` Git repository; edit the relevant Markdown page(s) and commit the changes there. Do not substitute a repository `docs/` file or a Linear document for an actual Wiki update.
-4. Update the affected Linear issue(s): shipped behavior, acceptance criteria, PR/commit/CI links and remaining work.
+3. Update the GitHub Wiki pages affected by the change. Wiki pages live in the separate `mindwork64/neolint.wiki` Git repository; edit the relevant Markdown page(s) and commit the changes there. Do not substitute a repository `docs/` file or an unrelated document for an actual Wiki update.
+4. Update the affected GitHub Issue(s): shipped behavior, acceptance criteria, PR/commit/CI links and remaining work. Use GitHub issue references for dependencies and related tasks.
 5. Update parent issue status only when all required child issues are complete.
-6. Update Linear milestone/project progress if the merge changes scope or completion.
-7. Ensure no Wiki or Linear text claims that branch-only, unmerged code has shipped.
+6. Update GitHub milestone/project tracking when configured and when the merge changes scope or completion.
+7. Ensure no Wiki or GitHub Issue text claims that branch-only, unmerged code has shipped.
 
 ## DeepSeek API token-efficiency requirements
 
