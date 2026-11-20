@@ -559,6 +559,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_variable_initializers(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_variable_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_compound_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_component_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -2196,6 +2197,141 @@ fn assignment_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
     Some(tokens.len())
 }
 
+fn component_assignment_target(tokens: &[Token], operator_index: usize) -> Option<(usize, usize)> {
+    let mut end = operator_index;
+    let mut grouped_start = None;
+
+    // Strip grouping parentheses around a component assignment target.
+    while tokens.get(end.checked_sub(1)?)?.kind == TokenKind::RParen {
+        let mut depth = 0usize;
+        let mut matching_open = None;
+        for (index, token) in tokens.iter().enumerate().take(end).rev() {
+            match token.kind {
+                TokenKind::RParen => depth += 1,
+                TokenKind::LParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        matching_open = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        grouped_start = Some(matching_open?.checked_add(1)?);
+        end -= 1;
+    }
+
+    let start = grouped_start.or_else(|| end.checked_sub(3))?;
+
+    if end != start + 3
+        || tokens.get(start)?.kind != TokenKind::Identifier
+        || tokens.get(start + 1)?.kind != TokenKind::Dot
+        || tokens.get(start + 2)?.kind != TokenKind::Identifier
+    {
+        return None;
+    }
+
+    Some((start, start + 2))
+}
+
+fn analyze_component_assignments(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (operator_index, operator) in tokens.iter().enumerate() {
+        let binary_operator = match operator.kind {
+            TokenKind::Equal => None,
+            TokenKind::PlusEqual => Some(TokenKind::Plus),
+            TokenKind::MinusEqual => Some(TokenKind::Minus),
+            TokenKind::StarEqual => Some(TokenKind::Star),
+            TokenKind::SlashEqual => Some(TokenKind::Slash),
+            TokenKind::PercentEqual => Some(TokenKind::Percent),
+            _ => continue,
+        };
+
+        let Some((base_index, component_index)) =
+            component_assignment_target(tokens, operator_index)
+        else {
+            continue;
+        };
+        let base = &tokens[base_index];
+        let component = &tokens[component_index];
+        let Some(base_type) = scopes.resolve(&base.lexeme, base_index) else {
+            continue;
+        };
+
+        let valid_component = match base_type.as_str() {
+            "vector" => matches!(component.lexeme.as_str(), "x" | "y" | "z"),
+            "rotation" => matches!(component.lexeme.as_str(), "x" | "y" | "z" | "s"),
+            _ => false,
+        };
+
+        if !valid_component {
+            diagnostics.push(Diagnostic {
+                code: "SEM018",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "component '{}' is not valid for variable '{}' of type {}",
+                    component.lexeme, base.lexeme, base_type
+                ),
+                span: component.span,
+            });
+            continue;
+        }
+
+        let expression_start = operator_index + 1;
+        let Some(expression_end) = assignment_expression_end(tokens, expression_start) else {
+            continue;
+        };
+        if expression_start >= expression_end {
+            continue;
+        }
+
+        let Some(value_type) = infer_expression_type(
+            tokens,
+            expression_start,
+            expression_end,
+            scopes,
+            user_functions,
+        ) else {
+            continue;
+        };
+
+        let result_type = if let Some(binary_operator) = binary_operator {
+            let Some(result_type) = infer_binary_result_type(binary_operator, "float", &value_type)
+            else {
+                continue;
+            };
+            result_type
+        } else {
+            value_type.as_str()
+        };
+
+        if !can_implicitly_convert(result_type, "float") {
+            let operator_name = if binary_operator.is_some() {
+                format!("compound assignment '{}'", operator.lexeme)
+            } else {
+                "assignment".to_owned()
+            };
+            diagnostics.push(Diagnostic {
+                code: "SEM018",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "{} to component '{}.{}' yields type {}, expected float",
+                    operator_name, base.lexeme, component.lexeme, result_type
+                ),
+                span: component.span,
+            });
+        }
+    }
+}
+
 fn analyze_compound_assignments(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -3150,6 +3286,73 @@ mod tests {
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM014"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_vector_and_rotation_component_assignment_types() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    rotation orientation;
+                    integer count;
+
+                    position.x = "wrong";
+                    position.s = 1.0;
+                    (position.z) = "wrong";
+                    count.x = 1.0;
+                    orientation.s = 1;
+                    orientation.x += 0.5;
+                    (position.y) = 2;
+                }
+            }"#,
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM018")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 4, "{diagnostics:?}");
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("position.x")
+                    && item.message.contains("type string, expected float")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("position.z")
+                    && item.message.contains("type string, expected float")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("component 's'")
+                    && item.message.contains("variable 'position'")
+                    && item.message.contains("vector")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("component 'x'")
+                    && item.message.contains("variable 'count'")
+                    && item.message.contains("integer")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_component_assignments_with_unknown_base_or_rhs_types() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llExtensionVector().x = 1.0; vector position; position.x = llExtensionValue(); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM018"),
             "{diagnostics:?}"
         );
     }
