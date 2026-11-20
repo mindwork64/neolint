@@ -973,7 +973,10 @@ mod tests {
             "integer globalAmount; default { state_entry() { integer localAmount; llOwnerSay(globalAmount); llOwnerSay(localAmount); llSleep(localAmount); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2,
             "{diagnostics:?}"
         );
@@ -985,7 +988,10 @@ mod tests {
             "integer send(integer amount) { llOwnerSay(amount); return amount; } default { touch_start(integer total) { llOwnerSay(total); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2,
             "{diagnostics:?}"
         );
@@ -997,7 +1003,10 @@ mod tests {
             "string value; default { state_entry() { integer value; llOwnerSay(value); } }",
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             1,
             "{diagnostics:?}"
         );
@@ -1005,9 +1014,8 @@ mod tests {
 
     #[test]
     fn inner_block_variables_do_not_leak_into_parent_scope() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { { integer hidden; } llOwnerSay(hidden); } }",
-        );
+        let diagnostics =
+            analyze_source("default { state_entry() { { integer hidden; } llOwnerSay(hidden); } }");
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM004"),
             "{diagnostics:?}"
