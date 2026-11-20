@@ -1042,6 +1042,35 @@ mod tests {
     }
 
     #[test]
+    fn accepts_hex_integer_literals_in_declarations_and_expressions() {
+        let diagnostics = parse_source(
+            r#"integer a = 0xFFFFFFFF;
+            integer b = 0x80000000;
+            integer c = 0x7FFFFFFF;
+            default { state_entry() { integer local = 0x1e3; local = 0x10 + 0X2; } }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_malformed_hex_prefixes_as_syntax_errors() {
+        for source in [
+            "integer value = 0x; default { }",
+            "integer value = 0xG; default { }",
+            "integer value = 0x1G; default { }",
+            "integer value = 0x1.2; default { }",
+        ] {
+            let diagnostics = parse_source(source);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.kind == DiagnosticKind::Syntax),
+                "malformed hex was accepted: {source:?}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reports_missing_semicolon() {
         let diagnostics = parse_source("default { state_entry() { integer x = 1 } }");
         assert!(diagnostics

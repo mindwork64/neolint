@@ -175,6 +175,29 @@ fn expressions_inventory_positive() {
 }
 
 #[test]
+fn hex_integer_literals_inventory_positive() {
+    let diagnostics = parse_source(
+        r#"
+        integer high = 0xFFFFFFFF;
+        integer minimum = 0x80000000;
+        integer maximum = 0x7FFFFFFF;
+        integer exponent_digit = 0x1e3;
+
+        default
+        {
+            state_entry()
+            {
+                integer local = 0x0;
+                local = 0X2A + 0x10;
+                local = 0x1e + 0x2;
+            }
+        }
+        "#,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn for_expression_lists_inventory_positive() {
     let diagnostics = parse_source(
         "default { state_entry() { integer i; integer j; for (i = 0, j = 0; i < 1; ++i, ++j) ; } }",

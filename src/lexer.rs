@@ -148,6 +148,10 @@ impl<'a> Lexer<'a> {
         self.source.get(self.offset..)?.chars().nth(1)
     }
 
+    fn peek_nth(&self, index: usize) -> Option<char> {
+        self.source.get(self.offset..)?.chars().nth(index)
+    }
+
     fn mark(&self) -> Mark {
         Mark {
             offset: self.offset,
@@ -241,6 +245,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_number(&mut self, start: Mark) {
+        if self.peek() == Some('0')
+            && matches!(self.peek_next(), Some('x' | 'X'))
+            && self.peek_nth(2).is_some_and(|ch| ch.is_ascii_hexdigit())
+        {
+            self.advance();
+            self.advance();
+            self.consume_hex_digits();
+            self.emit(TokenKind::IntegerLiteral, start);
+            return;
+        }
+
         let mut is_float = false;
 
         if self.peek() == Some('.') {
@@ -286,6 +301,12 @@ impl<'a> Lexer<'a> {
 
     fn consume_digits(&mut self) {
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            self.advance();
+        }
+    }
+
+    fn consume_hex_digits(&mut self) {
+        while self.peek().is_some_and(|ch| ch.is_ascii_hexdigit()) {
             self.advance();
         }
     }
@@ -612,6 +633,117 @@ mod tests {
         let (_, diagnostics) = lex("/* never closed");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "LEX002");
+    }
+
+    #[test]
+    fn recognizes_hex_integer_literals() {
+        let (tokens, diagnostics) = lex("0x0 0X2A 0xFFFFFFFF 0x80000000 0x7FFFFFFF 0x1e3");
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::IntegerLiteral)
+                .map(|token| token.lexeme.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "0x0",
+                "0X2A",
+                "0xFFFFFFFF",
+                "0x80000000",
+                "0x7FFFFFFF",
+                "0x1e3"
+            ]
+        );
+    }
+
+    #[test]
+    fn hex_integer_literals_do_not_consume_exponents_or_identifiers() {
+        let (tokens, diagnostics) = lex("0x1e+2 0x1e-3 0x1G 0x1.2");
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                TokenKind::IntegerLiteral,
+                TokenKind::Plus,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::Minus,
+                TokenKind::IntegerLiteral,
+                TokenKind::IntegerLiteral,
+                TokenKind::Identifier,
+                TokenKind::IntegerLiteral,
+                TokenKind::FloatLiteral,
+                TokenKind::Eof,
+            ]
+        );
+        let lexemes = tokens
+            .iter()
+            .map(|token| token.lexeme.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(lexemes[0], "0x1e");
+        assert_eq!(lexemes[1], "+");
+        assert_eq!(lexemes[2], "2");
+        assert_eq!(lexemes[3], "0x1e");
+        assert_eq!(lexemes[4], "-");
+        assert_eq!(lexemes[5], "3");
+        assert_eq!(lexemes[6], "0x1");
+        assert_eq!(lexemes[7], "G");
+        assert_eq!(lexemes[8], "0x1");
+        assert_eq!(lexemes[9], ".2");
+    }
+
+    #[test]
+    fn malformed_hex_prefixes_fall_back_to_decimal_and_identifier_tokens() {
+        let (tokens, diagnostics) = lex("0x 0xG 0X_ 0x.");
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                TokenKind::IntegerLiteral,
+                TokenKind::Identifier,
+                TokenKind::IntegerLiteral,
+                TokenKind::Identifier,
+                TokenKind::IntegerLiteral,
+                TokenKind::Identifier,
+                TokenKind::IntegerLiteral,
+                TokenKind::Identifier,
+                TokenKind::Dot,
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.lexeme.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0", "x", "0", "xG", "0", "X_", "0", "x", ".", ""]
+        );
+    }
+
+    #[test]
+    fn hex_integer_literal_spans_cover_the_original_lexeme() {
+        let (tokens, diagnostics) = lex("integer x = 0x1;");
+        assert!(diagnostics.is_empty());
+        let hex = tokens
+            .iter()
+            .find(|token| token.lexeme == "0x1")
+            .expect("hex literal token");
+        assert_eq!(hex.span.start, 12);
+        assert_eq!(hex.span.end, 15);
+        assert_eq!(hex.span.line, 1);
+        assert_eq!(hex.span.column, 13);
     }
 
     #[test]
