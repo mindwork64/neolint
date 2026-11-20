@@ -22,7 +22,7 @@ The LSL Portal lists seven value types:
 
 ## Control flow
 
-The reference includes `if`, `else`, `for`, `while`, `do-while`, `jump`, `return`, and state changes. Parser coverage must be fixture-driven.
+The reference includes `if`, `else`, `for`, `while`, `do-while`, `jump`, `return`, and state changes. A `for` initializer is an expression; variable declarations in the initializer are rejected with `PAR008`. Declare the loop variable in the enclosing block before the loop (for example, `integer i; for (i = 0; i < 10; ++i)`). Parser coverage must be fixture-driven.
 
 ## Literals and special syntax
 
