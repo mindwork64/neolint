@@ -2541,9 +2541,8 @@ mod tests {
 
     #[test]
     fn reports_missing_return_reached_from_nested_jump() {
-        let diagnostics = analyze_source(
-            "integer get_value() { { jump done; } @done; } default { }",
-        );
+        let diagnostics =
+            analyze_source("integer get_value() { { jump done; } @done; } default { }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
