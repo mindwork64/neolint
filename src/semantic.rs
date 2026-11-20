@@ -2043,13 +2043,11 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
-        let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
@@ -2456,7 +2454,10 @@ mod tests {
             r#"default { state_entry() { llOwnerSay(-"text"); llOwnerSay(!"text"); llOwnerSay(-1); llOwnerSay(!TRUE); } }"#,
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2,
             "{diagnostics:?}"
         );
