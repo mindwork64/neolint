@@ -764,9 +764,14 @@ fn analyze_builtin_calls(
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes, user_functions, diagnostics)
-            else {
+            let Some(actual_type) = infer_expression_type(
+                tokens,
+                range.0,
+                range.1,
+                scopes,
+                user_functions,
+                diagnostics,
+            ) else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -955,9 +960,14 @@ fn analyze_function_returns(
                     ),
                     span: tokens[cursor].span,
                 });
-            } else if let Some(actual_type) =
-                infer_expression_type(tokens, expression_start, semicolon, scopes, functions, diagnostics)
-            {
+            } else if let Some(actual_type) = infer_expression_type(
+                tokens,
+                expression_start,
+                semicolon,
+                scopes,
+                functions,
+                diagnostics,
+            ) {
                 if !can_implicitly_convert(&actual_type, &signature.return_type) {
                     diagnostics.push(Diagnostic {
                         code: "SEM008",
@@ -2065,19 +2075,33 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
         return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
-        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
         return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
     if let Some(operator_index) = find_top_level_binary_operator(tokens, start, end) {
-        let left_type =
-            infer_expression_type(tokens, start, operator_index, scopes, user_functions, diagnostics)?;
-        let right_type =
-            infer_expression_type(tokens, operator_index + 1, end, scopes, user_functions, diagnostics)?;
+        let left_type = infer_expression_type(
+            tokens,
+            start,
+            operator_index,
+            scopes,
+            user_functions,
+            diagnostics,
+        )?;
+        let right_type = infer_expression_type(
+            tokens,
+            operator_index + 1,
+            end,
+            scopes,
+            user_functions,
+            diagnostics,
+        )?;
         return infer_binary_result_type(tokens[operator_index].kind, &left_type, &right_type)
             .map(str::to_owned);
     }
@@ -2089,14 +2113,8 @@ fn infer_expression_type(
         && tokens[start + 2].kind == TokenKind::RParen
     {
         if let Some(target_type) = lsl_type_name(tokens[start + 1].kind) {
-            let source_type = infer_expression_type(
-                tokens,
-                start + 3,
-                end,
-                scopes,
-                user_functions,
-                diagnostics,
-            );
+            let source_type =
+                infer_expression_type(tokens, start + 3, end, scopes, user_functions, diagnostics);
             if let Some(source_type) = source_type {
                 if !is_explicit_cast_supported(&source_type, target_type) {
                     diagnostics.push(Diagnostic {
@@ -2740,7 +2758,10 @@ mod tests {
         let diagnostics = analyze_source(
             "default { state_entry() { llOwnerSay((integer)llExtensionValue()); } }",
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM014"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM014"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
