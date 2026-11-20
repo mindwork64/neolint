@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The repository is being initialized. The first implementation milestone is a source-aware lexer and diagnostic model. Parsing and semantic lint rules will be added incrementally.
+The first implementation milestone provides a source-aware lexer, a syntax parser, and a console CLI. Semantic analysis and lint rules are being added incrementally.
 
 ## References
 
@@ -28,9 +28,10 @@ The repository is being initialized. The first implementation milestone is a sou
 neolint script.lsl
 neolint --format json script.lsl
 cat script.lsl | neolint -
+neolint --tokens script.lsl
 ```
 
-The CLI surface will be finalized alongside the initial lexer/parser implementation.
+The current build reports lexical and syntax errors. A clean result does not yet mean semantic validation or lint rules have passed.
 
 ## License
 
