@@ -66,11 +66,6 @@ pub enum TokenKind {
     OrOr,
     ShiftLeft,
     ShiftRight,
-    AndEqual,
-    OrEqual,
-    XorEqual,
-    ShiftLeftEqual,
-    ShiftRightEqual,
 
     Eof,
 }
@@ -418,22 +413,14 @@ impl<'a> Lexer<'a> {
                 TokenKind::Bang
             }),
             '<' => Some(if self.consume_if('<') {
-                if self.consume_if('=') {
-                    TokenKind::ShiftLeftEqual
-                } else {
-                    TokenKind::ShiftLeft
-                }
+                TokenKind::ShiftLeft
             } else if self.consume_if('=') {
                 TokenKind::LessEqual
             } else {
                 TokenKind::Less
             }),
             '>' => Some(if self.consume_if('>') {
-                if self.consume_if('=') {
-                    TokenKind::ShiftRightEqual
-                } else {
-                    TokenKind::ShiftRight
-                }
+                TokenKind::ShiftRight
             } else if self.consume_if('=') {
                 TokenKind::GreaterEqual
             } else {
@@ -441,23 +428,15 @@ impl<'a> Lexer<'a> {
             }),
             '&' => Some(if self.consume_if('&') {
                 TokenKind::AndAnd
-            } else if self.consume_if('=') {
-                TokenKind::AndEqual
             } else {
                 TokenKind::And
             }),
             '|' => Some(if self.consume_if('|') {
                 TokenKind::OrOr
-            } else if self.consume_if('=') {
-                TokenKind::OrEqual
             } else {
                 TokenKind::Or
             }),
-            '^' => Some(if self.consume_if('=') {
-                TokenKind::XorEqual
-            } else {
-                TokenKind::Xor
-            }),
+            '^' => Some(TokenKind::Xor),
             '~' => Some(TokenKind::Tilde),
             _ => None,
         };
@@ -556,10 +535,10 @@ mod tests {
     #[test]
     fn recognizes_longest_operator_first() {
         assert_eq!(
-            kinds("a <<= 2; b != 0 && c >= 1;"),
+            kinds("a << 2; b != 0 && c >= 1;"),
             vec![
                 TokenKind::Identifier,
-                TokenKind::ShiftLeftEqual,
+                TokenKind::ShiftLeft,
                 TokenKind::IntegerLiteral,
                 TokenKind::Semicolon,
                 TokenKind::Identifier,
@@ -570,6 +549,26 @@ mod tests {
                 TokenKind::GreaterEqual,
                 TokenKind::IntegerLiteral,
                 TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_unsupported_compound_operators_into_existing_tokens() {
+        assert_eq!(
+            kinds("a &= 1; b |= 2; c ^= 3; d <<= 4; e >>= 5;"),
+            vec![
+                TokenKind::Identifier, TokenKind::And, TokenKind::Equal,
+                TokenKind::IntegerLiteral, TokenKind::Semicolon,
+                TokenKind::Identifier, TokenKind::Or, TokenKind::Equal,
+                TokenKind::IntegerLiteral, TokenKind::Semicolon,
+                TokenKind::Identifier, TokenKind::Xor, TokenKind::Equal,
+                TokenKind::IntegerLiteral, TokenKind::Semicolon,
+                TokenKind::Identifier, TokenKind::ShiftLeft, TokenKind::Equal,
+                TokenKind::IntegerLiteral, TokenKind::Semicolon,
+                TokenKind::Identifier, TokenKind::ShiftRight, TokenKind::Equal,
+                TokenKind::IntegerLiteral, TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
