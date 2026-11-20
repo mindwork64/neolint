@@ -42,9 +42,9 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM001`: duplicate top-level variable/function declarations.
 - `SEM002`: wrong argument count for a known built-in LSL function.
 - `SEM003`: incorrect parameter count/type for a known LSL event handler.
-- `SEM004`: provable argument type mismatch for a known built-in function, including checks against variables resolved in the current lexical scope.
+- `SEM004`: provable argument type mismatch for a known built-in function, including variables resolved in the current lexical scope and supported binary-expression result types.
 - `SEM005`: wrong argument count for a known user-defined function.
-- `SEM006`: provable argument type mismatch for a known user-defined function.
+- `SEM006`: provable argument type mismatch for a known user-defined function, including supported binary-expression result types.
 - `SEM007`: duplicate local declaration in the same lexical scope, including redeclaration of a parameter; shadowing in a nested block is allowed.
 - `SEM008`: validates explicit return statements in user-defined functions, including return-value presence and provable return-expression type compatibility.
 - `SEM009`: duplicate jump labels within one function or event handler.
@@ -56,6 +56,8 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop. Ternary conditional expressions (`?:`) are not part of LSL and are rejected by the parser. The `&&` and `||` operators share one precedence level and are left-associative; C-style precedence is not applied.
 
 SEM011 uses a conservative token-derived control-flow graph rather than a full parser AST. Unsupported or malformed control-flow constructs are skipped when the graph cannot be built safely. `SEM012` warnings do not make the CLI exit with code 1 by default; they can be disabled or assigned another severity through the normal configuration and CLI options.
+
+Binary expression inference is deliberately conservative. It covers supported numeric operations and promotions, string/list concatenation, comparisons/logical results, and documented vector/rotation combinations. Unknown or incompatible operand pairs are left unresolved rather than assigned a guessed type.
 
 `SEM013` is a lint warning by default, so it does not make the CLI exit with code 1. Use `--disable SEM013` or `--severity SEM013=error` to change that behavior. Canonical deprecation metadata lives in `data/lsl-deprecated.txt` and is refreshed together with the builtin prototype snapshot by `scripts/update-lsl-builtins.sh`.
 
