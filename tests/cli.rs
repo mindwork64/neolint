@@ -95,7 +95,10 @@ fn deprecated_builtin_warning_can_be_escalated_or_disabled() {
     let default_output = neolint().arg(&source).output().unwrap();
     assert!(default_output.status.success());
     let default_stdout = String::from_utf8(default_output.stdout).unwrap();
-    assert!(default_stdout.contains("warning[SEM013]"), "{default_stdout}");
+    assert!(
+        default_stdout.contains("warning[SEM013]"),
+        "{default_stdout}"
+    );
 
     let escalated = neolint()
         .arg("--severity")
