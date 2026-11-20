@@ -1,3 +1,4 @@
+use crate::builtins::definitions;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 use crate::lexer::{Token, TokenKind};
 use std::collections::HashMap;
@@ -75,7 +76,136 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
         }
     }
 
+    analyze_builtin_calls(tokens, &mut diagnostics);
     diagnostics
+}
+
+fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
+    let builtins = definitions();
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        // A built-in name used as a declaration is not a call expression.
+        if index > 0 && is_declaration_type(tokens[index - 1].kind) {
+            continue;
+        }
+
+        let Some(signature) = builtins.functions.get(token.lexeme.as_str()) else {
+            continue;
+        };
+        if tokens.get(index + 1).map(|next| next.kind) != Some(TokenKind::LParen) {
+            continue;
+        }
+
+        let Some((actual_count, _closing_index)) = count_call_arguments(tokens, index + 1)
+        else {
+            continue;
+        };
+        let expected_count = signature.parameters.len();
+
+        if actual_count != expected_count {
+            diagnostics.push(Diagnostic {
+                code: "SEM002",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "{} expects {} argument(s), but received {}",
+                    signature.name, expected_count, actual_count
+                ),
+                span: token.span,
+            });
+        }
+    }
+}
+
+fn count_call_arguments(tokens: &[Token], open_index: usize) -> Option<(usize, usize)> {
+    let mut paren_depth = 1usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut vector_depth = 0usize;
+    let mut commas = 0usize;
+    let mut has_argument = false;
+
+    for (index, token) in tokens.iter().enumerate().skip(open_index + 1) {
+        match token.kind {
+            TokenKind::LParen => {
+                paren_depth += 1;
+                has_argument = true;
+            }
+            TokenKind::RParen => {
+                paren_depth = paren_depth.checked_sub(1)?;
+                if paren_depth == 0 {
+                    let count = if has_argument { commas + 1 } else { 0 };
+                    return Some((count, index));
+                }
+            }
+            TokenKind::LBracket => {
+                bracket_depth += 1;
+                has_argument = true;
+            }
+            TokenKind::RBracket => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+            }
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                has_argument = true;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+            TokenKind::Less if starts_vector_literal(tokens, index) => {
+                vector_depth += 1;
+                has_argument = true;
+            }
+            TokenKind::Greater if vector_depth > 0 => {
+                vector_depth -= 1;
+            }
+            TokenKind::Comma
+                if paren_depth == 1
+                    && bracket_depth == 0
+                    && brace_depth == 0
+                    && vector_depth == 0 =>
+            {
+                commas += 1;
+                has_argument = true;
+            }
+            _ => {
+                has_argument = true;
+            }
+        }
+    }
+
+    None
+}
+
+fn starts_vector_literal(tokens: &[Token], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).and_then(|index| tokens.get(index)) else {
+        return true;
+    };
+
+    matches!(
+        previous.kind,
+        TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBracket
+            | TokenKind::Comma
+            | TokenKind::Equal
+            | TokenKind::Question
+            | TokenKind::Colon
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+    )
 }
 
 #[cfg(test)]
@@ -111,6 +241,33 @@ mod tests {
         let diagnostics = analyze_source(
             "integer first(integer value) { integer result; return value; } \
              integer second(integer value) { integer result; return value; }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn reports_builtin_function_arity_mismatches() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay(); llGetPos(1); } }"#,
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM002").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn accepts_correct_builtin_arity_and_vector_arguments() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay("hello"); llSetPos(<1, 2, 3>); llGetPos(); } }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn does_not_count_nested_call_or_vector_commas_as_arguments() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llSetPos(<llFabs(-1), 2, 3>); llOwnerSay(llDumpList2String([1, 2], ",")); } }"#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
