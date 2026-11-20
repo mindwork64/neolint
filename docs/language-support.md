@@ -22,7 +22,7 @@ A user-defined function that returns no value omits its return type entirely; do
 
 ## Control flow
 
-The reference includes `if`, `else`, `for`, `while`, `do-while`, `jump`, `return`, and state changes. A `for` initializer is an expression; variable declarations in the initializer are rejected with `PAR008`. Declare the loop variable in the enclosing block before the loop (for example, `integer i; for (i = 0; i < 10; ++i)`). Parser coverage must be fixture-driven.
+The reference includes `if`, `else`, `for`, `while`, `do-while`, `jump`, `return`, and state changes. A `for` initializer is an expression; variable declarations in the initializer are rejected with `PAR008`. Declare the loop variable in the enclosing block before the loop (for example, `integer i; for (i = 0; i < 10; ++i)`). Parser coverage must be fixture-driven. The C-style ternary conditional operator (`?:`) is not part of LSL; the parser reports a syntax error rather than accepting it.
 
 ## Literals and special syntax
 
