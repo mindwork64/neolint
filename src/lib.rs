@@ -3,6 +3,7 @@
 //! Core library for the CLI-only LSL linter.
 
 pub mod builtins;
+pub mod config;
 pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
