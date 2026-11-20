@@ -263,6 +263,8 @@ literal                 := integer-literal | float-literal | string-literal
 
 Assignment targets and increment/decrement targets are deliberately different in neolint: assignment accepts a variable-reference or a component-access; `++`/`--` accepts only a variable-reference. Component names are syntactically limited to `x`, `y`, `z`, and `s`; whether a component is valid for the actual vector/rotation type is checked by SEM018/SEM019, not by this grammar. The component-increment restriction is covered by `src/parser.rs::tests::rejects_component_increment_and_decrement_targets`.
 
+The call suffix is allowed only immediately after an `identifier`. Calls on literals, component accesses, grouped expressions, or another call result are syntax errors. This is covered by `src/parser.rs::tests::accepts_call_suffixes_only_on_identifiers` and `src/parser.rs::tests::rejects_call_suffixes_on_non_identifiers`.
+
 `vector-or-rotation-literal` components are parsed at a precedence floor above relational operators; the production above intentionally over-approximates the component expression syntax.
 
 ### Binary operator precedence and associativity
@@ -443,7 +445,7 @@ See:
 | `jump` / label | `tests/grammar_inventory.rs::statements_inventory_positive` | — | Syntax tested; scope semantically checked |
 | State change | `src/parser.rs::tests::accepts_state_change_to_default`; `tests/state_change_contexts.rs::event_handlers_accept_named_and_default_state_changes` | `src/parser.rs::tests::rejects_state_change_without_target` | Tested; context caveat |
 | Literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/lexer.rs::tests::recognizes_integer_float_and_exponent_literals` | — | Tested |
-| Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | — | Tested |
+| Calls / casts | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::accepts_call_suffixes_only_on_identifiers`; `tests/vector_literal_contexts.rs::explicit_cast_contexts_cover_vector_literals` | `src/parser.rs::tests::rejects_call_suffixes_on_non_identifiers` | Tested; call suffix requires an identifier |
 | Unary/binary/logical/comparison | `tests/grammar_inventory.rs::expressions_inventory_positive`; `src/parser.rs::tests::logical_and_or_operators_share_lsl_precedence` | — | Tested |
 | Increment/decrement | `src/parser.rs::tests::accepts_increment_and_decrement_of_variables` | `src/parser.rs::tests::rejects_increment_and_decrement_of_non_variables`; `src/parser.rs::tests::rejects_component_increment_and_decrement_targets` | Tested; components are not increment targets |
 | List/vector/rotation literals | `tests/grammar_inventory.rs::expressions_inventory_positive`; `tests/vector_literal_contexts.rs::declaration_initializers_cover_literal_expressions_and_commas` | — | Tested |

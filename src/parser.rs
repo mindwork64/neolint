@@ -366,12 +366,18 @@ impl<'a> Parser<'a> {
         }
 
         let primary_start = self.current;
+        let mut call_suffix_allowed = self.check(TokenKind::Identifier);
         if !self.parse_primary() {
             return false;
         }
         loop {
-            if self.matches(TokenKind::LParen) {
+            if self.check(TokenKind::LParen) {
+                if !call_suffix_allowed {
+                    self.error_here("PAR007", "function call suffix requires an identifier");
+                }
+                self.advance();
                 self.parse_argument_list();
+                call_suffix_allowed = false;
             } else if self.matches(TokenKind::Dot) {
                 let base_is_variable =
                     is_variable_lvalue(self.tokens, primary_start, self.current - 1);
@@ -386,11 +392,13 @@ impl<'a> Parser<'a> {
                     );
                 }
                 self.expect(TokenKind::Identifier, "expected a component name after '.'");
+                call_suffix_allowed = false;
             } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
                 if !is_variable_lvalue(self.tokens, primary_start, self.current) {
                     self.error_here("PAR011", "increment/decrement operand must be a variable");
                 }
                 self.advance();
+                call_suffix_allowed = false;
             } else {
                 break;
             }
@@ -1203,6 +1211,40 @@ mod tests {
             assert!(
                 !diagnostics.is_empty(),
                 "unsupported LSL compound assignment {operator} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_call_suffixes_only_on_identifiers() {
+        let diagnostics = parse_source(
+            r#"default { state_entry() {
+                llOwnerSay("text");
+                user_function();
+                user_function(1, 2);
+                outer(inner(1));
+            } }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_call_suffixes_on_non_identifiers() {
+        for source in [
+            "default { state_entry() { 1(); } }",
+            "default { state_entry() { \"text\"(); } }",
+            "default { state_entry() { llGetPos()(); } }",
+            "default { state_entry() { vector position; position.x(); } }",
+            "default { state_entry() { integer first; integer second; (first + second)(); } }",
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.code == "PAR007")
+                    .count(),
+                1,
+                "unexpected diagnostics for {source:?}: {diagnostics:?}"
             );
         }
     }
