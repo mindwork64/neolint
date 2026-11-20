@@ -22,6 +22,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Test canonical metadata extractor
+        run: python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
