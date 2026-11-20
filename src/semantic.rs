@@ -1216,9 +1216,7 @@ fn condition_possibilities(
     if right == left + 1 {
         let token = &tokens[left];
         let constant_value = match token.kind {
-            TokenKind::IntegerLiteral | TokenKind::FloatLiteral => {
-                token.lexeme.parse::<f64>().ok()
-            }
+            TokenKind::IntegerLiteral | TokenKind::FloatLiteral => token.lexeme.parse::<f64>().ok(),
             TokenKind::Identifier => definitions()
                 .constants
                 .get(token.lexeme.as_str())
@@ -1234,11 +1232,7 @@ fn condition_possibilities(
     (true, true)
 }
 
-fn for_condition_range(
-    tokens: &[Token],
-    open: usize,
-    close: usize,
-) -> Option<(usize, usize)> {
+fn for_condition_range(tokens: &[Token], open: usize, close: usize) -> Option<(usize, usize)> {
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
     let mut first_semicolon = None;
@@ -1290,8 +1284,7 @@ fn build_control_flow_statement(
             let mut exits = Vec::new();
 
             while cursor < close {
-                let statement =
-                    build_control_flow_statement(tokens, cursor, close, graph)?;
+                let statement = build_control_flow_statement(tokens, cursor, close, graph)?;
                 if statement.next_index <= cursor {
                     return None;
                 }
@@ -1329,8 +1322,7 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let then_branch =
-                build_control_flow_statement(tokens, close + 1, limit, graph)?;
+            let then_branch = build_control_flow_statement(tokens, close + 1, limit, graph)?;
             let condition = graph.add_node();
             let (may_be_true, may_be_false) =
                 condition_possibilities(tokens, open + 1, close, false);
@@ -1341,15 +1333,9 @@ fn build_control_flow_statement(
                 exits.extend(then_branch.exits.iter().copied());
             }
 
-            if tokens.get(then_branch.next_index).map(|item| item.kind)
-                == Some(TokenKind::KwElse)
-            {
-                let else_branch = build_control_flow_statement(
-                    tokens,
-                    then_branch.next_index + 1,
-                    limit,
-                    graph,
-                )?;
+            if tokens.get(then_branch.next_index).map(|item| item.kind) == Some(TokenKind::KwElse) {
+                let else_branch =
+                    build_control_flow_statement(tokens, then_branch.next_index + 1, limit, graph)?;
                 if may_be_false {
                     graph.add_edge(condition, else_branch.entry);
                     exits.extend(else_branch.exits.iter().copied());
@@ -1381,20 +1367,17 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let (condition_start, condition_end, empty_is_true) =
-                if kind == TokenKind::KwFor {
-                    let (condition_start, condition_end) =
-                        for_condition_range(tokens, open, close)?;
-                    (condition_start, condition_end, true)
-                } else {
-                    if close == open + 1 {
-                        return None;
-                    }
-                    (open + 1, close, false)
-                };
+            let (condition_start, condition_end, empty_is_true) = if kind == TokenKind::KwFor {
+                let (condition_start, condition_end) = for_condition_range(tokens, open, close)?;
+                (condition_start, condition_end, true)
+            } else {
+                if close == open + 1 {
+                    return None;
+                }
+                (open + 1, close, false)
+            };
 
-            let body =
-                build_control_flow_statement(tokens, close + 1, limit, graph)?;
+            let body = build_control_flow_statement(tokens, close + 1, limit, graph)?;
             let condition = graph.add_node();
             let (may_enter_body, may_exit_loop) = condition_possibilities(
                 tokens,
@@ -1438,8 +1421,7 @@ fn build_control_flow_statement(
 
             let condition = graph.add_node();
             connect_exits(graph, &body.exits, condition);
-            let (may_repeat, may_exit_loop) =
-                condition_possibilities(tokens, open + 1, close, false);
+            let (may_repeat, may_exit_loop) = condition_possibilities(tokens, open + 1, close, false);
             if may_repeat {
                 graph.add_edge(condition, body.entry);
             }
@@ -1490,10 +1472,7 @@ fn build_control_flow_statement(
             }
 
             let node = graph.add_node();
-            graph
-                .labels
-                .entry(label.lexeme.clone())
-                .or_insert(node);
+            graph.labels.entry(label.lexeme.clone()).or_insert(node);
             Some(FlowFragment {
                 entry: node,
                 exits: vec![node],
@@ -2531,8 +2510,7 @@ mod tests {
 
     #[test]
     fn accepts_backward_jump_that_cannot_reach_function_end() {
-        let diagnostics =
-            analyze_source("integer spin() { @again; jump again; } default { }");
+        let diagnostics = analyze_source("integer spin() { @again; jump again; } default { }");
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
@@ -2567,8 +2545,6 @@ mod tests {
         assert!(diagnostics.iter().any(|item| item.code == "SEM010"));
         assert!(!diagnostics.iter().any(|item| item.code == "SEM011"));
     }
-
-
 
     #[test]
     fn does_not_require_value_returns_from_no_return_functions() {
