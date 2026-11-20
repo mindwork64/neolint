@@ -1955,7 +1955,9 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("string")
             } else if left == "list" || right == "list" {
                 Some("list")
-            } else if left == "vector" && right == "vector" {
+            } else if left == "vector"
+                && (right == "vector" || matches!(right, "integer" | "float"))
+            {
                 Some("vector")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
@@ -2431,6 +2433,24 @@ mod tests {
                 .filter(|item| item.code == "SEM004")
                 .count(),
             2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_vector_plus_scalar_only_in_documented_operand_order() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector position; llSetPos(position + 1.0); llOwnerSay(position + 1); llOwnerSay(1.0 + position); } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM004")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0]
+                .message
+                .contains("has type vector, expected string"),
             "{diagnostics:?}"
         );
     }
