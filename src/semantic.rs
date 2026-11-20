@@ -17,6 +17,319 @@ fn is_declaration_type(kind: TokenKind) -> bool {
     )
 }
 
+fn is_value_type(kind: TokenKind) -> bool {
+    lsl_type_name(kind).is_some()
+}
+
+#[derive(Debug, Clone)]
+struct VariableBinding {
+    type_name: String,
+    declaration_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct LexicalScope {
+    parent: Option<usize>,
+    variables: HashMap<String, Vec<VariableBinding>>,
+}
+
+struct ScopeModel {
+    scopes: Vec<LexicalScope>,
+    scope_at: Vec<usize>,
+}
+
+impl ScopeModel {
+    fn build(tokens: &[Token]) -> Self {
+        let mut scopes = vec![LexicalScope::default()];
+        let mut stack = vec![0usize];
+        let mut scope_at = vec![0usize; tokens.len()];
+
+        for (index, token) in tokens.iter().enumerate() {
+            let current = *stack.last().expect("root scope always exists");
+            scope_at[index] = current;
+
+            match token.kind {
+                TokenKind::LBrace => {
+                    let child = scopes.len();
+                    scopes.push(LexicalScope {
+                        parent: Some(current),
+                        variables: HashMap::new(),
+                    });
+                    stack.push(child);
+                }
+                TokenKind::RBrace if stack.len() > 1 => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+
+        let mut model = Self { scopes, scope_at };
+        model.register_function_parameters(tokens);
+        model.register_event_parameters(tokens);
+        model.register_variables(tokens);
+        model
+    }
+
+    fn add_variable(
+        &mut self,
+        scope_id: usize,
+        name: &str,
+        type_name: &str,
+        declaration_index: usize,
+    ) {
+        if let Some(scope) = self.scopes.get_mut(scope_id) {
+            scope
+                .variables
+                .entry(name.to_owned())
+                .or_default()
+                .push(VariableBinding {
+                    type_name: type_name.to_owned(),
+                    declaration_index,
+                });
+        }
+    }
+
+    fn resolve(&self, name: &str, use_index: usize) -> Option<String> {
+        let mut scope_id = *self.scope_at.get(use_index)?;
+        loop {
+            let scope = self.scopes.get(scope_id)?;
+            if let Some(bindings) = scope.variables.get(name) {
+                if let Some(binding) = bindings
+                    .iter()
+                    .rev()
+                    .find(|binding| binding.declaration_index <= use_index)
+                {
+                    return Some(binding.type_name.clone());
+                }
+            }
+
+            let Some(parent) = scope.parent else {
+                return None;
+            };
+            scope_id = parent;
+        }
+    }
+
+    fn register_function_parameters(&mut self, tokens: &[Token]) {
+        for index in 0..tokens.len() {
+            if self.scope_at.get(index) != Some(&0) {
+                continue;
+            }
+
+            let is_return_type = is_value_type(tokens[index].kind)
+                || tokens[index].kind == TokenKind::KwVoid;
+            if !is_return_type
+                || tokens.get(index + 1).map(|token| token.kind) != Some(TokenKind::Identifier)
+                || tokens.get(index + 2).map(|token| token.kind) != Some(TokenKind::LParen)
+            {
+                continue;
+            }
+
+            let open = index + 2;
+            let Some(close) = matching_paren(tokens, open) else {
+                continue;
+            };
+            let body_open = close + 1;
+            if tokens.get(body_open).map(|token| token.kind) != Some(TokenKind::LBrace) {
+                continue;
+            }
+
+            let Some(body_scope) = self.scope_at.get(body_open + 1).copied() else {
+                continue;
+            };
+            self.register_parameters(tokens, open, close, body_scope);
+        }
+    }
+
+    fn register_event_parameters(&mut self, tokens: &[Token]) {
+        let mut state_scopes = Vec::new();
+
+        for (index, token) in tokens.iter().enumerate() {
+            let body_open = match token.kind {
+                TokenKind::KwDefault => index + 1,
+                TokenKind::KwState => index + 2,
+                _ => continue,
+            };
+
+            if tokens.get(body_open).map(|item| item.kind) == Some(TokenKind::LBrace) {
+                if let Some(scope_id) = self.scope_at.get(body_open + 1).copied() {
+                    state_scopes.push(scope_id);
+                }
+            }
+        }
+
+        let events = &definitions().events;
+        for (index, token) in tokens.iter().enumerate() {
+            if token.kind != TokenKind::Identifier
+                || !state_scopes.contains(self.scope_at.get(index).unwrap_or(&usize::MAX))
+                || !events.contains_key(token.lexeme.as_str())
+                || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            {
+                continue;
+            }
+
+            let open = index + 1;
+            let Some(close) = matching_paren(tokens, open) else {
+                continue;
+            };
+            let body_open = close + 1;
+            if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+                continue;
+            }
+
+            let Some(body_scope) = self.scope_at.get(body_open + 1).copied() else {
+                continue;
+            };
+            self.register_parameters(tokens, open, close, body_scope);
+        }
+    }
+
+    fn register_parameters(
+        &mut self,
+        tokens: &[Token],
+        open: usize,
+        close: usize,
+        scope_id: usize,
+    ) {
+        let mut index = open + 1;
+        while index < close {
+            if let Some(type_name) = lsl_type_name(tokens[index].kind) {
+                if let Some(name) = tokens.get(index + 1) {
+                    if name.kind == TokenKind::Identifier {
+                        self.add_variable(scope_id, &name.lexeme, type_name, index + 1);
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+            index += 1;
+        }
+    }
+
+    fn register_variables(&mut self, tokens: &[Token]) {
+        let mut paren_depth = 0usize;
+
+        for (index, token) in tokens.iter().enumerate() {
+            match token.kind {
+                TokenKind::LParen => {
+                    paren_depth += 1;
+                    continue;
+                }
+                TokenKind::RParen => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    continue;
+                }
+                _ => {}
+            }
+
+            if paren_depth != 0 || !is_value_type(token.kind) {
+                continue;
+            }
+
+            let Some(name) = tokens.get(index + 1) else {
+                continue;
+            };
+            if name.kind != TokenKind::Identifier {
+                continue;
+            }
+
+            // A type followed by name '(' is a function declaration, not a variable.
+            if tokens.get(index + 2).map(|item| item.kind) == Some(TokenKind::LParen) {
+                continue;
+            }
+
+            let Some(scope_id) = self.scope_at.get(index).copied() else {
+                continue;
+            };
+            let type_name = lsl_type_name(token.kind).expect("value type has a name");
+            self.register_declaration_names(tokens, index, scope_id, type_name);
+        }
+    }
+
+    fn register_declaration_names(
+        &mut self,
+        tokens: &[Token],
+        type_index: usize,
+        scope_id: usize,
+        type_name: &str,
+    ) {
+        let Some(first_name) = tokens.get(type_index + 1) else {
+            return;
+        };
+        self.add_variable(scope_id, &first_name.lexeme, type_name, type_index + 1);
+
+        let mut index = type_index + 2;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut vector_depth = 0usize;
+
+        while index < tokens.len() {
+            let kind = tokens[index].kind;
+            if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && vector_depth == 0
+                && kind == TokenKind::Semicolon
+            {
+                break;
+            }
+
+            if kind == TokenKind::Comma
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && vector_depth == 0
+            {
+                if let Some(name) = tokens.get(index + 1) {
+                    if name.kind == TokenKind::Identifier {
+                        self.add_variable(scope_id, &name.lexeme, type_name, index + 1);
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+
+            match kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less if starts_vector_literal(tokens, index) => vector_depth += 1,
+                TokenKind::Greater if vector_depth > 0 => vector_depth -= 1,
+                _ => {}
+            }
+
+            index += 1;
+        }
+    }
+}
+
+fn matching_paren(tokens: &[Token], open_index: usize) -> Option<usize> {
+    if tokens.get(open_index)?.kind != TokenKind::LParen {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 /// Perform conservative semantic checks that do not require a full symbol table.
 ///
 /// The first rule catches duplicate top-level variables and user-defined
@@ -76,12 +389,17 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
         }
     }
 
-    analyze_builtin_calls(tokens, &mut diagnostics);
+    let scopes = ScopeModel::build(tokens);
+    analyze_builtin_calls(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
 }
 
-fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
+fn analyze_builtin_calls(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let builtins = definitions();
 
     for (index, token) in tokens.iter().enumerate() {
@@ -124,9 +442,10 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) = infer_expression_type(tokens, range.0, range.1) else {
-                // Variables and expressions without a provable type are left
-                // alone until full scope-aware type inference is available.
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1, scopes)
+            else {
+                // Expressions without a provable type remain unchecked.
                 continue;
             };
 
@@ -284,7 +603,12 @@ fn call_argument_ranges(
     ranges
 }
 
-fn infer_expression_type(tokens: &[Token], mut start: usize, mut end: usize) -> Option<String> {
+fn infer_expression_type(
+    tokens: &[Token],
+    mut start: usize,
+    mut end: usize,
+    scopes: &ScopeModel,
+) -> Option<String> {
     if start >= end {
         return None;
     }
@@ -313,7 +637,7 @@ fn infer_expression_type(tokens: &[Token], mut start: usize, mut end: usize) -> 
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        return infer_expression_type(tokens, start + 1, end);
+        return infer_expression_type(tokens, start + 1, end, scopes);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
         return Some("integer".to_owned());
@@ -325,10 +649,14 @@ fn infer_expression_type(tokens: &[Token], mut start: usize, mut end: usize) -> 
             TokenKind::IntegerLiteral => Some("integer".to_owned()),
             TokenKind::FloatLiteral => Some("float".to_owned()),
             TokenKind::StringLiteral => Some("string".to_owned()),
-            TokenKind::Identifier => definitions()
-                .constants
-                .get(token.lexeme.as_str())
-                .map(|constant| constant.type_name.clone()),
+            TokenKind::Identifier => scopes
+                .resolve(&token.lexeme, start)
+                .or_else(|| {
+                    definitions()
+                        .constants
+                        .get(token.lexeme.as_str())
+                        .map(|constant| constant.type_name.clone())
+                }),
             _ => None,
         };
     }
