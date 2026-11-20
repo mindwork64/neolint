@@ -100,8 +100,7 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
             continue;
         }
 
-        let Some((actual_count, _closing_index)) = count_call_arguments(tokens, index + 1)
-        else {
+        let Some((actual_count, _closing_index)) = count_call_arguments(tokens, index + 1) else {
             continue;
         };
         let expected_count = signature.parameters.len();
@@ -247,11 +246,13 @@ mod tests {
 
     #[test]
     fn reports_builtin_function_arity_mismatches() {
-        let diagnostics = analyze_source(
-            r#"default { state_entry() { llOwnerSay(); llGetPos(1); } }"#,
-        );
+        let diagnostics =
+            analyze_source(r#"default { state_entry() { llOwnerSay(); llGetPos(1); } }"#);
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM002").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM002")
+                .count(),
             2
         );
     }
