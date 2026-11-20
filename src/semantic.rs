@@ -2944,7 +2944,9 @@ fn starts_vector_literal(tokens: &[Token], index: usize) -> bool {
     };
 
     match previous.kind {
-        TokenKind::LParen
+        // `return` introduces an expression without a delimiter token.
+        TokenKind::KwReturn
+        | TokenKind::LParen
         | TokenKind::LBracket
         | TokenKind::Comma
         | TokenKind::Equal
@@ -4524,5 +4526,110 @@ mod tests {
         let diagnostics =
             analyze_source("default { state_entry() { vector offset; offset += <1, 2, 3>; } }");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_vector_function_returning_direct_vector_literal() {
+        let diagnostics = analyze_source("vector make() { return <1, 2, 3>; } default { }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_integer_function_returning_direct_vector_literal() {
+        let diagnostics = analyze_source("integer make() { return <1, 2, 3>; } default { }");
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM008")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("type vector"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_rotation_function_returning_direct_rotation_literal() {
+        let diagnostics = analyze_source("rotation make() { return <1, 2, 3, 4>; } default { }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_vector_function_returning_direct_rotation_literal() {
+        let diagnostics = analyze_source("vector make() { return <1, 2, 3, 4>; } default { }");
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM008")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("type rotation"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_grouped_and_cast_vector_and_rotation_returns() {
+        let diagnostics = analyze_source(
+            "vector grouped() { return (<1, 2, 3>); } \
+             vector cast() { return (vector)<1, 2, 3>; } \
+             rotation rotation_cast() { return (rotation)<1, 2, 3, 4>; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_incompatible_grouped_and_cast_vector_returns() {
+        let diagnostics = analyze_source(
+            "integer grouped() { return (<1, 2, 3>); } \
+             integer cast() { return (vector)<1, 2, 3>; } default { }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM008")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_arithmetic_expressions_starting_with_vector_literals() {
+        let diagnostics = analyze_source(
+            "vector add() { return <1, 2, 3> + <4, 5, 6>; } \
+             vector scale() { return <1, 2, 3> * 2.0; } \
+             float dot() { return <1, 2, 3> * <4, 5, 6>; } \
+             rotation compose() { return <1, 2, 3, 4> * <5, 6, 7, 8>; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_incompatible_arithmetic_expressions_starting_with_vector_literals() {
+        let diagnostics = analyze_source(
+            "integer add() { return <1, 2, 3> + <4, 5, 6>; } \
+             vector dot() { return <1, 2, 3> * <4, 5, 6>; } default { }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM008")
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
     }
 }
