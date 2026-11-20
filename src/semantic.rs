@@ -100,9 +100,8 @@ mod tests {
 
     #[test]
     fn reports_duplicate_user_functions() {
-        let diagnostics = analyze_source(
-            "integer calculate() { return 1; } integer calculate() { return 2; }",
-        );
+        let diagnostics =
+            analyze_source("integer calculate() { return 1; } integer calculate() { return 2; }");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "SEM001");
     }
