@@ -77,6 +77,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     }
 
     analyze_builtin_calls(tokens, &mut diagnostics);
+    analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
 }
 
@@ -117,6 +118,128 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
                 span: token.span,
             });
         }
+    }
+}
+
+fn analyze_event_signatures(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
+    let events = &definitions().events;
+    let mut brace_depth = 0usize;
+    let mut state_depth = None;
+    let mut pending_state = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if brace_depth == 0
+            && matches!(token.kind, TokenKind::KwDefault | TokenKind::KwState)
+        {
+            pending_state = true;
+        }
+
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                if pending_state {
+                    state_depth = Some(brace_depth);
+                    pending_state = false;
+                }
+                continue;
+            }
+            TokenKind::RBrace => {
+                if state_depth == Some(brace_depth) {
+                    state_depth = None;
+                }
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if state_depth != Some(brace_depth) || token.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        let Some(signature) = events.get(token.lexeme.as_str()) else {
+            continue;
+        };
+        if tokens.get(index + 1).map(|next| next.kind) != Some(TokenKind::LParen) {
+            continue;
+        }
+
+        let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1) else {
+            continue;
+        };
+
+        if actual_count != signature.parameters.len() {
+            diagnostics.push(Diagnostic {
+                code: "SEM003",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "event {} expects {} parameter(s), but {} were declared",
+                    signature.name,
+                    signature.parameters.len(),
+                    actual_count
+                ),
+                span: token.span,
+            });
+            continue;
+        }
+
+        let actual_types = parameter_types(tokens, index + 1, closing_index);
+        for (parameter_index, (actual, expected)) in actual_types
+            .iter()
+            .zip(signature.parameters.iter())
+            .enumerate()
+        {
+            if actual != &expected.type_name {
+                diagnostics.push(Diagnostic {
+                    code: "SEM003",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "event {} parameter {} has type {}, expected {}",
+                        signature.name,
+                        parameter_index + 1,
+                        actual,
+                        expected.type_name
+                    ),
+                    span: token.span,
+                });
+            }
+        }
+    }
+}
+
+fn parameter_types(tokens: &[Token], open_index: usize, closing_index: usize) -> Vec<String> {
+    let mut types = Vec::new();
+    let mut expect_type = true;
+
+    for token in tokens.iter().take(closing_index).skip(open_index + 1) {
+        if token.kind == TokenKind::Comma {
+            expect_type = true;
+            continue;
+        }
+
+        if expect_type {
+            if let Some(type_name) = lsl_type_name(token.kind) {
+                types.push(type_name.to_owned());
+                expect_type = false;
+            }
+        }
+    }
+
+    types
+}
+
+fn lsl_type_name(kind: TokenKind) -> Option<&'static str> {
+    match kind {
+        TokenKind::KwInteger => Some("integer"),
+        TokenKind::KwFloat => Some("float"),
+        TokenKind::KwString => Some("string"),
+        TokenKind::KwKey => Some("key"),
+        TokenKind::KwList => Some("list"),
+        TokenKind::KwVector => Some("vector"),
+        TokenKind::KwRotation => Some("rotation"),
+        _ => None,
     }
 }
 
@@ -269,6 +392,34 @@ mod tests {
     fn does_not_count_nested_call_or_vector_commas_as_arguments() {
         let diagnostics = analyze_source(
             r#"default { state_entry() { llSetPos(<llFabs(-1), 2, 3>); llOwnerSay(llDumpList2String([1, 2], ",")); } }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn reports_wrong_event_parameter_count() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { } touch_start() { } }",
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "SEM003" && item.message.contains("touch_start")));
+    }
+
+    #[test]
+    fn reports_wrong_event_parameter_type() {
+        let diagnostics = analyze_source(
+            "default { touch_start(string total) { } }",
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "SEM003" && item.message.contains("expected integer")));
+    }
+
+    #[test]
+    fn accepts_known_event_signatures() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { } touch_start(integer total) { } listen(integer channel, string name, key id, string message) { } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
