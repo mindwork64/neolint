@@ -537,8 +537,8 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
-    analyze_missing_return_paths(tokens, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
+    analyze_missing_return_paths(tokens, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
     diagnostics
@@ -1139,13 +1139,143 @@ fn analyze_jump_labels(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut 
     }
 }
 
-/// Check whether a statement guarantees that every path through it returns.
-/// Jump statements and labels are handled conservatively by skipping the containing function.
-fn statement_returns_on_all_paths(
+#[derive(Default)]
+struct ControlFlowGraph {
+    successors: Vec<Vec<usize>>,
+    labels: HashMap<String, usize>,
+    pending_jumps: Vec<(usize, String)>,
+}
+
+impl ControlFlowGraph {
+    fn add_node(&mut self) -> usize {
+        let id = self.successors.len();
+        self.successors.push(Vec::new());
+        id
+    }
+
+    fn add_edge(&mut self, from: usize, to: usize) {
+        if let Some(edges) = self.successors.get_mut(from) {
+            if !edges.contains(&to) {
+                edges.push(to);
+            }
+        }
+    }
+
+    fn can_reach(&self, start: usize, target: usize) -> bool {
+        let mut visited = vec![false; self.successors.len()];
+        let mut pending = vec![start];
+
+        while let Some(node) = pending.pop() {
+            if node == target {
+                return true;
+            }
+            if node >= visited.len() || visited[node] {
+                continue;
+            }
+            visited[node] = true;
+            if let Some(edges) = self.successors.get(node) {
+                pending.extend(edges.iter().copied());
+            }
+        }
+
+        false
+    }
+}
+
+struct FlowFragment {
+    entry: usize,
+    exits: Vec<usize>,
+    next_index: usize,
+}
+
+fn condition_possibilities(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    empty_is_true: bool,
+) -> (bool, bool) {
+    let mut left = start;
+    let mut right = end;
+
+    while left < right
+        && tokens[left].kind == TokenKind::LParen
+        && matching_paren(tokens, left) == Some(right - 1)
+    {
+        left += 1;
+        right -= 1;
+    }
+
+    if left == right {
+        return if empty_is_true {
+            (true, false)
+        } else {
+            (true, true)
+        };
+    }
+
+    if right == left + 1 {
+        let token = &tokens[left];
+        let constant_value = match token.kind {
+            TokenKind::IntegerLiteral | TokenKind::FloatLiteral => {
+                token.lexeme.parse::<f64>().ok()
+            }
+            TokenKind::Identifier => definitions()
+                .constants
+                .get(token.lexeme.as_str())
+                .and_then(|constant| constant.value.parse::<f64>().ok()),
+            _ => None,
+        };
+
+        if let Some(value) = constant_value {
+            return (value != 0.0, value == 0.0);
+        }
+    }
+
+    (true, true)
+}
+
+fn for_condition_range(
+    tokens: &[Token],
+    open: usize,
+    close: usize,
+) -> Option<(usize, usize)> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut first_semicolon = None;
+
+    for index in open + 1..close {
+        match tokens[index].kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.checked_sub(1)?,
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.checked_sub(1)?,
+            TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+                if let Some(first) = first_semicolon {
+                    return Some((first + 1, index));
+                }
+                first_semicolon = Some(index);
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn connect_exits(graph: &mut ControlFlowGraph, exits: &[usize], target: usize) {
+    for exit in exits {
+        graph.add_edge(*exit, target);
+    }
+}
+
+/// Build a small control-flow graph directly from the token stream.
+/// The parser remains syntax-only; this graph is local to one function body.
+fn build_control_flow_statement(
     tokens: &[Token],
     start: usize,
     limit: usize,
-) -> Option<(bool, usize)> {
+    graph: &mut ControlFlowGraph,
+) -> Option<FlowFragment> {
     let kind = tokens.get(start)?.kind;
 
     match kind {
@@ -1156,24 +1286,38 @@ fn statement_returns_on_all_paths(
             }
 
             let mut cursor = start + 1;
-            let mut guarantees_return = false;
+            let mut entry = None;
+            let mut exits = Vec::new();
+
             while cursor < close {
-                let (statement_returns, next) =
-                    statement_returns_on_all_paths(tokens, cursor, close)?;
-                if next <= cursor {
+                let statement =
+                    build_control_flow_statement(tokens, cursor, close, graph)?;
+                if statement.next_index <= cursor {
                     return None;
                 }
-                if statement_returns {
-                    guarantees_return = true;
+
+                if let Some(previous_entry) = entry {
+                    connect_exits(graph, &exits, statement.entry);
+                    let _ = previous_entry;
+                } else {
+                    entry = Some(statement.entry);
                 }
-                cursor = next;
+
+                exits = statement.exits;
+                cursor = statement.next_index;
             }
 
-            Some((guarantees_return, close + 1))
-        }
-        TokenKind::KwReturn => {
-            let semicolon = statement_semicolon(tokens, start, limit)?;
-            Some((true, semicolon + 1))
+            let entry = entry.unwrap_or_else(|| {
+                let empty = graph.add_node();
+                exits.push(empty);
+                empty
+            });
+
+            Some(FlowFragment {
+                entry,
+                exits,
+                next_index: close + 1,
+            })
         }
         TokenKind::KwIf => {
             let open = start + 1;
@@ -1181,18 +1325,50 @@ fn statement_returns_on_all_paths(
                 return None;
             }
             let close = matching_paren(tokens, open)?;
-            if close >= limit {
+            if close >= limit || close == open + 1 {
                 return None;
             }
 
-            let (then_returns, then_end) =
-                statement_returns_on_all_paths(tokens, close + 1, limit)?;
-            if tokens.get(then_end).map(|token| token.kind) == Some(TokenKind::KwElse) {
-                let (else_returns, else_end) =
-                    statement_returns_on_all_paths(tokens, then_end + 1, limit)?;
-                Some((then_returns && else_returns, else_end))
+            let then_branch =
+                build_control_flow_statement(tokens, close + 1, limit, graph)?;
+            let condition = graph.add_node();
+            let (may_be_true, may_be_false) =
+                condition_possibilities(tokens, open + 1, close, false);
+
+            let mut exits = Vec::new();
+            if may_be_true {
+                graph.add_edge(condition, then_branch.entry);
+                exits.extend(then_branch.exits.iter().copied());
+            }
+
+            if tokens.get(then_branch.next_index).map(|item| item.kind)
+                == Some(TokenKind::KwElse)
+            {
+                let else_branch = build_control_flow_statement(
+                    tokens,
+                    then_branch.next_index + 1,
+                    limit,
+                    graph,
+                )?;
+                if may_be_false {
+                    graph.add_edge(condition, else_branch.entry);
+                    exits.extend(else_branch.exits.iter().copied());
+                }
+
+                Some(FlowFragment {
+                    entry: condition,
+                    exits,
+                    next_index: else_branch.next_index,
+                })
             } else {
-                Some((false, then_end))
+                if may_be_false {
+                    exits.push(condition);
+                }
+                Some(FlowFragment {
+                    entry: condition,
+                    exits,
+                    next_index: then_branch.next_index,
+                })
             }
         }
         TokenKind::KwFor | TokenKind::KwWhile => {
@@ -1204,52 +1380,139 @@ fn statement_returns_on_all_paths(
             if close >= limit {
                 return None;
             }
-            let (_, body_end) = statement_returns_on_all_paths(tokens, close + 1, limit)?;
-            // A for/while body may execute zero times.
-            Some((false, body_end))
+
+            let (condition_start, condition_end, empty_is_true) =
+                if kind == TokenKind::KwFor {
+                    let (condition_start, condition_end) =
+                        for_condition_range(tokens, open, close)?;
+                    (condition_start, condition_end, true)
+                } else {
+                    if close == open + 1 {
+                        return None;
+                    }
+                    (open + 1, close, false)
+                };
+
+            let body =
+                build_control_flow_statement(tokens, close + 1, limit, graph)?;
+            let condition = graph.add_node();
+            let (may_enter_body, may_exit_loop) = condition_possibilities(
+                tokens,
+                condition_start,
+                condition_end,
+                empty_is_true,
+            );
+
+            if may_enter_body {
+                graph.add_edge(condition, body.entry);
+            }
+            connect_exits(graph, &body.exits, condition);
+
+            Some(FlowFragment {
+                entry: condition,
+                exits: if may_exit_loop {
+                    vec![condition]
+                } else {
+                    Vec::new()
+                },
+                next_index: body.next_index,
+            })
         }
         TokenKind::KwDo => {
-            let (body_returns, body_end) =
-                statement_returns_on_all_paths(tokens, start + 1, limit)?;
-            if tokens.get(body_end).map(|token| token.kind) != Some(TokenKind::KwWhile)
-                || tokens.get(body_end + 1).map(|token| token.kind) != Some(TokenKind::LParen)
+            let body = build_control_flow_statement(tokens, start + 1, limit, graph)?;
+            let while_index = body.next_index;
+            if tokens.get(while_index).map(|item| item.kind) != Some(TokenKind::KwWhile)
+                || tokens.get(while_index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
             {
                 return None;
             }
-            let close = matching_paren(tokens, body_end + 1)?;
-            if tokens.get(close + 1).map(|token| token.kind) != Some(TokenKind::Semicolon) {
+
+            let open = while_index + 1;
+            let close = matching_paren(tokens, open)?;
+            if close >= limit
+                || close == open + 1
+                || tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::Semicolon)
+            {
                 return None;
             }
-            // A do-body executes at least once.
-            Some((body_returns, close + 2))
+
+            let condition = graph.add_node();
+            connect_exits(graph, &body.exits, condition);
+            let (may_repeat, may_exit_loop) =
+                condition_possibilities(tokens, open + 1, close, false);
+            if may_repeat {
+                graph.add_edge(condition, body.entry);
+            }
+
+            Some(FlowFragment {
+                entry: body.entry,
+                exits: if may_exit_loop {
+                    vec![condition]
+                } else {
+                    Vec::new()
+                },
+                next_index: close + 2,
+            })
         }
-        TokenKind::KwJump | TokenKind::At => None,
+        TokenKind::KwReturn => {
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            let node = graph.add_node();
+            Some(FlowFragment {
+                entry: node,
+                exits: Vec::new(),
+                next_index: semicolon + 1,
+            })
+        }
+        TokenKind::KwJump => {
+            let target = tokens.get(start + 1)?;
+            if target.kind != TokenKind::Identifier {
+                return None;
+            }
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            if tokens[semicolon].kind != TokenKind::Semicolon {
+                return None;
+            }
+
+            let node = graph.add_node();
+            graph.pending_jumps.push((node, target.lexeme.clone()));
+            Some(FlowFragment {
+                entry: node,
+                exits: Vec::new(),
+                next_index: semicolon + 1,
+            })
+        }
+        TokenKind::At => {
+            let label = tokens.get(start + 1)?;
+            if label.kind != TokenKind::Identifier
+                || tokens.get(start + 2).map(|item| item.kind) != Some(TokenKind::Semicolon)
+            {
+                return None;
+            }
+
+            let node = graph.add_node();
+            graph
+                .labels
+                .entry(label.lexeme.clone())
+                .or_insert(node);
+            Some(FlowFragment {
+                entry: node,
+                exits: vec![node],
+                next_index: start + 3,
+            })
+        }
         _ => {
             let semicolon = statement_semicolon(tokens, start, limit)?;
-            Some((false, semicolon + 1))
-        }
-    }
-}
-
-fn statement_semicolon(tokens: &[Token], start: usize, limit: usize) -> Option<usize> {
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-
-    for (index, token) in tokens.iter().enumerate().take(limit).skip(start) {
-        match token.kind {
-            TokenKind::LParen => paren_depth += 1,
-            TokenKind::RParen => paren_depth = paren_depth.checked_sub(1)?,
-            TokenKind::LBracket => bracket_depth += 1,
-            TokenKind::RBracket => bracket_depth = bracket_depth.checked_sub(1)?,
-            TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
-                return Some(index);
+            if tokens[semicolon].kind != TokenKind::Semicolon {
+                return None;
             }
-            TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return None,
-            _ => {}
+            let node = graph.add_node();
+            Some(FlowFragment {
+                entry: node,
+                exits: vec![node],
+                next_index: semicolon + 1,
+            })
         }
     }
-
-    None
 }
 
 fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
@@ -1299,22 +1562,40 @@ fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnost
             continue;
         };
 
-        // LSL jump/labels can transfer control non-locally. Until those edges
-        // are modeled, skip this rule for the affected function.
-        if tokens[body_open + 1..body_close]
-            .iter()
-            .any(|item| matches!(item.kind, TokenKind::KwJump | TokenKind::At))
-        {
+        let body_start = tokens[body_open].span.start;
+        let body_end = tokens[body_close].span.end;
+        let has_invalid_jump = diagnostics.iter().any(|diagnostic| {
+            matches!(diagnostic.code, "SEM009" | "SEM010")
+                && diagnostic.span.start >= body_start
+                && diagnostic.span.start <= body_end
+        });
+        if has_invalid_jump {
             continue;
         }
 
-        let Some((guarantees_return, _)) =
-            statement_returns_on_all_paths(tokens, body_open, body_close + 1)
+        let mut graph = ControlFlowGraph::default();
+        let Some(body) =
+            build_control_flow_statement(tokens, body_open, body_close + 1, &mut graph)
         else {
             continue;
         };
 
-        if !guarantees_return {
+        let exit = graph.add_node();
+        connect_exits(&mut graph, &body.exits, exit);
+
+        let mut invalid_graph = false;
+        for (jump_node, target_name) in std::mem::take(&mut graph.pending_jumps) {
+            let Some(target_node) = graph.labels.get(&target_name).copied() else {
+                invalid_graph = true;
+                break;
+            };
+            graph.add_edge(jump_node, target_node);
+        }
+        if invalid_graph {
+            continue;
+        }
+
+        if graph.can_reach(body.entry, exit) {
             let name = &tokens[name_index];
             diagnostics.push(Diagnostic {
                 code: "SEM011",
@@ -2227,15 +2508,67 @@ mod tests {
     }
 
     #[test]
-    fn skips_missing_return_check_for_functions_using_jump_labels() {
+    fn reports_missing_return_reachable_through_jump_label() {
         let diagnostics = analyze_source(
             "integer choose(integer flag) { if (flag) jump done; return 1; @done; } default { }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_jump_to_fallback_return() {
+        let diagnostics = analyze_source(
+            "integer choose(integer flag) { if (flag) jump done; return 1; @done; return 2; } default { }",
         );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM011"),
             "{diagnostics:?}"
         );
     }
+
+    #[test]
+    fn accepts_backward_jump_that_cannot_reach_function_end() {
+        let diagnostics =
+            analyze_source("integer spin() { @again; jump again; } default { }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn recognizes_unconditional_loop_conditions() {
+        let diagnostics = analyze_source(
+            "integer spin() { while (TRUE) { } } integer spin_forever() { for (;;) { } } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn recognizes_constant_false_loop_conditions() {
+        let diagnostics =
+            analyze_source("integer choose() { while (FALSE) return 1; } default { }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_missing_return_cascade_when_jump_target_is_invalid() {
+        let diagnostics =
+            analyze_source("integer choose() { jump missing; return 1; } default { }");
+        assert!(diagnostics.iter().any(|item| item.code == "SEM010"));
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM011"));
+    }
+
+
 
     #[test]
     fn does_not_require_value_returns_from_no_return_functions() {
