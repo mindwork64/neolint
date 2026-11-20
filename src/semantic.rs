@@ -329,10 +329,8 @@ impl ScopeModel {
 
         while index < tokens.len() {
             let kind = tokens[index].kind;
-            let at_declarator_level = paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && vector_depth == 0;
+            let at_declarator_level =
+                paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && vector_depth == 0;
 
             if at_declarator_level && kind == TokenKind::Equal && initializer_start.is_none() {
                 initializer_start = Some(index + 1);
@@ -3021,10 +3019,12 @@ mod tests {
 
     #[test]
     fn leaves_unknown_variable_initializer_types_conservative() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { integer value = llExtensionValue(); } }",
+        let diagnostics =
+            analyze_source("default { state_entry() { integer value = llExtensionValue(); } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM015"),
+            "{diagnostics:?}"
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM015"), "{diagnostics:?}");
     }
 
     #[test]
