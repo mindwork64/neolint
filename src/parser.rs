@@ -628,11 +628,11 @@ mod tests {
 
     #[test]
     fn rejects_user_functions_declared_after_states() {
-        let diagnostics = parse_source(
-            "default { state_entry() { } } later() { }",
-        );
+        let diagnostics = parse_source("default { state_entry() { } } later() { }");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR009"),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR009"),
             "{diagnostics:?}"
         );
     }
