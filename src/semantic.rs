@@ -535,6 +535,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     diagnostics.extend(std::mem::take(&mut scopes.diagnostics));
     let user_functions = collect_user_functions(tokens);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
@@ -673,6 +674,44 @@ fn analyze_unresolved_variables(
             kind: DiagnosticKind::Semantic,
             message: format!(
                 "variable '{}' is not declared in the current script; verify that it is provided by the scripting environment",
+                token.lexeme
+            ),
+            span: token.span,
+        });
+    }
+}
+
+fn analyze_deprecated_function_calls(
+    tokens: &[Token],
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let deprecated_functions = &definitions().deprecated_functions;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Identifier
+            || !deprecated_functions.contains(&token.lexeme)
+            || user_functions.contains_key(&token.lexeme)
+            || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+        {
+            continue;
+        }
+
+        // A declaration that happens to reuse a deprecated builtin name is not a call.
+        if index > 0 && is_declaration_type(tokens[index - 1].kind) {
+            continue;
+        }
+
+        if matching_paren(tokens, index + 1).is_none() {
+            continue;
+        }
+
+        diagnostics.push(Diagnostic {
+            code: "SEM013",
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            message: format!(
+                "call to deprecated LSL function '{}'",
                 token.lexeme
             ),
             span: token.span,
@@ -2048,6 +2087,42 @@ mod tests {
              integer second(integer value) { integer result; return value; }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn warns_when_a_canonical_deprecated_lsl_function_is_called() {
+        let diagnostics =
+            analyze_source(r#"default { state_entry() { llSoundPreload("sound"); } }"#);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|item| item.code == "SEM013")
+            .expect("deprecated builtin call should be reported");
+        assert_eq!(diagnostic.severity, Severity::Warning);
+        assert_eq!(diagnostic.kind, DiagnosticKind::Lint);
+        assert!(diagnostic.message.contains("llSoundPreload"));
+        assert!(!diagnostic.message.contains("ll.PreloadSound"));
+    }
+
+    #[test]
+    fn does_not_warn_for_a_non_deprecated_builtin_function() {
+        let diagnostics =
+            analyze_source(r#"default { state_entry() { llOwnerSay("hello"); } }"#);
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM013"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_warn_when_deprecated_function_name_is_only_text() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay("llSoundPreload()"); // llSoundPreload("old");
+            } }"#,
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM013"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
