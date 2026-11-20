@@ -327,7 +327,7 @@ fn matching_paren(tokens: &[Token], open_index: usize) -> Option<usize> {
 
     None
 }
- 
+
 #[derive(Debug, Clone)]
 struct UserFunctionSignature {
     return_type: String,
@@ -391,11 +391,13 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
             type_name.to_owned()
         };
 
-        functions.entry(name.lexeme.clone()).or_insert(UserFunctionSignature {
-            return_type,
-            parameter_types: parameter_types(tokens, open, close),
-            declaration_index: index + 1,
-        });
+        functions
+            .entry(name.lexeme.clone())
+            .or_insert(UserFunctionSignature {
+                return_type,
+                parameter_types: parameter_types(tokens, open, close),
+                declaration_index: index + 1,
+            });
     }
 
     functions
