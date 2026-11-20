@@ -101,8 +101,7 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
             continue;
         }
 
-        let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1)
-        else {
+        let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1) else {
             continue;
         };
         let expected_count = signature.parameters.len();
@@ -125,9 +124,7 @@ fn analyze_builtin_calls(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1)
-            else {
+            let Some(actual_type) = infer_expression_type(tokens, range.0, range.1) else {
                 // Variables and expressions without a provable type are left
                 // alone until full scope-aware type inference is available.
                 continue;
@@ -287,11 +284,7 @@ fn call_argument_ranges(
     ranges
 }
 
-fn infer_expression_type(
-    tokens: &[Token],
-    mut start: usize,
-    mut end: usize,
-) -> Option<String> {
+fn infer_expression_type(tokens: &[Token], mut start: usize, mut end: usize) -> Option<String> {
     if start >= end {
         return None;
     }
@@ -340,15 +333,11 @@ fn infer_expression_type(
         };
     }
 
-    if tokens[start].kind == TokenKind::LBracket
-        && tokens[end - 1].kind == TokenKind::RBracket
-    {
+    if tokens[start].kind == TokenKind::LBracket && tokens[end - 1].kind == TokenKind::RBracket {
         return Some("list".to_owned());
     }
 
-    if tokens[start].kind == TokenKind::Less
-        && tokens[end - 1].kind == TokenKind::Greater
-    {
+    if tokens[start].kind == TokenKind::Less && tokens[end - 1].kind == TokenKind::Greater {
         let mut commas = 0usize;
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -628,7 +617,10 @@ mod tests {
             r#"default { state_entry() { llOwnerSay(123); llSetPos("not a vector"); } }"#,
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             2
         );
     }
@@ -638,7 +630,10 @@ mod tests {
         let diagnostics = analyze_source(
             r#"default { state_entry() { llSleep(1); llGetObjectDetails("01234567-89ab-cdef-0123-456789abcdef", [OBJECT_NAME]); } }"#,
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
@@ -651,9 +646,8 @@ mod tests {
 
     #[test]
     fn leaves_unknown_variable_types_unchecked() {
-        let diagnostics = analyze_source(
-            r#"default { state_entry() { integer amount; llOwnerSay(amount); } }"#,
-        );
+        let diagnostics =
+            analyze_source(r#"default { state_entry() { integer amount; llOwnerSay(amount); } }"#);
         assert!(!diagnostics.iter().any(|item| item.code == "SEM004"), "{diagnostics:?}");
     }
 
