@@ -534,6 +534,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     let mut scopes = ScopeModel::build(tokens);
     diagnostics.extend(std::mem::take(&mut scopes.diagnostics));
     let user_functions = collect_user_functions(tokens);
+    analyze_explicit_casts(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -764,14 +765,9 @@ fn analyze_builtin_calls(
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) = infer_expression_type(
-                tokens,
-                range.0,
-                range.1,
-                scopes,
-                user_functions,
-                diagnostics,
-            ) else {
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1, scopes, user_functions)
+            else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -842,7 +838,7 @@ fn analyze_user_function_calls(
             .enumerate()
         {
             let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes, functions, diagnostics)
+                infer_expression_type(tokens, range.0, range.1, scopes, functions)
             else {
                 continue;
             };
@@ -960,14 +956,9 @@ fn analyze_function_returns(
                     ),
                     span: tokens[cursor].span,
                 });
-            } else if let Some(actual_type) = infer_expression_type(
-                tokens,
-                expression_start,
-                semicolon,
-                scopes,
-                functions,
-                diagnostics,
-            ) {
+            } else if let Some(actual_type) =
+                infer_expression_type(tokens, expression_start, semicolon, scopes, functions)
+            {
                 if !can_implicitly_convert(&actual_type, &signature.return_type) {
                     diagnostics.push(Diagnostic {
                         code: "SEM008",
@@ -2048,13 +2039,156 @@ fn is_explicit_cast_supported(source: &str, target: &str) -> bool {
     }
 }
 
+fn matching_bracket(tokens: &[Token], open_index: usize) -> Option<usize> {
+    if tokens.get(open_index)?.kind != TokenKind::LBracket {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.kind {
+            TokenKind::LBracket => depth += 1,
+            TokenKind::RBracket => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn matching_vector_literal(tokens: &[Token], open_index: usize) -> Option<usize> {
+    if !starts_vector_literal(tokens, open_index) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.kind {
+            TokenKind::Less if starts_vector_literal(tokens, index) => depth += 1,
+            TokenKind::Greater if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// Return the token index immediately after a prefix expression, including its postfix calls,
+/// member access, and increment/decrement operators.
+fn prefix_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut index = start;
+
+    loop {
+        match tokens.get(index)?.kind {
+            TokenKind::Bang
+            | TokenKind::Tilde
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::PlusPlus
+            | TokenKind::MinusMinus => index += 1,
+            TokenKind::LParen
+                if lsl_type_name(tokens.get(index + 1)?.kind).is_some()
+                    && tokens.get(index + 2)?.kind == TokenKind::RParen =>
+            {
+                index += 3;
+            }
+            _ => break,
+        }
+    }
+
+    index = match tokens.get(index)?.kind {
+        TokenKind::Identifier
+        | TokenKind::IntegerLiteral
+        | TokenKind::FloatLiteral
+        | TokenKind::StringLiteral => index + 1,
+        TokenKind::LParen => matching_paren(tokens, index)? + 1,
+        TokenKind::LBracket => matching_bracket(tokens, index)? + 1,
+        TokenKind::Less if starts_vector_literal(tokens, index) => {
+            matching_vector_literal(tokens, index)? + 1
+        }
+        _ => return None,
+    };
+
+    loop {
+        match tokens.get(index).map(|token| token.kind) {
+            Some(TokenKind::LParen) => index = matching_paren(tokens, index)? + 1,
+            Some(TokenKind::Dot) if tokens.get(index + 1)?.kind == TokenKind::Identifier => {
+                index += 2;
+            }
+            Some(TokenKind::PlusPlus | TokenKind::MinusMinus) => index += 1,
+            _ => break,
+        }
+    }
+
+    Some(index)
+}
+
+fn analyze_explicit_casts(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::LParen {
+            continue;
+        }
+
+        let Some(target_type) = tokens
+            .get(index + 1)
+            .and_then(|item| lsl_type_name(item.kind))
+        else {
+            continue;
+        };
+        if tokens.get(index + 2).map(|item| item.kind) != Some(TokenKind::RParen) {
+            continue;
+        }
+
+        let operand_start = index + 3;
+        let Some(operand_end) = prefix_expression_end(tokens, operand_start) else {
+            continue;
+        };
+        if operand_start >= operand_end {
+            continue;
+        }
+
+        let Some(source_type) =
+            infer_expression_type(tokens, operand_start, operand_end, scopes, user_functions)
+        else {
+            continue;
+        };
+
+        if !is_explicit_cast_supported(&source_type, target_type) {
+            diagnostics.push(Diagnostic {
+                code: "SEM014",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "cannot explicitly cast {} to {} in LSL",
+                    source_type, target_type
+                ),
+                span: tokens[index + 1].span,
+            });
+        }
+    }
+}
+
 fn infer_expression_type(
     tokens: &[Token],
     mut start: usize,
     mut end: usize,
     scopes: &ScopeModel,
     user_functions: &HashMap<String, UserFunctionSignature>,
-    diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<String> {
     if start >= end {
         return None;
@@ -2075,33 +2209,19 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
-        let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+        let operand_type = infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
     if let Some(operator_index) = find_top_level_binary_operator(tokens, start, end) {
-        let left_type = infer_expression_type(
-            tokens,
-            start,
-            operator_index,
-            scopes,
-            user_functions,
-            diagnostics,
-        )?;
-        let right_type = infer_expression_type(
-            tokens,
-            operator_index + 1,
-            end,
-            scopes,
-            user_functions,
-            diagnostics,
-        )?;
+        let left_type =
+            infer_expression_type(tokens, start, operator_index, scopes, user_functions)?;
+        let right_type =
+            infer_expression_type(tokens, operator_index + 1, end, scopes, user_functions)?;
         return infer_binary_result_type(tokens[operator_index].kind, &left_type, &right_type)
             .map(str::to_owned);
     }
@@ -2113,20 +2233,9 @@ fn infer_expression_type(
         && tokens[start + 2].kind == TokenKind::RParen
     {
         if let Some(target_type) = lsl_type_name(tokens[start + 1].kind) {
-            let source_type =
-                infer_expression_type(tokens, start + 3, end, scopes, user_functions, diagnostics);
+            let source_type = infer_expression_type(tokens, start + 3, end, scopes, user_functions);
             if let Some(source_type) = source_type {
                 if !is_explicit_cast_supported(&source_type, target_type) {
-                    diagnostics.push(Diagnostic {
-                        code: "SEM014",
-                        severity: Severity::Error,
-                        kind: DiagnosticKind::Semantic,
-                        message: format!(
-                            "cannot explicitly cast {} to {} in LSL",
-                            source_type, target_type
-                        ),
-                        span: tokens[start + 1].span,
-                    });
                     return None;
                 }
             } else if !matches!(target_type, "string" | "list") {
@@ -2749,6 +2858,21 @@ mod tests {
             invalid_casts[0]
                 .message
                 .contains("cannot explicitly cast vector to integer"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn detects_unsupported_casts_in_local_initializers() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector position; integer invalid = (integer)position; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM014")
+                .count(),
+            1,
             "{diagnostics:?}"
         );
     }
