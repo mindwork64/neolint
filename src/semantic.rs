@@ -2303,6 +2303,16 @@ fn analyze_component_assignments(
         let result_type = if let Some(binary_operator) = binary_operator {
             let Some(result_type) = infer_binary_result_type(binary_operator, "float", &value_type)
             else {
+                diagnostics.push(Diagnostic {
+                    code: "SEM018",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "compound assignment '{}' is not supported for component types float and {}",
+                        operator.lexeme, value_type
+                    ),
+                    span: component.span,
+                });
                 continue;
             };
             result_type
@@ -2391,6 +2401,16 @@ fn analyze_compound_assignments(
         let Some(result_type) =
             infer_binary_result_type(binary_operator, &target_type, &value_type)
         else {
+            diagnostics.push(Diagnostic {
+                code: "SEM017",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "compound assignment '{}' is not supported for operand types {} and {}",
+                    operator.lexeme, target_type, value_type
+                ),
+                span: name.span,
+            });
             continue;
         };
 
