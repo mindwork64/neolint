@@ -46,8 +46,11 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM005`: wrong argument count for a known user-defined function.
 - `SEM006`: provable argument type mismatch for a known user-defined function.
 - `SEM007`: duplicate local declaration in the same lexical scope, including redeclaration of a parameter; shadowing in a nested block is allowed.
+- `SEM008`: validates explicit return statements in user-defined functions, including return-value presence and provable return-expression type compatibility.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop.
+
+SEM008 checks explicit return statements only; it does not prove that every control-flow path in a value-returning function returns a value.
 
 A clean result does not mean full semantic validation or complete lint-rule coverage has passed.
 
