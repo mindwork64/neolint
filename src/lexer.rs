@@ -360,7 +360,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_punctuation(&mut self, start: Mark) {
-        let first = self.advance().expect("scan_punctuation is called at a character");
+        let first = self
+            .advance()
+            .expect("scan_punctuation is called at a character");
 
         let kind = match first {
             '(' => Some(TokenKind::LParen),
