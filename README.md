@@ -20,6 +20,7 @@ The current implementation provides a source-aware lexer, a syntax parser, a con
 - Offline and deterministic during normal linting.
 - Stable diagnostic codes and source locations.
 - Syntax, semantic, and lint diagnostics remain distinct.
+- Vendored official LSL function, event, and constant definitions; normal lint runs offline.
 - The canonical LSL definitions are data input; SLua definitions are not part of LSL.
 
 ## Planned command line
@@ -31,7 +32,7 @@ cat script.lsl | neolint -
 neolint --tokens script.lsl
 ```
 
-The current build reports lexical and syntax errors plus duplicate top-level declarations (SEM001). A clean result does not yet mean full semantic validation or the wider lint rule set has passed.
+The current build reports lexical and syntax errors, duplicate top-level declarations (SEM001), and built-in function argument-count mismatches (SEM002). A clean result does not yet mean full semantic validation or the wider lint rule set has passed.
 
 ## License
 
