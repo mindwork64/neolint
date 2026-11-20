@@ -2273,7 +2273,10 @@ fn analyze_component_reads(
         if base.kind != TokenKind::Identifier
             || tokens.get(base_index + 1).map(|token| token.kind) != Some(TokenKind::Dot)
             || tokens.get(base_index + 2).map(|token| token.kind) != Some(TokenKind::Identifier)
-            || assignment_components.get(base_index + 2).copied().unwrap_or(false)
+            || assignment_components
+                .get(base_index + 2)
+                .copied()
+                .unwrap_or(false)
         {
             continue;
         }
@@ -3448,8 +3451,7 @@ mod tests {
             .any(|item| item.message.contains("'.w'") && item.message.contains("rotation")));
         assert!(invalid_reads
             .iter()
-            .all(|item| item.severity == Severity::Error
-                && item.kind == DiagnosticKind::Semantic));
+            .all(|item| item.severity == Severity::Error && item.kind == DiagnosticKind::Semantic));
     }
 
     #[test]
@@ -3507,7 +3509,10 @@ mod tests {
             }"#,
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM018").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM018")
+                .count(),
             3,
             "{diagnostics:?}"
         );
