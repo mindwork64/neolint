@@ -626,11 +626,12 @@ mod tests {
 
     #[test]
     fn rejects_explicit_void_return_type() {
-        let diagnostics = parse_source(
-            "void say_message(string message) { llOwnerSay(message); } default {}",
-        );
+        let diagnostics =
+            parse_source("void say_message(string message) { llOwnerSay(message); } default {}");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR001"),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR001"),
             "{diagnostics:?}"
         );
     }
