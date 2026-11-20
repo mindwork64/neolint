@@ -6,7 +6,7 @@ A CLI-only Rust linter for Linden Scripting Language (LSL).
 
 ## Status
 
-The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with eleven conservative semantic checks (SEM001–SEM011). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
+The current implementation provides a source-aware lexer, syntax validation, a vendored database of official LSL functions/events/constants, and a console CLI with twelve conservative semantic checks (SEM001–SEM012). It supports scope-aware variable resolution, user-function call checks, recursive directory scanning, and rule configuration.
 
 ## References
 
@@ -50,10 +50,11 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM009`: duplicate jump labels within one function or event handler.
 - `SEM010`: jump targets that are undefined or located inside an inaccessible nested block.
 - `SEM011`: value-returning functions that may reach the end without returning a value. The analysis handles sequential blocks and `if/else`, treats `for/while` as potentially executing zero times, and does not speculate about functions containing `jump` labels.
+- `SEM012`: warning for a variable reference that cannot be resolved to a declaration in the current lexical scope or a canonical built-in constant. Unknown function calls and bodies of unknown extension event handlers are deliberately ignored; the rule is a warning because environments may provide extra symbols.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop.
 
-SEM011 is deliberately conservative: functions containing jump statements or labels are skipped until their control-flow edges are modeled; the rule does not yet build a full control-flow graph.
+SEM011 is deliberately conservative: functions containing jump statements or labels are skipped until their control-flow edges are modeled; the rule does not yet build a full control-flow graph. `SEM012` warnings do not make the CLI exit with code 1 by default; they can be disabled or assigned another severity through the normal configuration and CLI options.
 
 A clean result does not mean full semantic validation or complete lint-rule coverage has passed.
 
