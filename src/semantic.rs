@@ -540,7 +540,115 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_missing_return_paths(tokens, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
+    analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
     diagnostics
+}
+
+fn unknown_event_body_ranges(tokens: &[Token], scopes: &ScopeModel) -> Vec<(usize, usize)> {
+    let events = &definitions().events;
+    let mut ranges = Vec::new();
+
+    for (index, token) in tokens.iter().enumerate() {
+        let body_open = match token.kind {
+            TokenKind::KwDefault => index + 1,
+            TokenKind::KwState => index + 2,
+            _ => continue,
+        };
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+
+        let Some(state_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+        let Some(state_scope_id) = scopes.scope_at.get(body_open + 1).copied() else {
+            continue;
+        };
+
+        let mut event_index = body_open + 1;
+        while event_index < state_close {
+            let event_token = &tokens[event_index];
+            if scopes.scope_at.get(event_index) != Some(&state_scope_id)
+                || event_token.kind != TokenKind::Identifier
+                || tokens.get(event_index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            {
+                event_index += 1;
+                continue;
+            }
+
+            let open = event_index + 1;
+            let Some(parameter_close) = matching_paren(tokens, open) else {
+                event_index += 1;
+                continue;
+            };
+            let event_body_open = parameter_close + 1;
+            if tokens.get(event_body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+                event_index += 1;
+                continue;
+            }
+            let Some(event_body_close) = matching_brace(tokens, event_body_open) else {
+                event_index += 1;
+                continue;
+            };
+
+            if !events.contains_key(event_token.lexeme.as_str()) {
+                ranges.push((event_body_open + 1, event_body_close));
+            }
+            event_index = event_body_close + 1;
+        }
+    }
+
+    ranges
+}
+
+fn analyze_unresolved_variables(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let unknown_event_ranges = unknown_event_body_ranges(tokens, scopes);
+    let constants = &definitions().constants;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        if unknown_event_ranges
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&index))
+        {
+            continue;
+        }
+
+        if scopes.resolve(&token.lexeme, index).is_some()
+            || constants.contains_key(token.lexeme.as_str())
+            || tokens.get(index + 1).map(|item| item.kind) == Some(TokenKind::LParen)
+        {
+            continue;
+        }
+
+        let previous = index.checked_sub(1).and_then(|item| tokens.get(item));
+        if previous.is_some_and(|item| {
+            matches!(
+                item.kind,
+                TokenKind::At | TokenKind::KwJump | TokenKind::KwState | TokenKind::Dot
+            ) || is_value_type(item.kind)
+        }) {
+            continue;
+        }
+
+        diagnostics.push(Diagnostic {
+            code: "SEM012",
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Semantic,
+            message: format!(
+                "variable '{}' is not declared in the current script; verify that it is provided by the scripting environment",
+                token.lexeme
+            ),
+            span: token.span,
+        });
+    }
 }
 
 fn analyze_builtin_calls(
@@ -2105,6 +2213,59 @@ mod tests {
         let diagnostics = analyze_source("do_work() { llOwnerSay(\"done\"); } default { }");
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn warns_about_unresolved_variable_references() {
+        let diagnostics =
+            analyze_source("default { state_entry() { llOwnerSay(missing_name); } }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM012" && item.severity == Severity::Warning),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_declared_variables_constants_and_vector_components() {
+        let diagnostics = analyze_source(
+            "vector position; default { state_entry() { integer amount; llOwnerSay((string)amount); llSetPos(position); llOwnerSay((string)position.x); llOwnerSay((string)TRUE); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_extension_function_names() {
+        let diagnostics =
+            analyze_source("default { state_entry() { llExtensionSpecificCall(); } }");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_bodies_of_unknown_extension_event_handlers() {
+        let diagnostics = analyze_source(
+            "default { custom_extension_event(integer supplied) { llOwnerSay(supplied); llOwnerSay(extension_value); } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_state_names_jump_targets_and_label_names() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { jump done; @done; state running; } } state running { state_entry() { } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM012"),
             "{diagnostics:?}"
         );
     }
