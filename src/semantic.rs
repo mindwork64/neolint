@@ -156,6 +156,18 @@ impl ScopeModel {
         }
     }
 
+    fn is_ancestor(&self, ancestor_id: usize, mut scope_id: usize) -> bool {
+        loop {
+            if scope_id == ancestor_id {
+                return true;
+            }
+            let Some(parent) = self.scopes.get(scope_id).and_then(|scope| scope.parent) else {
+                return false;
+            };
+            scope_id = parent;
+        }
+    }
+
     fn register_function_parameters(&mut self, tokens: &[Token]) {
         for index in 0..tokens.len() {
             if self.scope_at.get(index) != Some(&0) {
@@ -525,6 +537,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     diagnostics
 }
@@ -786,6 +799,213 @@ fn analyze_function_returns(
             }
 
             cursor = semicolon + 1;
+        }
+    }
+}
+
+
+struct CodeScopeRange {
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+struct JumpLabel {
+    scope_id: usize,
+    span: crate::diagnostic::Span,
+}
+
+fn collect_jump_code_scopes(tokens: &[Token], scopes: &ScopeModel) -> Vec<CodeScopeRange> {
+    let mut code_scopes = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+
+    // User-defined function scopes.
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            TokenKind::LParen => {
+                paren_depth += 1;
+                continue;
+            }
+            TokenKind::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if brace_depth != 0 || paren_depth != 0 {
+            continue;
+        }
+
+        let Some((name_index, open, _)) = function_header_at(tokens, index) else {
+            continue;
+        };
+        let Some(parameter_close) = matching_paren(tokens, open) else {
+            continue;
+        };
+        let body_open = parameter_close + 1;
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+        let Some(body_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+
+        code_scopes.push(CodeScopeRange {
+            name: tokens[name_index].lexeme.clone(),
+            start: body_open + 1,
+            end: body_close,
+        });
+    }
+
+    // Event handler scopes are separate from their containing state scope.
+    let events = &definitions().events;
+    for (index, token) in tokens.iter().enumerate() {
+        let body_open = match token.kind {
+            TokenKind::KwDefault => index + 1,
+            TokenKind::KwState => index + 2,
+            _ => continue,
+        };
+        if tokens.get(body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+            continue;
+        }
+        let Some(state_close) = matching_brace(tokens, body_open) else {
+            continue;
+        };
+        let Some(state_scope_id) = scopes.scope_at.get(body_open + 1).copied() else {
+            continue;
+        };
+
+        let mut event_index = body_open + 1;
+        while event_index < state_close {
+            let event_token = &tokens[event_index];
+            if scopes.scope_at.get(event_index) != Some(&state_scope_id)
+                || event_token.kind != TokenKind::Identifier
+                || !events.contains_key(event_token.lexeme.as_str())
+                || tokens.get(event_index + 1).map(|item| item.kind)
+                    != Some(TokenKind::LParen)
+            {
+                event_index += 1;
+                continue;
+            }
+
+            let open = event_index + 1;
+            let Some(parameter_close) = matching_paren(tokens, open) else {
+                event_index += 1;
+                continue;
+            };
+            let event_body_open = parameter_close + 1;
+            if tokens.get(event_body_open).map(|item| item.kind) != Some(TokenKind::LBrace) {
+                event_index += 1;
+                continue;
+            }
+            let Some(event_body_close) = matching_brace(tokens, event_body_open) else {
+                event_index += 1;
+                continue;
+            };
+
+            code_scopes.push(CodeScopeRange {
+                name: event_token.lexeme.clone(),
+                start: event_body_open + 1,
+                end: event_body_close,
+            });
+            event_index = event_body_close + 1;
+        }
+    }
+
+    code_scopes
+}
+
+fn analyze_jump_labels(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for code_scope in collect_jump_code_scopes(tokens, scopes) {
+        let mut labels: HashMap<String, JumpLabel> = HashMap::new();
+
+        // Collect labels first so forward jumps are valid.
+        for index in code_scope.start..code_scope.end {
+            if tokens[index].kind != TokenKind::At
+                || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::Identifier)
+                || tokens.get(index + 2).map(|item| item.kind) != Some(TokenKind::Semicolon)
+            {
+                continue;
+            }
+
+            let label = &tokens[index + 1];
+            let scope_id = scopes.scope_at[index];
+            if let Some(previous) = labels.get(&label.lexeme) {
+                diagnostics.push(Diagnostic {
+                    code: "SEM009",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "duplicate jump label '{}' in {}; first declared at {}:{}",
+                        label.lexeme,
+                        code_scope.name,
+                        previous.span.line,
+                        previous.span.column
+                    ),
+                    span: label.span,
+                });
+            } else {
+                labels.insert(
+                    label.lexeme.clone(),
+                    JumpLabel {
+                        scope_id,
+                        span: label.span,
+                    },
+                );
+            }
+        }
+
+        // A target must exist in this function/event and be in the same or an
+        // enclosing lexical block. Jumping into a child block is not allowed.
+        for index in code_scope.start..code_scope.end {
+            if tokens[index].kind != TokenKind::KwJump
+                || tokens.get(index + 1).map(|item| item.kind) != Some(TokenKind::Identifier)
+            {
+                continue;
+            }
+
+            let target = &tokens[index + 1];
+            let Some(label) = labels.get(&target.lexeme) else {
+                diagnostics.push(Diagnostic {
+                    code: "SEM010",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "jump target '{}' is not defined in {}",
+                        target.lexeme, code_scope.name
+                    ),
+                    span: target.span,
+                });
+                continue;
+            };
+
+            let jump_scope_id = scopes.scope_at[index];
+            if !scopes.is_ancestor(label.scope_id, jump_scope_id) {
+                diagnostics.push(Diagnostic {
+                    code: "SEM010",
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Semantic,
+                    message: format!(
+                        "jump target '{}' is inside a nested block and is not accessible from this jump in {}",
+                        target.lexeme, code_scope.name
+                    ),
+                    span: target.span,
+                });
+            }
         }
     }
 }
@@ -1516,6 +1736,77 @@ mod tests {
         );
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM008"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_jump_to_label_in_same_scope() {
+        let diagnostics = analyze_source(
+            "integer get_value() { jump done; @done; return 1; } default { state_entry() { } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM009" | "SEM010")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_jump_from_nested_scope_to_outer_label() {
+        let diagnostics = analyze_source(
+            "integer get_value() { @done; { jump done; } return 1; } default { state_entry() { } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM009" | "SEM010")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_undefined_jump_targets() {
+        let diagnostics =
+            analyze_source("integer get_value() { jump missing; return 1; } default { }");
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM010"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_jumps_into_nested_blocks() {
+        let diagnostics = analyze_source(
+            "integer get_value() { jump inside; { @inside; } return 1; } default { }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM010"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_labels_across_nested_blocks() {
+        let diagnostics = analyze_source(
+            "integer get_value() { @same; { @same; } return 1; } default { }",
+        );
+        assert!(
+            diagnostics.iter().any(|item| item.code == "SEM009"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn allows_same_jump_label_name_in_separate_functions() {
+        let diagnostics = analyze_source(
+            "integer first() { @done; return 1; } integer second() { @done; return 2; } default { }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| matches!(item.code, "SEM009" | "SEM010")),
             "{diagnostics:?}"
         );
     }
