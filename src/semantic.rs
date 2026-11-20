@@ -566,7 +566,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
-    analyze_missing_return_paths(tokens, &mut diagnostics);
+    analyze_missing_return_paths(tokens, &scopes, &mut diagnostics);
     analyze_event_signatures(tokens, &mut diagnostics);
     analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
     diagnostics
@@ -1202,26 +1202,49 @@ fn analyze_jump_labels(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut 
     }
 }
 
+const MAX_CFG_TOKENS_PER_FUNCTION: usize = 16_384;
+const MAX_CFG_NODES: usize = 4_096;
+const MAX_CFG_EDGES: usize = 8_192;
+const MAX_CFG_DEPTH: usize = 128;
+
 #[derive(Default)]
 struct ControlFlowGraph {
     successors: Vec<Vec<usize>>,
     labels: HashMap<String, usize>,
     pending_jumps: Vec<(usize, String)>,
+    edge_count: usize,
+    limit_exceeded: bool,
 }
 
 impl ControlFlowGraph {
-    fn add_node(&mut self) -> usize {
+    fn add_node(&mut self) -> Option<usize> {
+        if self.successors.len() >= MAX_CFG_NODES {
+            self.limit_exceeded = true;
+            return None;
+        }
         let id = self.successors.len();
         self.successors.push(Vec::new());
-        id
+        Some(id)
     }
 
-    fn add_edge(&mut self, from: usize, to: usize) {
-        if let Some(edges) = self.successors.get_mut(from) {
-            if !edges.contains(&to) {
-                edges.push(to);
-            }
+    fn add_edge(&mut self, from: usize, to: usize) -> bool {
+        let Some(edges) = self.successors.get_mut(from) else {
+            return false;
+        };
+        if edges.contains(&to) {
+            return true;
         }
+        if self.edge_count >= MAX_CFG_EDGES {
+            self.limit_exceeded = true;
+            return false;
+        }
+        let Some(next_count) = self.edge_count.checked_add(1) else {
+            self.limit_exceeded = true;
+            return false;
+        };
+        self.edge_count = next_count;
+        edges.push(to);
+        true
     }
 
     fn can_reach(&self, start: usize, target: usize) -> bool {
@@ -1307,17 +1330,23 @@ fn canonical_integer_constant(name: &str) -> Option<i32> {
 const MAX_CONSTANT_EXPRESSION_TOKENS: usize = 128;
 const MAX_CONSTANT_EXPRESSION_DEPTH: usize = 64;
 
-fn evaluate_constant_integer_expression(tokens: &[Token], start: usize, end: usize) -> Option<i32> {
+fn evaluate_constant_integer_expression(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    scopes: &ScopeModel,
+) -> Option<i32> {
     if end.saturating_sub(start) > MAX_CONSTANT_EXPRESSION_TOKENS {
         return None;
     }
-    evaluate_constant_integer_expression_at_depth(tokens, start, end, 0)
+    evaluate_constant_integer_expression_at_depth(tokens, start, end, scopes, 0)
 }
 
 fn evaluate_constant_integer_expression_at_depth(
     tokens: &[Token],
     start: usize,
     end: usize,
+    scopes: &ScopeModel,
     depth: usize,
 ) -> Option<i32> {
     if start >= end
@@ -1338,10 +1367,20 @@ fn evaluate_constant_integer_expression_at_depth(
     }
 
     if let Some(operator) = find_top_level_binary_operator(tokens, left, right) {
-        let left_value =
-            evaluate_constant_integer_expression_at_depth(tokens, left, operator, depth + 1)?;
-        let right_value =
-            evaluate_constant_integer_expression_at_depth(tokens, operator + 1, right, depth + 1)?;
+        let left_value = evaluate_constant_integer_expression_at_depth(
+            tokens,
+            left,
+            operator,
+            scopes,
+            depth + 1,
+        )?;
+        let right_value = evaluate_constant_integer_expression_at_depth(
+            tokens,
+            operator + 1,
+            right,
+            scopes,
+            depth + 1,
+        )?;
         return match tokens[operator].kind {
             TokenKind::Plus => Some(left_value.wrapping_add(right_value)),
             TokenKind::Minus => Some(left_value.wrapping_sub(right_value)),
@@ -1393,8 +1432,13 @@ fn evaluate_constant_integer_expression_at_depth(
         tokens[left].kind,
         TokenKind::Bang | TokenKind::Tilde | TokenKind::Plus | TokenKind::Minus
     ) {
-        let value =
-            evaluate_constant_integer_expression_at_depth(tokens, left + 1, right, depth + 1)?;
+        let value = evaluate_constant_integer_expression_at_depth(
+            tokens,
+            left + 1,
+            right,
+            scopes,
+            depth + 1,
+        )?;
         return match tokens[left].kind {
             TokenKind::Bang => Some((value == 0) as i32),
             TokenKind::Tilde => Some(!value),
@@ -1410,7 +1454,13 @@ fn evaluate_constant_integer_expression_at_depth(
 
     match tokens[left].kind {
         TokenKind::IntegerLiteral => parse_integer_literal_value(&tokens[left].lexeme),
-        TokenKind::Identifier => canonical_integer_constant(&tokens[left].lexeme),
+        TokenKind::Identifier => {
+            if scopes.resolve(&tokens[left].lexeme, left).is_some() {
+                None
+            } else {
+                canonical_integer_constant(&tokens[left].lexeme)
+            }
+        }
         _ => None,
     }
 }
@@ -1420,6 +1470,7 @@ fn condition_possibilities(
     start: usize,
     end: usize,
     empty_is_true: bool,
+    scopes: &ScopeModel,
 ) -> (bool, bool) {
     if end.saturating_sub(start) > MAX_CONSTANT_EXPRESSION_TOKENS {
         return (true, true);
@@ -1444,7 +1495,7 @@ fn condition_possibilities(
         };
     }
 
-    if let Some(value) = evaluate_constant_integer_expression(tokens, left, right) {
+    if let Some(value) = evaluate_constant_integer_expression(tokens, left, right, scopes) {
         return (value != 0, value == 0);
     }
 
@@ -1452,10 +1503,16 @@ fn condition_possibilities(
         let token = &tokens[left];
         let constant_value = match token.kind {
             TokenKind::IntegerLiteral | TokenKind::FloatLiteral => token.lexeme.parse::<f64>().ok(),
-            TokenKind::Identifier => definitions()
-                .constants
-                .get(token.lexeme.as_str())
-                .and_then(|constant| constant.value.parse::<f64>().ok()),
+            TokenKind::Identifier => {
+                if scopes.resolve(token.lexeme.as_str(), left).is_some() {
+                    None
+                } else {
+                    definitions()
+                        .constants
+                        .get(token.lexeme.as_str())
+                        .and_then(|constant| constant.value.parse::<f64>().ok())
+                }
+            }
             _ => None,
         };
 
@@ -1491,10 +1548,13 @@ fn for_condition_range(tokens: &[Token], open: usize, close: usize) -> Option<(u
     None
 }
 
-fn connect_exits(graph: &mut ControlFlowGraph, exits: &[usize], target: usize) {
+fn connect_exits(graph: &mut ControlFlowGraph, exits: &[usize], target: usize) -> bool {
     for exit in exits {
-        graph.add_edge(*exit, target);
+        if !graph.add_edge(*exit, target) {
+            return false;
+        }
     }
+    true
 }
 
 /// Build a small control-flow graph directly from the token stream.
@@ -1503,8 +1563,17 @@ fn build_control_flow_statement(
     tokens: &[Token],
     start: usize,
     limit: usize,
+    scopes: &ScopeModel,
     graph: &mut ControlFlowGraph,
+    depth: usize,
 ) -> Option<FlowFragment> {
+    if depth > MAX_CFG_DEPTH {
+        graph.limit_exceeded = true;
+        return None;
+    }
+    if graph.limit_exceeded {
+        return None;
+    }
     let kind = tokens.get(start)?.kind;
 
     match kind {
@@ -1519,13 +1588,16 @@ fn build_control_flow_statement(
             let mut exits = Vec::new();
 
             while cursor < close {
-                let statement = build_control_flow_statement(tokens, cursor, close, graph)?;
+                let statement =
+                    build_control_flow_statement(tokens, cursor, close, scopes, graph, depth + 1)?;
                 if statement.next_index <= cursor {
                     return None;
                 }
 
                 if entry.is_some() {
-                    connect_exits(graph, &exits, statement.entry);
+                    if !connect_exits(graph, &exits, statement.entry) {
+                        return None;
+                    }
                 } else {
                     entry = Some(statement.entry);
                 }
@@ -1534,11 +1606,14 @@ fn build_control_flow_statement(
                 cursor = statement.next_index;
             }
 
-            let entry = entry.unwrap_or_else(|| {
-                let empty = graph.add_node();
-                exits.push(empty);
-                empty
-            });
+            let entry = match entry {
+                Some(entry) => entry,
+                None => {
+                    let empty = graph.add_node()?;
+                    exits.push(empty);
+                    empty
+                }
+            };
 
             Some(FlowFragment {
                 entry,
@@ -1556,22 +1631,33 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let then_branch = build_control_flow_statement(tokens, close + 1, limit, graph)?;
-            let condition = graph.add_node();
+            let then_branch =
+                build_control_flow_statement(tokens, close + 1, limit, scopes, graph, depth + 1)?;
+            let condition = graph.add_node()?;
             let (may_be_true, may_be_false) =
-                condition_possibilities(tokens, open + 1, close, false);
+                condition_possibilities(tokens, open + 1, close, false, scopes);
 
             let mut exits = Vec::new();
             if may_be_true {
-                graph.add_edge(condition, then_branch.entry);
+                if !graph.add_edge(condition, then_branch.entry) {
+                    return None;
+                }
                 exits.extend(then_branch.exits.iter().copied());
             }
 
             if tokens.get(then_branch.next_index).map(|item| item.kind) == Some(TokenKind::KwElse) {
-                let else_branch =
-                    build_control_flow_statement(tokens, then_branch.next_index + 1, limit, graph)?;
+                let else_branch = build_control_flow_statement(
+                    tokens,
+                    then_branch.next_index + 1,
+                    limit,
+                    scopes,
+                    graph,
+                    depth + 1,
+                )?;
                 if may_be_false {
-                    graph.add_edge(condition, else_branch.entry);
+                    if !graph.add_edge(condition, else_branch.entry) {
+                        return None;
+                    }
                     exits.extend(else_branch.exits.iter().copied());
                 }
 
@@ -1611,15 +1697,23 @@ fn build_control_flow_statement(
                 (open + 1, close, false)
             };
 
-            let body = build_control_flow_statement(tokens, close + 1, limit, graph)?;
-            let condition = graph.add_node();
-            let (may_enter_body, may_exit_loop) =
-                condition_possibilities(tokens, condition_start, condition_end, empty_is_true);
+            let body =
+                build_control_flow_statement(tokens, close + 1, limit, scopes, graph, depth + 1)?;
+            let condition = graph.add_node()?;
+            let (may_enter_body, may_exit_loop) = condition_possibilities(
+                tokens,
+                condition_start,
+                condition_end,
+                empty_is_true,
+                scopes,
+            );
 
-            if may_enter_body {
-                graph.add_edge(condition, body.entry);
+            if may_enter_body && !graph.add_edge(condition, body.entry) {
+                return None;
             }
-            connect_exits(graph, &body.exits, condition);
+            if !connect_exits(graph, &body.exits, condition) {
+                return None;
+            }
 
             Some(FlowFragment {
                 entry: condition,
@@ -1632,7 +1726,8 @@ fn build_control_flow_statement(
             })
         }
         TokenKind::KwDo => {
-            let body = build_control_flow_statement(tokens, start + 1, limit, graph)?;
+            let body =
+                build_control_flow_statement(tokens, start + 1, limit, scopes, graph, depth + 1)?;
             let while_index = body.next_index;
             if tokens.get(while_index).map(|item| item.kind) != Some(TokenKind::KwWhile)
                 || tokens.get(while_index + 1).map(|item| item.kind) != Some(TokenKind::LParen)
@@ -1649,12 +1744,14 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let condition = graph.add_node();
-            connect_exits(graph, &body.exits, condition);
+            let condition = graph.add_node()?;
+            if !connect_exits(graph, &body.exits, condition) {
+                return None;
+            }
             let (may_repeat, may_exit_loop) =
-                condition_possibilities(tokens, open + 1, close, false);
-            if may_repeat {
-                graph.add_edge(condition, body.entry);
+                condition_possibilities(tokens, open + 1, close, false, scopes);
+            if may_repeat && !graph.add_edge(condition, body.entry) {
+                return None;
             }
 
             Some(FlowFragment {
@@ -1669,7 +1766,7 @@ fn build_control_flow_statement(
         }
         TokenKind::KwReturn => {
             let semicolon = statement_semicolon(tokens, start, limit)?;
-            let node = graph.add_node();
+            let node = graph.add_node()?;
             Some(FlowFragment {
                 entry: node,
                 exits: Vec::new(),
@@ -1686,7 +1783,7 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let node = graph.add_node();
+            let node = graph.add_node()?;
             graph.pending_jumps.push((node, target.lexeme.clone()));
             Some(FlowFragment {
                 entry: node,
@@ -1702,7 +1799,7 @@ fn build_control_flow_statement(
                 return None;
             }
 
-            let node = graph.add_node();
+            let node = graph.add_node()?;
             graph.labels.entry(label.lexeme.clone()).or_insert(node);
             Some(FlowFragment {
                 entry: node,
@@ -1715,7 +1812,7 @@ fn build_control_flow_statement(
             if tokens[semicolon].kind != TokenKind::Semicolon {
                 return None;
             }
-            let node = graph.add_node();
+            let node = graph.add_node()?;
             Some(FlowFragment {
                 entry: node,
                 exits: vec![node],
@@ -1746,7 +1843,11 @@ fn statement_semicolon(tokens: &[Token], start: usize, limit: usize) -> Option<u
     None
 }
 
-fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnostic>) {
+fn analyze_missing_return_paths(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let mut brace_depth = 0usize;
     let mut paren_depth = 0usize;
 
@@ -1804,15 +1905,24 @@ fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnost
             continue;
         }
 
+        let body_token_count = body_close.saturating_sub(body_open).saturating_add(1);
+        if body_token_count > MAX_CFG_TOKENS_PER_FUNCTION {
+            continue;
+        }
+
         let mut graph = ControlFlowGraph::default();
         let Some(body) =
-            build_control_flow_statement(tokens, body_open, body_close + 1, &mut graph)
+            build_control_flow_statement(tokens, body_open, body_close + 1, scopes, &mut graph, 0)
         else {
             continue;
         };
 
-        let exit = graph.add_node();
-        connect_exits(&mut graph, &body.exits, exit);
+        let Some(exit) = graph.add_node() else {
+            continue;
+        };
+        if !connect_exits(&mut graph, &body.exits, exit) {
+            continue;
+        }
 
         let mut invalid_graph = false;
         for (jump_node, target_name) in std::mem::take(&mut graph.pending_jumps) {
@@ -1820,9 +1930,12 @@ fn analyze_missing_return_paths(tokens: &[Token], diagnostics: &mut Vec<Diagnost
                 invalid_graph = true;
                 break;
             };
-            graph.add_edge(jump_node, target_node);
+            if !graph.add_edge(jump_node, target_node) {
+                invalid_graph = true;
+                break;
+            }
         }
-        if invalid_graph {
+        if invalid_graph || graph.limit_exceeded {
             continue;
         }
 
@@ -3168,7 +3281,8 @@ mod tests {
     fn evaluate_constant_source(source: &str) -> Option<i32> {
         let (tokens, lexical_diagnostics) = lex(source);
         assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
-        evaluate_constant_integer_expression(&tokens, 0, tokens.len().saturating_sub(1))
+        let scopes = ScopeModel::build(&tokens);
+        evaluate_constant_integer_expression(&tokens, 0, tokens.len().saturating_sub(1), &scopes)
     }
 
     #[test]
@@ -4969,6 +5083,27 @@ mod tests {
     }
 
     #[test]
+    fn treats_shadowed_canonical_constant_names_as_unknown() {
+        let diagnostics = analyze_source(
+            r#"integer known() { if (TRUE) return 1; }
+            integer choose_param(integer TRUE) { if (TRUE) return 1; }
+            integer TRUE = 0;
+            integer choose_global() { if (TRUE) return 1; }
+            integer choose_local() { integer TRUE; if (TRUE) return 1; }
+            integer choose_nested() { { integer TRUE; if (TRUE) return 1; } return 2; }
+            default { }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            3,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn evaluates_wrapping_integer_literals() {
         let diagnostics = analyze_source(
             "integer yes() { while (2147483648) { } } integer no() { while (4294967296) { } } default { }",
@@ -5034,6 +5169,318 @@ mod tests {
             ),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn handles_nested_branches_and_else_if_chains() {
+        let diagnostics = analyze_source(
+            r#"integer all_return(integer a, integer b) {
+                if (a) { if (b) return 1; else return 2; }
+                else { if (b) return 3; else return 4; }
+            }
+            integer missing(integer a) { if (a) { if (a) return 1; } }
+            default { }"#,
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function missing"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn handles_nested_and_sequential_loops() {
+        let diagnostics = analyze_source(
+            r#"integer forever_for() { for (; 1; ) { while (1) { return 1; } } }
+            integer nested_for(integer n) { for (; n; ) { for (; n; ) { return 1; } } }
+            integer nested_while(integer n) { while (n) { while (n) { return 1; } } }
+            integer nested_do(integer n) { do { do { } while (n); } while (n); }
+            integer sequential(integer n) { while (n) { return 1; } while (n) { return 2; } }
+            integer do_return() { do { return 1; } while (1); }
+            integer do_false() { do { } while (0); }
+            integer do_unknown(integer n) { do { } while (n); }
+            default { }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM011")
+                .count(),
+            6,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn handles_jump_combinations_and_sequential_returns() {
+        let diagnostics = analyze_source(
+            r#"integer jump_nested(integer flag) { if (flag) { { jump done; } } return 1; @done; }
+            integer jump_to_fallback(integer flag) { if (flag) { jump done; } return 1; @done; return 2; }
+            integer jump_loop(integer flag) { while (flag) { jump done; } @done; return 1; }
+            integer backward() { @again; jump again; }
+            integer label_after_return() { return 1; @dead; }
+            integer jump_through_labels() { jump first; @first; @second; return 1; }
+            integer first_return() { return 1; return 2; }
+            integer middle_return(integer flag) { if (flag) return 1; return 2; }
+            integer terminal_return(integer flag) { { if (flag) return 1; } return 2; }
+            integer empty_missing(integer flag) { { } if (flag) { } }
+            default { }"#,
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 2, "{diagnostics:?}");
+        assert!(
+            returns
+                .iter()
+                .all(|item| item.message.contains("jump_nested")
+                    || item.message.contains("empty_missing")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn handles_many_labels_and_jumps() {
+        let mut body = String::from("@label0;");
+        for index in 1..=200 {
+            body.push_str(&format!(" jump label{index}; @label{index};"));
+        }
+        body.push_str(" return 1;");
+        let diagnostics = analyze_source(&format!("integer chain() {{ {body} }} default {{ }}"));
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM011"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn handles_labels_inside_control_flow() {
+        let diagnostics = analyze_source(
+            r#"integer loop_jump_inside(integer flag) { while (flag) { jump done; @done; return 1; } }
+            integer if_jump_inside(integer flag) { if (flag) { jump done; @done; } return 1; }
+            default { }"#,
+        );
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function loop_jump_inside"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn evaluates_all_comparison_operators_and_composed_conditions() {
+        let cases = [
+            ("1 == 1", false),
+            ("1 != 1", true),
+            ("1 < 2", false),
+            ("2 < 1", true),
+            ("1 <= 1", false),
+            ("2 <= 1", true),
+            ("1 > 2", true),
+            ("2 > 1", false),
+            ("1 >= 1", false),
+            ("1 >= 2", true),
+            ("1 + 2 * 3 == 7", false),
+            ("(1 + 2) * 3 == 7", true),
+            ("1 || 1 && 0", true),
+        ];
+        for (expression, expected_missing) in cases {
+            let source =
+                format!("integer choose() {{ if ({expression}) return 1; }} default {{ }}");
+            let diagnostics = analyze_source(&source);
+            assert_eq!(
+                diagnostics.iter().any(|item| item.code == "SEM011"),
+                expected_missing,
+                "{expression}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_cfg_node_and_edge_budgets_directly() {
+        let mut nodes = ControlFlowGraph::default();
+        for _ in 0..MAX_CFG_NODES {
+            assert!(nodes.add_node().is_some());
+        }
+        assert!(nodes.add_node().is_none());
+        assert!(nodes.limit_exceeded);
+
+        let mut edges = ControlFlowGraph::default();
+        for _ in 0..130 {
+            assert!(edges.add_node().is_some());
+        }
+        let mut added = 0usize;
+        'outer: for from in 0..130 {
+            for to in 0..130 {
+                if from == to {
+                    continue;
+                }
+                if edges.add_edge(from, to) {
+                    added += 1;
+                } else {
+                    break 'outer;
+                }
+            }
+        }
+        assert_eq!(added, MAX_CFG_EDGES);
+        assert!(edges.limit_exceeded);
+    }
+
+    #[test]
+    fn enforces_cfg_node_budget_and_continues() {
+        let boundary = format!(
+            "integer nodes() {{ {} }} default {{ }}",
+            ";".repeat(MAX_CFG_NODES - 1)
+        );
+        assert!(
+            analyze_source(&boundary)
+                .iter()
+                .any(|item| item.code == "SEM011"),
+            "function at the node limit should still be analyzed"
+        );
+
+        let over = format!(
+            "integer nodes() {{ {} }} integer small() {{ }} default {{ }}",
+            ";".repeat(MAX_CFG_NODES)
+        );
+        let diagnostics = analyze_source(&over);
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function small"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn enforces_cfg_token_budget_boundaries() {
+        let expression = |extra: usize| format!("1{}", " + 1".repeat(8188 + extra));
+        let boundary = format!(
+            "integer boundary() {{ if ({}) {{ }} }} default {{ }}",
+            expression(0)
+        );
+        assert!(
+            analyze_source(&boundary)
+                .iter()
+                .any(|item| item.code == "SEM011"),
+            "function at the token limit should still be analyzed"
+        );
+
+        let over = format!(
+            "integer boundary() {{ if ({}) {{ }} }} integer small() {{ }} default {{ }}",
+            expression(1)
+        );
+        let diagnostics = analyze_source(&over);
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function small"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn enforces_cfg_depth_budget_boundaries() {
+        let below = format!(
+            "integer deep() {{ {}return 1;{} }} default {{ }}",
+            "{".repeat(MAX_CFG_DEPTH - 1),
+            "}".repeat(MAX_CFG_DEPTH - 1)
+        );
+        assert!(
+            !analyze_source(&below)
+                .iter()
+                .any(|item| item.code == "SEM011"),
+            "function below the depth limit should return normally"
+        );
+
+        let boundary = format!(
+            "integer deep() {{ {}{} }} default {{ }}",
+            "{".repeat(MAX_CFG_DEPTH),
+            "}".repeat(MAX_CFG_DEPTH)
+        );
+        assert!(
+            analyze_source(&boundary)
+                .iter()
+                .any(|item| item.code == "SEM011"),
+            "function at the depth limit should still be analyzed"
+        );
+
+        let over = format!(
+            "integer deep() {{ {}{} }} integer small() {{ }} default {{ }}",
+            "{".repeat(MAX_CFG_DEPTH + 1),
+            "}".repeat(MAX_CFG_DEPTH + 1)
+        );
+        let diagnostics = analyze_source(&over);
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function small"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn enforces_cfg_depth_budget_for_nested_if() {
+        let boundary = format!(
+            "integer deep_if(integer a) {{ {} }} default {{ }}",
+            "if (a) {".repeat(MAX_CFG_DEPTH / 2) + &"}".repeat(MAX_CFG_DEPTH / 2)
+        );
+        assert!(
+            analyze_source(&boundary)
+                .iter()
+                .any(|item| item.code == "SEM011"),
+            "nested if at the depth limit should still be analyzed"
+        );
+
+        let over = format!(
+            "integer deep_if(integer a) {{ {} }} integer small() {{ }} default {{ }}",
+            "if (a) {".repeat(MAX_CFG_DEPTH / 2 + 1) + &"}".repeat(MAX_CFG_DEPTH / 2 + 1)
+        );
+        let diagnostics = analyze_source(&over);
+        let returns = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM011")
+            .collect::<Vec<_>>();
+        assert_eq!(returns.len(), 1, "{diagnostics:?}");
+        assert!(
+            returns[0].message.contains("function small"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_malformed_cfg_without_sem011() {
+        for source in [
+            "integer broken() { if (1 { return 1; } default { }",
+            "integer broken() { jump; } default { }",
+            "integer broken() { do { } while (1; } default { }",
+            "integer broken() { @; } default { }",
+            "integer broken() { for (; ; ) { } } default { }",
+        ] {
+            let diagnostics = analyze_source(source);
+            assert!(
+                !diagnostics.iter().any(|item| item.code == "SEM011"),
+                "{source}: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]
