@@ -275,9 +275,9 @@ impl<'a> Parser<'a> {
                     | TokenKind::StarEqual
                     | TokenKind::SlashEqual
                     | TokenKind::PercentEqual
-            ) && !left_is_variable
+            ) && !is_assignment_lvalue(self.tokens, expression_start, self.current)
             {
-                self.error_here("PAR010", "left-hand side of assignment must be a variable");
+                self.error_here("PAR010", "left-hand side of assignment must be a variable or vector/rotation component");
             }
 
             self.advance();
@@ -618,6 +618,53 @@ fn is_variable_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> boo
             .is_some_and(|token| token.kind == TokenKind::Identifier)
 }
 
+fn is_assignment_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> bool {
+    loop {
+        if end <= start + 1
+            || tokens.get(start).map(|token| token.kind) != Some(TokenKind::LParen)
+            || tokens.get(end - 1).map(|token| token.kind) != Some(TokenKind::RParen)
+        {
+            break;
+        }
+
+        let mut depth = 0usize;
+        let mut matching_close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        matching_close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if matching_close != Some(end - 1) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+
+    if end == start + 1 {
+        return tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier);
+    }
+
+    end == start + 3
+        && tokens.get(start).is_some_and(|token| token.kind == TokenKind::Identifier)
+        && tokens.get(start + 1).is_some_and(|token| token.kind == TokenKind::Dot)
+        && tokens.get(start + 2).is_some_and(|token| {
+            token.kind == TokenKind::Identifier
+                && matches!(token.lexeme.as_str(), "x" | "y" | "z" | "s")
+        })
+}
+
 fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
     let precedence = match kind {
         TokenKind::Equal
@@ -868,6 +915,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn accepts_vector_and_rotation_component_assignment_targets() {
+        let diagnostics = parse_source(
+            "default { state_entry() { vector vec; rotation rot; vec.x = 3.0; vec.y = 2.0; vec.z = 1.0; rot.x = 0.0; rot.y = 0.0; rot.z = 0.0; rot.s = 1.0; (vec.x) = 4.0; (rot.s) = 0.5; } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_component_assignment_from_non_variable_bases() {
+        let diagnostics = parse_source(
+            "default { state_entry() { llGetPos().x = 1.0; <1, 2, 3>.x = 2.0; integer count; count.w = 3; } }",
+        );
+        assert!(
+            diagnostics.iter().filter(|item| item.code == "PAR010").count() >= 2,
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
