@@ -1907,14 +1907,36 @@ fn numeric_result_type(left: &str, right: &str) -> Option<&'static str> {
 
 fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Option<&'static str> {
     match operator {
-        TokenKind::OrOr
-        | TokenKind::AndAnd
-        | TokenKind::EqualEqual
-        | TokenKind::BangEqual
-        | TokenKind::Less
+        TokenKind::OrOr | TokenKind::AndAnd => {
+            if left == "integer" && right == "integer" {
+                Some("integer")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::EqualEqual | TokenKind::BangEqual => {
+            if left == right
+                || numeric_result_type(left, right).is_some()
+                || can_implicitly_convert(left, right)
+                || can_implicitly_convert(right, left)
+            {
+                Some("integer")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Less
         | TokenKind::LessEqual
         | TokenKind::Greater
-        | TokenKind::GreaterEqual => Some("integer"),
+        | TokenKind::GreaterEqual => {
+            if numeric_result_type(left, right).is_some() {
+                Some("integer")
+            } else {
+                None
+            }
+        }
 
         TokenKind::And
         | TokenKind::Or
@@ -1935,11 +1957,12 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("string")
             } else if left == "list" || right == "list" {
                 Some("list")
-            } else if (left == "vector"
-                && (right == "vector" || matches!(right, "integer" | "float")))
-                || (right == "vector" && matches!(left, "integer" | "float"))
+            } else if left == "vector"
+                && (right == "vector" || matches!(right, "integer" | "float"))
             {
                 Some("vector")
+            } else if left == "rotation" && right == "rotation" {
+                Some("rotation")
             } else {
                 None
             }
@@ -1962,8 +1985,8 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("float")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
-            } else if (left == "vector" && matches!(right, "integer" | "float"))
-                || (right == "vector" && matches!(left, "integer" | "float"))
+            } else if left == "vector"
+                && (matches!(right, "integer" | "float") || right == "rotation")
             {
                 Some("vector")
             } else {
@@ -1974,7 +1997,9 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
         TokenKind::Slash => {
             if let Some(numeric) = numeric_result_type(left, right) {
                 Some(numeric)
-            } else if left == "vector" && matches!(right, "integer" | "float") {
+            } else if left == "vector"
+                && (matches!(right, "integer" | "float") || right == "rotation")
+            {
                 Some("vector")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
@@ -2407,6 +2432,18 @@ mod tests {
                 .filter(|item| item.code == "SEM004")
                 .count(),
             2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_directional_vector_and_rotation_operator_types() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }"#,
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            4,
             "{diagnostics:?}"
         );
     }
