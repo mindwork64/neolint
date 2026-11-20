@@ -560,6 +560,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_variable_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_compound_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_component_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_component_reads(tokens, &scopes, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -2234,6 +2235,74 @@ fn component_assignment_target(tokens: &[Token], operator_index: usize) -> Optio
     Some((start, start + 2))
 }
 
+fn is_valid_component(base_type: &str, component: &str) -> bool {
+    match base_type {
+        "vector" => matches!(component, "x" | "y" | "z"),
+        "rotation" => matches!(component, "x" | "y" | "z" | "s"),
+        _ => false,
+    }
+}
+
+fn analyze_component_reads(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // Component writes belong exclusively to SEM018. Reuse its target parser
+    // so grouped lvalues such as (position.x) are not reported as reads.
+    let mut assignment_components = vec![false; tokens.len()];
+    for (operator_index, operator) in tokens.iter().enumerate() {
+        if !matches!(
+            operator.kind,
+            TokenKind::Equal
+                | TokenKind::PlusEqual
+                | TokenKind::MinusEqual
+                | TokenKind::StarEqual
+                | TokenKind::SlashEqual
+                | TokenKind::PercentEqual
+        ) {
+            continue;
+        }
+
+        if let Some((_, component_index)) = component_assignment_target(tokens, operator_index) {
+            assignment_components[component_index] = true;
+        }
+    }
+
+    for (base_index, base) in tokens.iter().enumerate() {
+        if base.kind != TokenKind::Identifier
+            || tokens.get(base_index + 1).map(|token| token.kind) != Some(TokenKind::Dot)
+            || tokens.get(base_index + 2).map(|token| token.kind) != Some(TokenKind::Identifier)
+            || assignment_components
+                .get(base_index + 2)
+                .copied()
+                .unwrap_or(false)
+        {
+            continue;
+        }
+
+        // Unknown extension-provided values keep the analyzer conservative.
+        let Some(base_type) = scopes.resolve(&base.lexeme, base_index) else {
+            continue;
+        };
+        let component = &tokens[base_index + 2];
+        if is_valid_component(&base_type, &component.lexeme) {
+            continue;
+        }
+
+        diagnostics.push(Diagnostic {
+            code: "SEM019",
+            severity: Severity::Error,
+            kind: DiagnosticKind::Semantic,
+            message: format!(
+                "component access '.{}' is not valid for variable '{}' of type {}",
+                component.lexeme, base.lexeme, base_type
+            ),
+            span: component.span,
+        });
+    }
+}
+
 fn analyze_component_assignments(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -2262,13 +2331,7 @@ fn analyze_component_assignments(
             continue;
         };
 
-        let valid_component = match base_type.as_str() {
-            "vector" => matches!(component.lexeme.as_str(), "x" | "y" | "z"),
-            "rotation" => matches!(component.lexeme.as_str(), "x" | "y" | "z" | "s"),
-            _ => false,
-        };
-
-        if !valid_component {
+        if !is_valid_component(&base_type, &component.lexeme) {
             diagnostics.push(Diagnostic {
                 code: "SEM018",
                 severity: Severity::Error,
@@ -3353,6 +3416,108 @@ mod tests {
                     && item.message.contains("variable 'count'")
                     && item.message.contains("integer")
             }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_invalid_component_reads_for_known_variable_types() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    integer count;
+                    rotation orientation;
+
+                    llOwnerSay((string)position.s);
+                    llOwnerSay((string)count.x);
+                    llOwnerSay((string)orientation.w);
+                }
+            }"#,
+        );
+        let invalid_reads = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM019")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid_reads.len(), 3, "{diagnostics:?}");
+        assert!(invalid_reads
+            .iter()
+            .any(|item| item.message.contains("'.s'") && item.message.contains("vector")));
+        assert!(invalid_reads
+            .iter()
+            .any(|item| item.message.contains("'.x'") && item.message.contains("integer")));
+        assert!(invalid_reads
+            .iter()
+            .any(|item| item.message.contains("'.w'") && item.message.contains("rotation")));
+        assert!(invalid_reads
+            .iter()
+            .all(|item| item.severity == Severity::Error && item.kind == DiagnosticKind::Semantic));
+    }
+
+    #[test]
+    fn accepts_all_declared_vector_and_rotation_component_reads() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    rotation orientation;
+
+                    float px = position.x;
+                    float py = position.y;
+                    float pz = position.z;
+                    float ox = orientation.x;
+                    float oy = orientation.y;
+                    float oz = orientation.z;
+                    float os = orientation.s;
+                }
+            }"#,
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM019"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_extension_component_reads_conservative() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    llOwnerSay((string)extensionVector.x);
+                }
+            }"#,
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM019"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn component_writes_are_reported_by_sem018_not_sem019() {
+        let diagnostics = analyze_source(
+            r#"default {
+                state_entry() {
+                    vector position;
+                    integer count;
+                    rotation orientation;
+
+                    position.s = 1.0;
+                    count.x = 1;
+                    orientation.w = 0.0;
+                }
+            }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM018")
+                .count(),
+            3,
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM019"),
             "{diagnostics:?}"
         );
     }
