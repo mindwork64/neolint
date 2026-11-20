@@ -1954,9 +1954,7 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some("string")
             } else if left == "list" || right == "list" {
                 Some("list")
-            } else if left == "vector"
-                && (right == "vector" || matches!(right, "integer" | "float"))
-            {
+            } else if left == "vector" && right == "vector" {
                 Some("vector")
             } else if left == "rotation" && right == "rotation" {
                 Some("rotation")
@@ -2045,10 +2043,14 @@ fn infer_expression_type(
     }
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
-        return infer_expression_type(tokens, start + 1, end, scopes, user_functions);
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
-        return Some("integer".to_owned());
+        let operand_type =
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
+        return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
     if let Some(operator_index) = find_top_level_binary_operator(tokens, start, end) {
@@ -2436,7 +2438,7 @@ mod tests {
     #[test]
     fn infers_directional_vector_and_rotation_operator_types() {
         let diagnostics = analyze_source(
-            r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }"#,
+            r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); llOwnerSay(<1, 2, 3> + 1.0); llOwnerSay(1.0 + <1, 2, 3>); } }"#,
         );
         assert_eq!(
             diagnostics
@@ -2444,6 +2446,18 @@ mod tests {
                 .filter(|item| item.code == "SEM004")
                 .count(),
             4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_infer_invalid_unary_operand_types() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay(-"text"); llOwnerSay(!"text"); llOwnerSay(-1); llOwnerSay(!TRUE); } }"#,
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2,
             "{diagnostics:?}"
         );
     }
