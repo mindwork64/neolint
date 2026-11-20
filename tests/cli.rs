@@ -130,3 +130,38 @@ fn invalid_configuration_returns_input_error_exit_code() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn checks_multiple_explicit_files_in_one_invocation() {
+    let directory = temporary_directory();
+    let first = directory.join("duplicate.lsl");
+    let second = directory.join("wrong-type.lsl");
+
+    fs::write(
+        &first,
+        "integer repeated; integer repeated; default { state_entry() {} }",
+    )
+    .unwrap();
+    fs::write(
+        &second,
+        r#"default { state_entry() { llOwnerSay(123); } }"#,
+    )
+    .unwrap();
+
+    let output = neolint()
+        .arg("--format")
+        .arg("json")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("duplicate.lsl"), "{stdout}");
+    assert!(stdout.contains("wrong-type.lsl"), "{stdout}");
+    assert!(stdout.contains("SEM001"), "{stdout}");
+    assert!(stdout.contains("SEM004"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
