@@ -1,32 +1,33 @@
 # Canonical deprecated LSL functions.
 # Source: secondlife/lsl-definitions/lsl_definitions.yaml
-# Pinned revision: eb8354a3984ea31123ea3f69259ed99b9edb3f05
-# Format: function-name|recommended replacement (empty when none is specified)
-llClearExperience|
-llClearExperiencePermissions|
-llCloseRemoteDataChannel|
-llCloud|
-llCollisionSprite|
-llGetExperienceList|
-llMakeExplosion|ll.ParticleSystem
-llMakeFire|ll.ParticleSystem
-llMakeFountain|ll.ParticleSystem
-llMakeSmoke|ll.ParticleSystem
-llOpenRemoteDataChannel|
-llPointAt|
-llRefreshPrimURL|ll.SetPrimMediaParams
-llReleaseCamera|ll.ClearCameraParams
-llRemoteDataReply|
-llRemoteDataSetRegion|
-llRemoteLoadScript|
-llSendRemoteData|
-llSetExperienceKey|
-llSetLinkPrimitiveParams|ll.SetLinkPrimitiveParamsFast
-llSetPrimURL|ll.SetPrimMediaParams
-llSetPrimitiveParams|ll.SetLinkPrimitiveParamsFast
-llSound|ll.PlaySound
-llSoundPreload|ll.PreloadSound
-llStopPointAt|
-llTakeCamera|ll.SetCameraParams
-llXorBase64Strings|ll.XorBase64
-llXorBase64StringsCorrect|ll.XorBase64
+# Pinned upstream revision: eb8354a3984ea31123ea3f69259ed99b9edb3f05
+# Only the LSL 'deprecated' property is included; 'slua-deprecated' is excluded.
+# Replacement hints from the upstream YAML are omitted because they may refer to SLua APIs.
+llClearExperience
+llClearExperiencePermissions
+llCloseRemoteDataChannel
+llCloud
+llCollisionSprite
+llGetExperienceList
+llMakeExplosion
+llMakeFire
+llMakeFountain
+llMakeSmoke
+llOpenRemoteDataChannel
+llPointAt
+llRefreshPrimURL
+llReleaseCamera
+llRemoteDataReply
+llRemoteDataSetRegion
+llRemoteLoadScript
+llSendRemoteData
+llSetExperienceKey
+llSetLinkPrimitiveParams
+llSetPrimURL
+llSetPrimitiveParams
+llSound
+llSoundPreload
+llStopPointAt
+llTakeCamera
+llXorBase64Strings
+llXorBase64StringsCorrect
