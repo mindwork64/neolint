@@ -1777,6 +1777,227 @@ fn call_argument_ranges(
     ranges
 }
 
+fn expression_binary_precedence(kind: TokenKind) -> Option<u8> {
+    Some(match kind {
+        TokenKind::OrOr | TokenKind::AndAnd => 3,
+        TokenKind::Or => 5,
+        TokenKind::Xor => 6,
+        TokenKind::And => 7,
+        TokenKind::EqualEqual | TokenKind::BangEqual => 8,
+        TokenKind::Less
+        | TokenKind::LessEqual
+        | TokenKind::Greater
+        | TokenKind::GreaterEqual => 9,
+        TokenKind::ShiftLeft | TokenKind::ShiftRight => 10,
+        TokenKind::Plus | TokenKind::Minus => 11,
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 12,
+        _ => return None,
+    })
+}
+
+fn is_unary_operator_position(tokens: &[Token], index: usize, start: usize) -> bool {
+    if index == start {
+        return true;
+    }
+
+    let Some(previous) = index.checked_sub(1).and_then(|position| tokens.get(position)) else {
+        return true;
+    };
+
+    matches!(
+        previous.kind,
+        TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::Comma
+            | TokenKind::Equal
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::AndEqual
+            | TokenKind::OrEqual
+            | TokenKind::XorEqual
+            | TokenKind::ShiftLeftEqual
+            | TokenKind::ShiftRightEqual
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::ShiftLeft
+            | TokenKind::ShiftRight
+    )
+}
+
+/// Find the rightmost operator at the lowest (weakest) precedence level.
+/// Choosing the rightmost equal-precedence operator preserves LSL's
+/// left-associative grouping.
+fn find_top_level_binary_operator(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut vector_depth = 0usize;
+    let mut selected: Option<(u8, usize)> = None;
+
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.kind {
+            TokenKind::Less if starts_vector_literal(tokens, index) => {
+                vector_depth += 1;
+                continue;
+            }
+            TokenKind::Greater if vector_depth > 0 => {
+                vector_depth -= 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && vector_depth == 0 {
+            if let Some(precedence) = expression_binary_precedence(token.kind) {
+                if !matches!(token.kind, TokenKind::Plus | TokenKind::Minus)
+                    || !is_unary_operator_position(tokens, index, start)
+                {
+                    let replace = selected.map_or(true, |(current, _)| precedence <= current);
+                    if replace {
+                        selected = Some((precedence, index));
+                    }
+                }
+            }
+        }
+
+        match token.kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::LBracket => bracket_depth += 1,
+            TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    selected.map(|(_, index)| index)
+}
+
+fn numeric_result_type(left: &str, right: &str) -> Option<&'static str> {
+    let left_numeric = matches!(left, "integer" | "float");
+    let right_numeric = matches!(right, "integer" | "float");
+    if !left_numeric || !right_numeric {
+        return None;
+    }
+
+    if left == "float" || right == "float" {
+        Some("float")
+    } else {
+        Some("integer")
+    }
+}
+
+fn infer_binary_result_type(
+    operator: TokenKind,
+    left: &str,
+    right: &str,
+) -> Option<&'static str> {
+    match operator {
+        TokenKind::OrOr | TokenKind::AndAnd | TokenKind::EqualEqual | TokenKind::BangEqual
+        | TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater
+        | TokenKind::GreaterEqual => Some("integer"),
+
+        TokenKind::And | TokenKind::Or | TokenKind::Xor | TokenKind::ShiftLeft
+        | TokenKind::ShiftRight => {
+            if left == "integer" && right == "integer" {
+                Some("integer")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Plus => {
+            if let Some(numeric) = numeric_result_type(left, right) {
+                Some(numeric)
+            } else if left == "string" && right == "string" {
+                Some("string")
+            } else if left == "list" || right == "list" {
+                Some("list")
+            } else if left == "vector"
+                && (right == "vector" || matches!(right, "integer" | "float"))
+            {
+                Some("vector")
+            } else if right == "vector" && matches!(left, "integer" | "float") {
+                Some("vector")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Minus => {
+            if let Some(numeric) = numeric_result_type(left, right) {
+                Some(numeric)
+            } else if left == "vector" && right == "vector" {
+                Some("vector")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Star => {
+            if let Some(numeric) = numeric_result_type(left, right) {
+                Some(numeric)
+            } else if left == "vector" && right == "vector" {
+                Some("float")
+            } else if left == "rotation" && right == "rotation" {
+                Some("rotation")
+            } else if left == "vector" && matches!(right, "integer" | "float") {
+                Some("vector")
+            } else if right == "vector" && matches!(left, "integer" | "float") {
+                Some("vector")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Slash => {
+            if let Some(numeric) = numeric_result_type(left, right) {
+                Some(numeric)
+            } else if left == "vector" && matches!(right, "integer" | "float") {
+                Some("vector")
+            } else if left == "rotation" && right == "rotation" {
+                Some("rotation")
+            } else {
+                None
+            }
+        }
+
+        TokenKind::Percent => {
+            if left == "integer" && right == "integer" {
+                Some("integer")
+            } else if left == "vector" && right == "vector" {
+                Some("vector")
+            } else {
+                None
+            }
+        }
+
+        _ => None,
+    }
+}
+
 fn infer_expression_type(
     tokens: &[Token],
     mut start: usize,
@@ -1791,15 +2012,6 @@ fn infer_expression_type(
     // Strip grouping parentheses while preserving cast syntax such as
     // (string)expression.
     loop {
-        if start + 2 < end
-            && tokens[start].kind == TokenKind::LParen
-            && tokens[start + 2].kind == TokenKind::RParen
-        {
-            if let Some(type_name) = lsl_type_name(tokens[start + 1].kind) {
-                return Some(type_name.to_owned());
-            }
-        }
-
         if !has_outer_parentheses(tokens, start, end) {
             break;
         }
@@ -1816,6 +2028,26 @@ fn infer_expression_type(
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
         return Some("integer".to_owned());
+    }
+
+    if let Some(operator_index) = find_top_level_binary_operator(tokens, start, end) {
+        let left_type =
+            infer_expression_type(tokens, start, operator_index, scopes, user_functions)?;
+        let right_type =
+            infer_expression_type(tokens, operator_index + 1, end, scopes, user_functions)?;
+        return infer_binary_result_type(tokens[operator_index].kind, &left_type, &right_type)
+            .map(str::to_owned);
+    }
+
+    // A cast applies to its following operand. Binary operators are split first
+    // so expressions such as (string)value + "suffix" keep the outer operation.
+    if start + 2 < end
+        && tokens[start].kind == TokenKind::LParen
+        && tokens[start + 2].kind == TokenKind::RParen
+    {
+        if let Some(type_name) = lsl_type_name(tokens[start + 1].kind) {
+            return Some(type_name.to_owned());
+        }
     }
 
     if start + 1 == end {
@@ -2148,6 +2380,42 @@ mod tests {
             r#"default { state_entry() { llSetPos(<llFabs(-1), 2, 3>); llOwnerSay(llDumpList2String([1, 2], ",")); } }"#,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn infers_numeric_binary_and_comparison_expression_types() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llOwnerSay(1 + 2); llOwnerSay(1 > 2); llSleep(1 + 2.0); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_string_list_and_vector_operator_result_types() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() { llOwnerSay("one" + "two"); llOwnerSay([1] + [2]); llOwnerSay(<1, 2, 3> * <4, 5, 6>); } }"#,
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_unary_operators_inside_binary_expressions() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llOwnerSay(1 + -2); llSleep(1 * -2.0); } }",
+        );
+        assert_eq!(
+            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            1,
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
