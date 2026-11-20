@@ -49,12 +49,12 @@ The current build reports lexical and syntax errors, plus these semantic checks:
 - `SEM008`: validates explicit return statements in user-defined functions, including return-value presence and provable return-expression type compatibility.
 - `SEM009`: duplicate jump labels within one function or event handler.
 - `SEM010`: jump targets that are undefined or located inside an inaccessible nested block.
-- `SEM011`: value-returning functions that may reach the end without returning a value. The analysis handles sequential blocks and `if/else`, treats `for/while` as potentially executing zero times, and does not speculate about functions containing `jump` labels.
+- `SEM011`: value-returning functions that may reach the end without returning a value. A token-derived control-flow graph models sequential blocks, `if/else`, `for`, `while`, `do-while`, `return`, and forward/backward `jump` edges. Simple constant conditions are recognized; unknown conditions conservatively allow both outcomes. Invalid jump structures suppress cascading SEM011 diagnostics.
 - `SEM012`: warning for a variable reference that cannot be resolved to a declaration in the current lexical scope or a canonical built-in constant. Unknown extension function calls (including their argument ranges) and bodies of unknown extension event handlers are deliberately ignored; the rule is a warning because environments may provide extra symbols.
 
 The parser accepts LSL user-defined functions with a value return type or no return type; do not write `void` for a function that returns no value. A no-parameter function uses empty parentheses, not `(void)`. It enforces that user-defined functions precede state definitions (`PAR009`) and reports `PAR008` when a variable declaration is used directly in a `for` initializer; declare the loop variable before the loop.
 
-SEM011 is deliberately conservative: functions containing jump statements or labels are skipped until their control-flow edges are modeled; the rule does not yet build a full control-flow graph. `SEM012` warnings do not make the CLI exit with code 1 by default; they can be disabled or assigned another severity through the normal configuration and CLI options.
+SEM011 uses a conservative token-derived control-flow graph rather than a full parser AST. Unsupported or malformed control-flow constructs are skipped when the graph cannot be built safely. `SEM012` warnings do not make the CLI exit with code 1 by default; they can be disabled or assigned another severity through the normal configuration and CLI options.
 
 A clean result does not mean full semantic validation or complete lint-rule coverage has passed.
 
