@@ -1927,10 +1927,7 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
             }
         }
 
-        TokenKind::Less
-        | TokenKind::LessEqual
-        | TokenKind::Greater
-        | TokenKind::GreaterEqual => {
+        TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual => {
             if numeric_result_type(left, right).is_some() {
                 Some("integer")
             } else {
@@ -2442,7 +2439,10 @@ mod tests {
             r#"default { state_entry() { llOwnerSay(<1, 2, 3> * llGetRot()); llOwnerSay(<1, 2, 3> / llGetRot()); llOwnerSay(<1, 2, 3> * 2.0); llOwnerSay(llGetRot() + llGetRot()); llOwnerSay(llGetRot() * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }"#,
         );
         assert_eq!(
-            diagnostics.iter().filter(|item| item.code == "SEM004").count(),
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
             4,
             "{diagnostics:?}"
         );
