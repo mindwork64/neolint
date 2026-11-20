@@ -12,7 +12,7 @@ Evidence categories are marked explicitly:
 - **[Limitation]** — a known gap or deliberately permissive implementation detail.
 - **[Unverified]** — no reliable conclusion from the available evidence.
 
-The parser is syntax-only. It does not build a full AST. Semantic rules SEM001–SEM019 are not grammar rules and are documented separately in `docs/language-support.md`, `docs/state-change-contexts.md`, and `docs/vector-literal-contexts.md`.
+The parser is syntax-only. It does not build a full AST. Semantic rules SEM001–SEM022 are not grammar rules and are documented separately in `docs/language-support.md`, `docs/state-change-contexts.md`, and `docs/vector-literal-contexts.md`.
 
 ## B. Notation
 
@@ -428,7 +428,7 @@ See:
 - [Compiler grammar][Tested] Comma-separated `for` initializer/increment lists are accepted; the official For page does not demonstrate them.
 - [Limitation] ASCII-only identifiers are an implementation limit, not established as an LSL requirement.
 - [Unverified] State changes inside user-defined functions and their historical `if` workaround; see the dedicated state document.
-- [Limitation] Duplicate state names, duplicate event handlers, and undefined state-change targets are not diagnosed.
+- [Tested] Duplicate named states, duplicate canonical event handlers, and undefined state-change targets in event handlers are diagnosed by SEM020–SEM022; parser-owned `default` uniqueness remains `PAR014`.
 - [Unverified] Modern-server behavior for every compiler-grammar edge case; the extracted viewer compiler is not a modern-compatibility guarantee.
 
 ## K. Grammar-to-test matrix

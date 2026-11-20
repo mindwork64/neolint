@@ -385,13 +385,13 @@ fn corpus_manifest_is_valid_and_complete() {
     }
     assert_eq!(
         fixtures.len(),
-        25,
+        29,
         "update corpus report when adding fixtures"
     );
     assert_eq!(categories.get("small"), Some(&9));
     assert_eq!(categories.get("medium"), Some(&6));
     assert_eq!(categories.get("large"), Some(&3));
-    assert_eq!(categories.get("invalid"), Some(&7));
+    assert_eq!(categories.get("invalid"), Some(&11));
     assert!(
         fixtures
             .iter()
