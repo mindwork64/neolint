@@ -3318,6 +3318,76 @@ mod tests {
     }
 
     #[test]
+    fn covers_confirmed_binary_type_matrix_rows() {
+        let cases: &[(TokenKind, &str, &str, Option<&'static str>)] = &[
+            (TokenKind::Plus, "integer", "list", Some("list")),
+            (TokenKind::Plus, "list", "integer", Some("list")),
+            (TokenKind::Plus, "string", "list", Some("list")),
+            (TokenKind::Plus, "list", "string", Some("list")),
+            (TokenKind::Plus, "vector", "list", Some("list")),
+            (TokenKind::Plus, "list", "rotation", Some("list")),
+            (TokenKind::Plus, "string", "key", None),
+            (TokenKind::Percent, "vector", "vector", Some("vector")),
+            (TokenKind::Percent, "integer", "integer", Some("integer")),
+            (TokenKind::And, "integer", "integer", Some("integer")),
+            (TokenKind::Or, "integer", "integer", Some("integer")),
+            (TokenKind::Xor, "integer", "integer", Some("integer")),
+            (TokenKind::ShiftLeft, "integer", "integer", Some("integer")),
+            (TokenKind::ShiftRight, "integer", "integer", Some("integer")),
+            (TokenKind::AndAnd, "integer", "integer", Some("integer")),
+            (TokenKind::OrOr, "integer", "integer", Some("integer")),
+            (TokenKind::And, "integer", "float", None),
+            (TokenKind::ShiftLeft, "integer", "float", None),
+            (TokenKind::Star, "integer", "vector", Some("vector")),
+            (TokenKind::Star, "float", "vector", Some("vector")),
+            (TokenKind::Star, "vector", "integer", Some("vector")),
+            (TokenKind::Star, "vector", "float", Some("vector")),
+            (TokenKind::Star, "vector", "vector", Some("float")),
+            (TokenKind::Star, "rotation", "vector", None),
+            (TokenKind::Slash, "vector", "vector", None),
+            (TokenKind::Minus, "list", "list", None),
+            (TokenKind::Plus, "vector", "integer", None),
+        ];
+
+        for &(operator, left, right, expected) in cases {
+            assert_eq!(
+                infer_binary_result_type(operator, left, right),
+                expected,
+                "{operator:?} {left} {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn infers_matrix_rows_in_typed_contexts() {
+        let diagnostics = analyze_source(
+            r#"default { state_entry() {
+                llDumpList2String("x" + [1], ",");
+                llDumpList2String([1] + "x", ",");
+                llSetPos(<1, 2, 3> % <4, 5, 6>);
+                llOwnerSay("x" + [1]);
+                llOwnerSay([1] + "x");
+                llOwnerSay(<1, 2, 3> % <4, 5, 6>);
+                llOwnerSay(1 & 2);
+                llOwnerSay(1 | 2);
+                llOwnerSay(1 ^ 2);
+                llOwnerSay(1 << 2);
+                llOwnerSay(1 >> 2);
+                llOwnerSay(1 && 2);
+                llOwnerSay(1 || 2);
+            } }"#,
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM004")
+                .count(),
+            10,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn infers_scalar_vector_multiplication_both_orders() {
         let diagnostics = analyze_source(
             "default { state_entry() { llSetPos(2 * <1, 2, 3>); llSetPos(2.0 * <1, 2, 3>); llOwnerSay(2 * <1, 2, 3>); llOwnerSay(2.0 * <1, 2, 3>); } }",
@@ -4099,6 +4169,21 @@ mod tests {
             analyze_source(r#"default { state_entry() { llOwnerSay(notDeclared); } }"#);
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM004"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_initializer_mismatches_for_resolved_scope_names() {
+        let diagnostics = analyze_source(
+            "integer global_integer = 1; string bad_global = global_integer; default { state_entry() { integer prior; string bad_prior = prior; integer i; for (i = 0; i < 1; i++) { integer inner = 1; string bad_inner = inner; } { float nested; string bad_nested = nested; } } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "SEM015")
+                .count(),
+            4,
             "{diagnostics:?}"
         );
     }
