@@ -440,7 +440,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(&mut self, kind: TokenKind, message: &'static str) {
+    fn expect(&mut self, kind: TokenKind, message: &'static str) -> bool {
         if self.matches(kind) {
             true
         } else {
