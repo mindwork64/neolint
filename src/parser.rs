@@ -652,11 +652,12 @@ mod tests {
 
     #[test]
     fn rejects_variable_declarations_in_for_initializers() {
-        let diagnostics = parse_source(
-            "default { state_entry() { for (integer i = 0; i < 3; ++i) { } } }",
-        );
+        let diagnostics =
+            parse_source("default { state_entry() { for (integer i = 0; i < 3; ++i) { } } }");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.code == "PAR008"),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR008"),
             "{diagnostics:?}"
         );
     }
