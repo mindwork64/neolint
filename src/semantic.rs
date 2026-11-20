@@ -2955,6 +2955,8 @@ fn starts_vector_literal(tokens: &[Token], index: usize) -> bool {
         | TokenKind::StarEqual
         | TokenKind::SlashEqual
         | TokenKind::PercentEqual
+        | TokenKind::EqualEqual
+        | TokenKind::BangEqual
         | TokenKind::Question
         | TokenKind::Colon
         | TokenKind::Plus
@@ -4629,6 +4631,76 @@ mod tests {
                 .filter(|item| item.code == "SEM008")
                 .count(),
             2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_assignment_type_mismatch_after_vector_equality_literal() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector left; string text; text = left == <1, 2, 3>; } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM016")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0].message.contains("integer, expected string"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_integer_assignment_from_vector_equality_literal() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { vector left; integer result; result = left == <1, 2, 3>; } }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM016"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_initializer_type_mismatch_after_rotation_inequality_literal() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { rotation left; string text = left != <1, 2, 3, 4>; } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM015")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0].message.contains("integer, expected string"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_return_type_mismatch_after_vector_equality_literal() {
+        let diagnostics = analyze_source(
+            "string compare() { vector left; return left == <1, 2, 3>; } default { }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM008")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0].message.contains("type integer"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_integer_return_from_vector_equality_literal() {
+        let diagnostics = analyze_source(
+            "integer compare() { vector left; return left == <1, 2, 3>; } default { }",
+        );
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM008"),
             "{diagnostics:?}"
         );
     }
