@@ -298,15 +298,22 @@ impl<'a> Parser<'a> {
     fn parse_prefix(&mut self) -> bool {
         if matches!(
             self.peek_kind(),
-            TokenKind::Bang
-                | TokenKind::Tilde
-                | TokenKind::Plus
-                | TokenKind::Minus
-                | TokenKind::PlusPlus
-                | TokenKind::MinusMinus
+            TokenKind::Bang | TokenKind::Tilde | TokenKind::Plus | TokenKind::Minus
         ) {
             self.advance();
             return self.parse_prefix();
+        }
+
+        if matches!(self.peek_kind(), TokenKind::PlusPlus | TokenKind::MinusMinus) {
+            self.advance();
+            let operand_start = self.current;
+            if !self.parse_prefix() {
+                return false;
+            }
+            if !is_variable_lvalue(self.tokens, operand_start, self.current) {
+                self.error_here("PAR011", "increment/decrement operand must be a variable");
+            }
+            return true;
         }
 
         if self.check(TokenKind::LParen)
@@ -319,6 +326,7 @@ impl<'a> Parser<'a> {
             return self.parse_prefix();
         }
 
+        let primary_start = self.current;
         if !self.parse_primary() {
             return false;
         }
@@ -327,8 +335,11 @@ impl<'a> Parser<'a> {
                 self.parse_argument_list();
             } else if self.matches(TokenKind::Dot) {
                 self.expect(TokenKind::Identifier, "expected a member name after '.'");
-            } else if self.matches(TokenKind::PlusPlus) || self.matches(TokenKind::MinusMinus) {
-                // postfix increment/decrement
+            } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
+                if !is_variable_lvalue(self.tokens, primary_start, self.current) {
+                    self.error_here("PAR011", "increment/decrement operand must be a variable");
+                }
+                self.advance();
             } else {
                 break;
             }
@@ -800,6 +811,39 @@ mod tests {
                 }
             }
             "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_increment_and_decrement_of_non_variables() {
+        for operand in ["1", "(first + second)", "llGetPos()"] {
+            for operator in ["++", "--"] {
+                let prefix = format!(
+                    "default {{ state_entry() {{ integer first; integer second; {operator}{operand}; }} }}"
+                );
+                let prefix_diagnostics = parse_source(&prefix);
+                assert!(
+                    prefix_diagnostics.iter().any(|item| item.code == "PAR011"),
+                    "invalid prefix operand {operator}{operand} was accepted: {prefix_diagnostics:?}"
+                );
+
+                let postfix = format!(
+                    "default {{ state_entry() {{ integer first; integer second; {operand}{operator}; }} }}"
+                );
+                let postfix_diagnostics = parse_source(&postfix);
+                assert!(
+                    postfix_diagnostics.iter().any(|item| item.code == "PAR011"),
+                    "invalid postfix operand {operand}{operator} was accepted: {postfix_diagnostics:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_increment_and_decrement_of_variables() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer first; integer second; ++first; second++; --(first); (second)--; } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
