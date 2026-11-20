@@ -2250,12 +2250,17 @@ fn analyze_compound_assignments(
             continue;
         }
 
-        let Some(value_type) =
-            infer_expression_type(tokens, expression_start, expression_end, scopes, user_functions)
-        else {
+        let Some(value_type) = infer_expression_type(
+            tokens,
+            expression_start,
+            expression_end,
+            scopes,
+            user_functions,
+        ) else {
             continue;
         };
-        let Some(result_type) = infer_binary_result_type(binary_operator, &target_type, &value_type)
+        let Some(result_type) =
+            infer_binary_result_type(binary_operator, &target_type, &value_type)
         else {
             continue;
         };
@@ -3183,9 +3188,12 @@ mod tests {
             .filter(|item| item.code == "SEM017")
             .collect::<Vec<_>>();
         assert_eq!(mismatches.len(), 4, "{diagnostics:?}");
-        assert!(mismatches.iter().all(|item| {
-            item.message.contains("yields type float, expected integer")
-        }), "{diagnostics:?}");
+        assert!(
+            mismatches
+                .iter()
+                .all(|item| { item.message.contains("yields type float, expected integer") }),
+            "{diagnostics:?}"
+        );
         assert!(
             !diagnostics.iter().any(|item| item.code == "SEM016"),
             "{diagnostics:?}"
@@ -3197,7 +3205,10 @@ mod tests {
         let diagnostics = analyze_source(
             "default { state_entry() { integer count; count += llExtensionValue(); } }",
         );
-        assert!(!diagnostics.iter().any(|item| item.code == "SEM017"), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM017"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
