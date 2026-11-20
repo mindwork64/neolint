@@ -2448,7 +2448,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
         assert!(
-            mismatches[0].message.contains("has type vector, expected string"),
+            mismatches[0]
+                .message
+                .contains("has type vector, expected string"),
             "{diagnostics:?}"
         );
     }
