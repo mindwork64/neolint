@@ -2284,9 +2284,8 @@ mod tests {
 
     #[test]
     fn warns_when_local_variable_is_used_before_its_declaration() {
-        let diagnostics = analyze_source(
-            "default { state_entry() { llOwnerSay(later); string later; } }",
-        );
+        let diagnostics =
+            analyze_source("default { state_entry() { llOwnerSay(later); string later; } }");
         assert!(
             diagnostics.iter().any(|item| item.code == "SEM012"),
             "{diagnostics:?}"
