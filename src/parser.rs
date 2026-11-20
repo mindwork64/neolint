@@ -231,19 +231,29 @@ impl<'a> Parser<'a> {
             {
                 self.advance();
             }
-        } else if !self.check(TokenKind::Semicolon) {
-            self.parse_expression(1);
+        } else {
+            self.parse_for_expression_list();
         }
         self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
-        if !self.check(TokenKind::Semicolon) {
-            self.parse_expression(1);
-        }
+        self.parse_expression(1);
         self.expect(TokenKind::Semicolon, "expected ';' after for condition");
-        if !self.check(TokenKind::RParen) {
-            self.parse_expression(1);
-        }
+        self.parse_for_expression_list();
         self.expect(TokenKind::RParen, "expected ')' after for clauses");
         self.parse_statement();
+    }
+
+    fn parse_for_expression_list(&mut self) {
+        if self.check(TokenKind::Semicolon) || self.check(TokenKind::RParen) {
+            return;
+        }
+        if !self.parse_expression(1) {
+            return;
+        }
+        while self.matches(TokenKind::Comma) {
+            if !self.parse_expression(1) {
+                break;
+            }
+        }
     }
 
     fn parse_while_statement(&mut self) {
@@ -356,12 +366,18 @@ impl<'a> Parser<'a> {
         }
 
         let primary_start = self.current;
+        let mut call_suffix_allowed = self.check(TokenKind::Identifier);
         if !self.parse_primary() {
             return false;
         }
         loop {
-            if self.matches(TokenKind::LParen) {
+            if self.check(TokenKind::LParen) {
+                if !call_suffix_allowed {
+                    self.error_here("PAR007", "function call suffix requires an identifier");
+                }
+                self.advance();
                 self.parse_argument_list();
+                call_suffix_allowed = false;
             } else if self.matches(TokenKind::Dot) {
                 let base_is_variable =
                     is_variable_lvalue(self.tokens, primary_start, self.current - 1);
@@ -376,11 +392,13 @@ impl<'a> Parser<'a> {
                     );
                 }
                 self.expect(TokenKind::Identifier, "expected a component name after '.'");
+                call_suffix_allowed = false;
             } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
                 if !is_variable_lvalue(self.tokens, primary_start, self.current) {
                     self.error_here("PAR011", "increment/decrement operand must be a variable");
                 }
                 self.advance();
+                call_suffix_allowed = false;
             } else {
                 break;
             }
@@ -983,6 +1001,35 @@ mod tests {
     }
 
     #[test]
+    fn accepts_for_expression_lists() {
+        let diagnostics = parse_source(
+            "default { state_entry() { integer i; integer j; for (i = 0, j = 0; i < 1; ++i, ++j) { } } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn accepts_empty_for_initializer_and_increment_with_condition() {
+        let diagnostics =
+            parse_source("default { state_entry() { integer i; for (; i < 1; ) ; } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_empty_for_condition_without_cascading_errors() {
+        let diagnostics = parse_source("default { state_entry() { for (;;) ; } }");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR006")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    }
+
+    #[test]
     fn rejects_variable_declarations_in_for_initializers() {
         let diagnostics =
             parse_source("default { state_entry() { for (integer i = 0; i < 3; ++i) { } } }");
@@ -1058,6 +1105,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rejects_component_increment_and_decrement_targets() {
+        let diagnostics = parse_source(
+            "default { state_entry() { vector vec; rotation rot; vec.x++; --vec.y; rot.s++; --rot.z; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "PAR011")
+                .count(),
+            4,
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
@@ -1149,6 +1211,44 @@ mod tests {
             assert!(
                 !diagnostics.is_empty(),
                 "unsupported LSL compound assignment {operator} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_call_suffixes_only_on_identifiers() {
+        let diagnostics = parse_source(
+            r#"default { state_entry() {
+                llOwnerSay("text");
+                user_function();
+                user_function(1, 2);
+                outer(inner(1));
+            } }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_call_suffixes_on_non_identifiers() {
+        for source in [
+            "default { state_entry() { 1(); } }",
+            "default { state_entry() { \"text\"(); } }",
+            "default { state_entry() { llGetPos()(); } }",
+            "default { state_entry() { vector position; position.x(); } }",
+            "default { state_entry() { integer first; integer second; (first + second)(); } }",
+            "default { state_entry() { [](); } }",
+            "default { state_entry() { [1, \"text\"](); } }",
+            "default { state_entry() { <1, 2, 3>(); } }",
+            "default { state_entry() { <1, 2, 3, 4>(); } }",
+        ] {
+            let diagnostics = parse_source(source);
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.code == "PAR007")
+                    .count(),
+                1,
+                "unexpected diagnostics for {source:?}: {diagnostics:?}"
             );
         }
     }
