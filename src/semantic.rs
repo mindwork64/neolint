@@ -3411,7 +3411,7 @@ mod tests {
                        ratio += 1;
                        label += " units";
                        values += [1, "one"];
-                       position += 1.0;
+                       position += <1.0, 1.0, 1.0>;
                        orientation += orientation;
                    }
                }"#,
