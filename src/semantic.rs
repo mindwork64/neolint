@@ -765,14 +765,9 @@ fn analyze_builtin_calls(
         for (argument_index, (range, parameter)) in
             ranges.iter().zip(signature.parameters.iter()).enumerate()
         {
-            let Some(actual_type) = infer_expression_type(
-                tokens,
-                range.0,
-                range.1,
-                scopes,
-                user_functions,
-                diagnostics,
-            ) else {
+            let Some(actual_type) =
+                infer_expression_type(tokens, range.0, range.1, scopes, user_functions)
+            else {
                 // Expressions without a provable type remain unchecked.
                 continue;
             };
@@ -843,7 +838,7 @@ fn analyze_user_function_calls(
             .enumerate()
         {
             let Some(actual_type) =
-                infer_expression_type(tokens, range.0, range.1, scopes, functions, diagnostics)
+                infer_expression_type(tokens, range.0, range.1, scopes, functions)
             else {
                 continue;
             };
@@ -961,14 +956,9 @@ fn analyze_function_returns(
                     ),
                     span: tokens[cursor].span,
                 });
-            } else if let Some(actual_type) = infer_expression_type(
-                tokens,
-                expression_start,
-                semicolon,
-                scopes,
-                functions,
-                diagnostics,
-            ) {
+            } else if let Some(actual_type) =
+                infer_expression_type(tokens, expression_start, semicolon, scopes, functions)
+            {
                 if !can_implicitly_convert(&actual_type, &signature.return_type) {
                     diagnostics.push(Diagnostic {
                         code: "SEM008",
@@ -2172,15 +2162,9 @@ fn analyze_explicit_casts(
             continue;
         }
 
-        let mut ignored_diagnostics = Vec::new();
-        let Some(source_type) = infer_expression_type(
-            tokens,
-            operand_start,
-            operand_end,
-            scopes,
-            user_functions,
-            &mut ignored_diagnostics,
-        ) else {
+        let Some(source_type) =
+            infer_expression_type(tokens, operand_start, operand_end, scopes, user_functions)
+        else {
             continue;
         };
 
@@ -2205,7 +2189,6 @@ fn infer_expression_type(
     mut end: usize,
     scopes: &ScopeModel,
     user_functions: &HashMap<String, UserFunctionSignature>,
-    diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<String> {
     if start >= end {
         return None;
@@ -2227,12 +2210,12 @@ fn infer_expression_type(
 
     if matches!(tokens[start].kind, TokenKind::Plus | TokenKind::Minus) {
         let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return matches!(operand_type.as_str(), "integer" | "float").then_some(operand_type);
     }
     if matches!(tokens[start].kind, TokenKind::Bang | TokenKind::Tilde) {
         let operand_type =
-            infer_expression_type(tokens, start + 1, end, scopes, user_functions, diagnostics)?;
+            infer_expression_type(tokens, start + 1, end, scopes, user_functions)?;
         return (operand_type == "integer").then(|| "integer".to_owned());
     }
 
@@ -2243,7 +2226,6 @@ fn infer_expression_type(
             operator_index,
             scopes,
             user_functions,
-            diagnostics,
         )?;
         let right_type = infer_expression_type(
             tokens,
@@ -2251,7 +2233,6 @@ fn infer_expression_type(
             end,
             scopes,
             user_functions,
-            diagnostics,
         )?;
         return infer_binary_result_type(tokens[operator_index].kind, &left_type, &right_type)
             .map(str::to_owned);
@@ -2265,7 +2246,7 @@ fn infer_expression_type(
     {
         if let Some(target_type) = lsl_type_name(tokens[start + 1].kind) {
             let source_type =
-                infer_expression_type(tokens, start + 3, end, scopes, user_functions, diagnostics);
+                infer_expression_type(tokens, start + 3, end, scopes, user_functions);
             if let Some(source_type) = source_type {
                 if !is_explicit_cast_supported(&source_type, target_type) {
                     return None;
