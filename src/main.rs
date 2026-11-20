@@ -131,23 +131,7 @@ fn run() -> i32 {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\
-         \n\
-         USAGE:\n\
-         \    neolint [OPTIONS] <FILE...|->\n\
-         \n\
-         OPTIONS:\n\
-         \    --format <human|json>  Diagnostic output format (default: human)\n\
-         \    --tokens               Print lexer tokens (development aid)\n\
-         \    -h, --help             Print help\n\
-         \    -V, --version          Print version\n\
-         \n\
-         EXIT CODES:\n\
-         \    0  No lexical errors\n\
-         \    1  Lexical errors found\n\
-         \    2  Input or command-line error\n\
-         \n\
-         NOTE: This initial build performs lexical analysis only. Parser, semantic, and lint rules are being implemented.",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nEXIT CODES:\n    0  No lexical errors\n    1  Lexical errors found\n    2  Input or command-line error\n\nNOTE: This initial build performs lexical analysis only. Parser, semantic, and lint rules are being implemented.",
         env!("CARGO_PKG_VERSION")
     );
 }
