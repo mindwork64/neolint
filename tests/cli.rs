@@ -48,11 +48,7 @@ fn command_line_can_disable_a_rule() {
     let directory = temporary_directory();
     let source = directory.join("wrong-argument.lsl");
 
-    fs::write(
-        &source,
-        r#"default { state_entry() { llOwnerSay(42); } }"#,
-    )
-    .unwrap();
+    fs::write(&source, r#"default { state_entry() { llOwnerSay(42); } }"#).unwrap();
 
     let output = neolint()
         .arg("--disable")
