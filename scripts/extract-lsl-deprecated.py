@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Extract canonical deprecated LSL function names from lsl_definitions.yaml.
 
-Only the LSL \`deprecated\` property inside the \`functions\` section is read.
-The separate \`slua-deprecated\` property is intentionally ignored.
+Only the LSL `deprecated` property inside the `functions` section is read.
+The separate `slua-deprecated` property is intentionally ignored.
 """
 
 from __future__ import annotations
