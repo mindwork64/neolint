@@ -1968,6 +1968,8 @@ fn infer_binary_result_type(operator: TokenKind, left: &str, right: &str) -> Opt
                 Some(numeric)
             } else if left == "vector" && right == "vector" {
                 Some("vector")
+            } else if left == "rotation" && right == "rotation" {
+                Some("rotation")
             } else {
                 None
             }
@@ -2444,6 +2446,22 @@ mod tests {
                 .filter(|item| item.code == "SEM004")
                 .count(),
             4,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_rotation_subtraction_result_type() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { llSetRot(llGetRot() - llGetRot()); llOwnerSay(llGetRot() - llGetRot()); } }",
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM004")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 1, "{diagnostics:?}");
+        assert!(
+            mismatches[0].message.contains("expected string"),
             "{diagnostics:?}"
         );
     }
