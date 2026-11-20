@@ -1,0 +1,20 @@
+[package]
+name = "neolint"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "CLI-only linter for Linden Scripting Language (LSL)"
+license = "MIT"
+repository = "https://github.com/mindwork64/neolint"
+
+[[bin]]
+name = "neolint"
+path = "src/main.rs"
+
+[lib]
+name = "neolint"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
