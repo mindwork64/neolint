@@ -2202,7 +2202,7 @@ fn component_assignment_target(
     operator_index: usize,
 ) -> Option<(usize, usize)> {
     let mut end = operator_index;
-    let mut start = end.checked_sub(3)?;
+    let mut grouped_start = None;
 
     // Strip grouping parentheses around a component assignment target.
     while tokens.get(end.checked_sub(1)?)?.kind == TokenKind::RParen {
@@ -2222,9 +2222,11 @@ fn component_assignment_target(
             }
         }
 
-        start = matching_open?.checked_add(1)?;
+        grouped_start = Some(matching_open?.checked_add(1)?);
         end -= 1;
     }
+
+    let start = grouped_start.or_else(|| end.checked_sub(3))?;
 
     if end != start + 3
         || tokens.get(start)?.kind != TokenKind::Identifier
@@ -3298,6 +3300,7 @@ mod tests {
 
                     position.x = "wrong";
                     position.s = 1.0;
+                    (position.z) = "wrong";
                     count.x = 1.0;
                     orientation.s = 1;
                     orientation.x += 0.5;
@@ -3309,10 +3312,17 @@ mod tests {
             .iter()
             .filter(|item| item.code == "SEM018")
             .collect::<Vec<_>>();
-        assert_eq!(mismatches.len(), 3, "{diagnostics:?}");
+        assert_eq!(mismatches.len(), 4, "{diagnostics:?}");
         assert!(
             mismatches.iter().any(|item| {
                 item.message.contains("position.x")
+                    && item.message.contains("type string, expected float")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            mismatches.iter().any(|item| {
+                item.message.contains("position.z")
                     && item.message.contains("type string, expected float")
             }),
             "{diagnostics:?}"
