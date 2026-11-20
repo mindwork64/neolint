@@ -558,6 +558,7 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_explicit_casts(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_variable_initializers(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_variable_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_compound_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
     analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
@@ -2200,6 +2201,80 @@ fn assignment_expression_end(tokens: &[Token], start: usize) -> Option<usize> {
     Some(tokens.len())
 }
 
+fn analyze_compound_assignments(
+    tokens: &[Token],
+    scopes: &ScopeModel,
+    user_functions: &HashMap<String, UserFunctionSignature>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (operator_index, operator) in tokens.iter().enumerate() {
+        let binary_operator = match operator.kind {
+            TokenKind::PlusEqual => TokenKind::Plus,
+            TokenKind::MinusEqual => TokenKind::Minus,
+            TokenKind::StarEqual => TokenKind::Star,
+            TokenKind::SlashEqual => TokenKind::Slash,
+            TokenKind::PercentEqual => TokenKind::Percent,
+            _ => continue,
+        };
+        if operator_index == 0 {
+            continue;
+        }
+
+        let name_index = operator_index - 1;
+        let name = &tokens[name_index];
+        if name.kind != TokenKind::Identifier {
+            continue;
+        }
+
+        // Only ordinary variable targets are analyzed. Member targets and
+        // declaration initializers are outside this conservative check.
+        if tokens
+            .get(name_index.wrapping_sub(1))
+            .is_some_and(|previous| is_value_type(previous.kind) || previous.kind == TokenKind::Dot)
+            || scopes
+                .initializers
+                .iter()
+                .any(|initializer| initializer.name_index == name_index)
+        {
+            continue;
+        }
+
+        let Some(target_type) = scopes.resolve(&name.lexeme, name_index) else {
+            continue;
+        };
+        let expression_start = operator_index + 1;
+        let Some(expression_end) = assignment_expression_end(tokens, expression_start) else {
+            continue;
+        };
+        if expression_start >= expression_end {
+            continue;
+        }
+
+        let Some(value_type) =
+            infer_expression_type(tokens, expression_start, expression_end, scopes, user_functions)
+        else {
+            continue;
+        };
+        let Some(result_type) = infer_binary_result_type(binary_operator, &target_type, &value_type)
+        else {
+            continue;
+        };
+
+        if !can_implicitly_convert(result_type, &target_type) {
+            diagnostics.push(Diagnostic {
+                code: "SEM017",
+                severity: Severity::Error,
+                kind: DiagnosticKind::Semantic,
+                message: format!(
+                    "compound assignment '{}' to variable '{}' yields type {}, expected {}",
+                    operator.lexeme, name.lexeme, result_type, target_type
+                ),
+                span: name.span,
+            });
+        }
+    }
+}
+
 fn analyze_variable_assignments(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -3077,6 +3152,52 @@ mod tests {
             !diagnostics.iter().any(|item| item.code == "SEM014"),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn validates_compound_assignment_result_types() {
+        let diagnostics = analyze_source(
+            r#"integer count;
+               float ratio;
+               string label;
+               list values;
+               vector position;
+               rotation orientation;
+               default {
+                   state_entry() {
+                       count += 1.5;
+                       count -= 2.5;
+                       count *= 3.5;
+                       count /= 4.5;
+                       count %= 2;
+                       ratio += 1;
+                       label += " units";
+                       values += [1, "one"];
+                       position += 1.0;
+                       orientation += orientation;
+                   }
+               }"#,
+        );
+        let mismatches = diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM017")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 4, "{diagnostics:?}");
+        assert!(mismatches.iter().all(|item| {
+            item.message.contains("yields type float, expected integer")
+        }), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM016"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_compound_assignments_with_unknown_or_unresolved_result_types() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer count; count += llExtensionValue(); } }",
+        );
+        assert!(!diagnostics.iter().any(|item| item.code == "SEM017"), "{diagnostics:?}");
     }
 
     #[test]
