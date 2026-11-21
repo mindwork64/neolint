@@ -25,7 +25,7 @@ jobs:
             os: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -102,7 +102,7 @@ jobs:
           "$hash  $archive" | Set-Content -Path "dist/$archive.sha256" -Encoding ascii
 
       - name: Upload platform archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: neolint-${{ matrix.target }}
           path: dist/*
@@ -117,10 +117,10 @@ jobs:
       contents: write
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
