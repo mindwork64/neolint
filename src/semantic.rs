@@ -541,6 +541,20 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
 /// not deduplicated across independent rules because the rules describe
 /// different findings (for example SEM008 and SEM011).
 pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
+    analyze_with_syntax_diagnostics(tokens, &[])
+}
+
+/// Perform semantic analysis while accounting for syntax errors already found
+/// by the parser.
+///
+/// Call-arity and argument-type checks are skipped only for calls whose argument
+/// list contains a syntax error. This prevents malformed expressions from
+/// producing misleading follow-up diagnostics while preserving independent
+/// semantic checks elsewhere in the file.
+pub fn analyze_with_syntax_diagnostics(
+    tokens: &[Token],
+    syntax_diagnostics: &[Diagnostic],
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut globals: HashMap<&str, &Token> = HashMap::new();
     let mut brace_depth = 0usize;
@@ -613,9 +627,21 @@ pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     analyze_compound_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_component_assignments(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_component_reads(tokens, &scopes, &mut diagnostics);
-    analyze_builtin_calls(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_builtin_calls(
+        tokens,
+        &scopes,
+        &user_functions,
+        syntax_diagnostics,
+        &mut diagnostics,
+    );
     analyze_deprecated_function_calls(tokens, &user_functions, &mut diagnostics);
-    analyze_user_function_calls(tokens, &scopes, &user_functions, &mut diagnostics);
+    analyze_user_function_calls(
+        tokens,
+        &scopes,
+        &user_functions,
+        syntax_diagnostics,
+        &mut diagnostics,
+    );
     analyze_function_returns(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_jump_labels(tokens, &scopes, &mut diagnostics);
     analyze_missing_return_paths(tokens, &scopes, &mut diagnostics);
@@ -796,10 +822,31 @@ fn analyze_deprecated_function_calls(
     }
 }
 
+fn call_contains_syntax_error(
+    tokens: &[Token],
+    open_index: usize,
+    closing_index: usize,
+    syntax_diagnostics: &[Diagnostic],
+) -> bool {
+    let Some(open) = tokens.get(open_index) else {
+        return false;
+    };
+    let Some(closing) = tokens.get(closing_index) else {
+        return false;
+    };
+
+    syntax_diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Syntax
+            && diagnostic.span.start >= open.span.end
+            && diagnostic.span.start < closing.span.start
+    })
+}
+
 fn analyze_builtin_calls(
     tokens: &[Token],
     scopes: &ScopeModel,
     user_functions: &HashMap<String, UserFunctionSignature>,
+    syntax_diagnostics: &[Diagnostic],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let builtins = definitions();
@@ -824,6 +871,9 @@ fn analyze_builtin_calls(
         let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1) else {
             continue;
         };
+        if call_contains_syntax_error(tokens, index + 1, closing_index, syntax_diagnostics) {
+            continue;
+        }
         let expected_count = signature.parameters.len();
 
         if actual_count != expected_count {
@@ -875,6 +925,7 @@ fn analyze_user_function_calls(
     tokens: &[Token],
     scopes: &ScopeModel,
     functions: &HashMap<String, UserFunctionSignature>,
+    syntax_diagnostics: &[Diagnostic],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (index, token) in tokens.iter().enumerate() {
@@ -894,6 +945,9 @@ fn analyze_user_function_calls(
         let Some((actual_count, closing_index)) = count_call_arguments(tokens, index + 1) else {
             continue;
         };
+        if call_contains_syntax_error(tokens, index + 1, closing_index, syntax_diagnostics) {
+            continue;
+        }
         if actual_count != signature.parameter_types.len() {
             diagnostics.push(Diagnostic {
                 code: "SEM005",
@@ -4736,6 +4790,45 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|item| item.code == "SEM005" && item.message.contains("expects 2")));
+    }
+
+    #[test]
+    fn suppresses_user_call_arity_after_syntax_error_in_arguments() {
+        let source = r#"
+            integer combine(integer first, integer second, integer third) { return first + second + third; }
+            default { state_entry() { combine(10.0: "broken", 0); } }
+        "#;
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        let syntax_diagnostics = crate::parser::parse(&tokens);
+        assert!(
+            syntax_diagnostics.iter().any(|item| item.code == "PAR007"),
+            "{syntax_diagnostics:?}"
+        );
+
+        let diagnostics = analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics);
+        assert!(
+            !diagnostics.iter().any(|item| item.code == "SEM005"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_user_call_arity_checks_for_other_calls_in_same_file() {
+        let source = r#"
+            integer combine(integer first, integer second, integer third) { return first + second + third; }
+            default { state_entry() { combine(10.0: "broken", 0); combine(1); } }
+        "#;
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        let syntax_diagnostics = crate::parser::parse(&tokens);
+        let diagnostics = analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.code == "SEM005" && item.message.contains("combine")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
