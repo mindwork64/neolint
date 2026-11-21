@@ -831,6 +831,12 @@ fn discarded_comparison_operator(tokens: &[Token], start: usize, end: usize) -> 
     if operator == start || operator + 1 >= end {
         return None;
     }
+    if is_invalid_operand_end(tokens[operator - 1].kind)
+        || is_invalid_operand_end(tokens[end - 1].kind)
+        || is_invalid_operand_start(tokens[operator + 1].kind)
+    {
+        return None;
+    }
     if has_call_or_side_effect(tokens, start, end) {
         return None;
     }
@@ -853,6 +859,66 @@ fn is_expression_start(kind: TokenKind) -> bool {
             | TokenKind::Minus
             | TokenKind::PlusPlus
             | TokenKind::MinusMinus
+    )
+}
+
+fn is_invalid_operand_end(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Comma
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::PlusPlus
+            | TokenKind::MinusMinus
+            | TokenKind::Equal
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::LessEqual
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::ShiftLeft
+            | TokenKind::ShiftRight
+            | TokenKind::Bang
+            | TokenKind::Tilde
+    )
+}
+
+fn is_invalid_operand_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Comma
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::Equal
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::LessEqual
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::ShiftLeft
+            | TokenKind::ShiftRight
     )
 }
 
