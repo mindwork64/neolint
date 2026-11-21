@@ -84,7 +84,7 @@ The directory test invokes the actual `neolint` binary recursively and compares 
 
 ## Licensing and provenance
 
-All fixtures were written specifically for neolint and are marked `original` / `project-authored`. No third-party script is included. The project's own source license is still pending; no third-party material may be added until its redistribution terms and compatibility with the eventual project license are reviewed and recorded in the manifest and adjacent notices.
+All fixtures were written specifically for neolint and are marked `original` / `project-authored`. No third-party script is included. Neolint's own source is licensed under MIT OR Apache-2.0. No third-party material may be added until its redistribution terms and compatibility with the project license are reviewed and recorded in the manifest and adjacent notices.
 
 ## Adding a fixture
 
