@@ -83,17 +83,17 @@ No personal token, repository secret, crates.io publication, or package-manager 
 
 After the workflow exists on the default branch, maintainers can run **Actions → Release artifacts → Run workflow** on a branch. Manual dispatch builds and smoke-tests both targets, downloads both uploaded artifacts with `actions/download-artifact@v8`, and validates both SHA-256 checksums and archive contents. It does not publish a release, because publish requires a `v*` tag push.
 
-Matrix validation was completed before merge in workflow dispatch [run #6](https://github.com/mindwork64/neolint/actions/runs/44857913971) on head `6c2473126d0db745ea3a5fd79175d1ff566ffebc`: Linux, Windows and the artifact-validation job all passed, and publishing was skipped. After merge, maintainers can dispatch the workflow again on `main` before a public release if a fresh validation is required; manual dispatch never publishes.
+The v1.0.0 candidate was validated by tag-triggered release workflow [run #13](https://github.com/mindwork64/neolint/actions/runs/44864402084) on `e6901f9a934836e4210adb53c8207e88e309555e`: Linux, Windows, artifact validation and publishing all passed. The public release is <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>.
 
 ## Stable release checklist
 
 - [x] Issue #54 license decision is complete (MIT OR Apache-2.0).
 - [x] Issues #55 and #56 are closed by merged work.
 - [x] Issue #58 final acceptance is complete.
-- [ ] All required CI checks pass on the release commit.
-- [ ] Manual release workflow dispatch passes on Linux and Windows.
-- [ ] The tag exactly matches the Cargo package version.
-- [ ] Checksums are published and independently verified.
-- [ ] No release blocker remains.
+- [x] All required CI checks pass on the release commit.
+- [x] Manual release workflow dispatch passes on Linux and Windows.
+- [x] The tag exactly matches the Cargo package version.
+- [x] Checksums are published and independently verified.
+- [x] No release blocker remains.
 
-Do not publish v1.0.0 while any blocker remains or product-owner acceptance is missing.
+v1.0.0 was published at <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>. Future releases remain subject to the same gates and separate owner authorization.

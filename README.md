@@ -6,18 +6,18 @@ Neolint finds lexical, syntax, and conservative semantic problems before code re
 
 ## Status
 
-- Current package version: `1.0.0` (release candidate; not yet published).
+- Current package version: `1.0.0`.
 - Implemented diagnostics: `LEX000`–`LEX002`, parser `PAR001`–`PAR014` (no `PAR002`), and `SEM001`–`SEM022`.
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
 - Normal lint runs are deterministic and offline.
-- No stable v1.0.0 release has been published.
+- Stable v1.0.0 is published: <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
 ## Supported release targets
 
 The initial downloadable binary targets are Linux x86_64 and Windows x86_64. macOS, ARM, 32-bit, and other targets are not part of the initial binary release.
 
-Release archives are produced by the release workflow when a version tag is published. No release assets should be assumed to exist before that happens. See [Getting started](docs/getting-started.md) for exact archive names, installation, checksums, and build-from-source instructions.
+Versioned Linux and Windows archives are available from the [v1.0.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.0.0). See [Getting started](docs/getting-started.md) for exact archive names, installation, checksums, and build-from-source instructions.
 
 ## Quick start
 
