@@ -738,78 +738,232 @@ fn unknown_function_argument_ranges(tokens: &[Token]) -> Vec<(usize, usize)> {
 
 /// Report standalone comparison expressions whose result is discarded.
 ///
-/// This is a deliberately shallow expression-statement check. It examines only
-/// statements beginning at `{`, `}`, or `;` boundaries and at the top level of
-/// an expression (after stripping enclosing parentheses). Comparisons used in
-/// conditions, initializers, assignments, arguments, returns, or logical
-/// expressions are not candidates. Calls, assignments, increment/decrement, or
-/// overlapping syntax diagnostics make the case ambiguous and suppress SEM023.
+/// This is a shallow statement scanner rather than an AST. It walks statement
+/// boundaries and control-flow bodies so an unbraced `if`/`else`/`while`/`for`/
+/// `do` body is checked without treating the control condition as an expression
+/// statement. Recursive descent through the token stream binds `else` to the
+/// nearest preceding `if`. Calls, assignments, increment/decrement, or
+/// overlapping syntax diagnostics make a case ambiguous and suppress SEM023.
 fn analyze_discarded_comparison_expressions(
     tokens: &[Token],
     syntax_diagnostics: &[Diagnostic],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut statement_start = 0usize;
-    let mut brace_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
+    let mut seen = HashSet::new();
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        if tokens[cursor].kind == TokenKind::LBrace {
+            if let Some(close) = matching_brace(tokens, cursor) {
+                scan_comparison_block(
+                    tokens,
+                    cursor + 1,
+                    close,
+                    syntax_diagnostics,
+                    diagnostics,
+                    &mut seen,
+                );
+                cursor = close + 1;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+}
 
-    for (index, token) in tokens.iter().enumerate() {
-        match token.kind {
-            TokenKind::LBrace => {
-                brace_depth += 1;
-                statement_start = index + 1;
-                continue;
+fn scan_comparison_block(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) {
+    let mut cursor = start;
+    while cursor < limit {
+        let next =
+            scan_comparison_statement(tokens, cursor, limit, syntax_diagnostics, diagnostics, seen)
+                .unwrap_or(cursor + 1);
+        cursor = next.max(cursor + 1);
+    }
+}
+
+fn scan_comparison_statement(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) -> Option<usize> {
+    let token = tokens.get(start)?;
+    if start >= limit {
+        return None;
+    }
+
+    match token.kind {
+        TokenKind::Semicolon => Some(start + 1),
+        TokenKind::LBrace => {
+            let close = matching_brace(tokens, start)?;
+            if close > limit {
+                return None;
             }
-            TokenKind::RBrace => {
-                brace_depth = brace_depth.saturating_sub(1);
-                statement_start = index + 1;
-                continue;
+            scan_comparison_block(
+                tokens,
+                start + 1,
+                close,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            );
+            Some(close + 1)
+        }
+        TokenKind::KwIf => {
+            let open = start + 1;
+            if tokens.get(open).map(|item| item.kind) != Some(TokenKind::LParen) {
+                return None;
             }
-            TokenKind::LParen => {
-                paren_depth += 1;
-                continue;
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
             }
-            TokenKind::RParen => {
-                paren_depth = paren_depth.saturating_sub(1);
-                continue;
+            let after_then = scan_comparison_statement(
+                tokens,
+                close + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )?;
+            if tokens.get(after_then).map(|item| item.kind) == Some(TokenKind::KwElse) {
+                return scan_comparison_statement(
+                    tokens,
+                    after_then + 1,
+                    limit,
+                    syntax_diagnostics,
+                    diagnostics,
+                    seen,
+                );
             }
-            TokenKind::LBracket => {
-                bracket_depth += 1;
-                continue;
+            Some(after_then)
+        }
+        TokenKind::KwWhile | TokenKind::KwFor => {
+            let open = start + 1;
+            if tokens.get(open).map(|item| item.kind) != Some(TokenKind::LParen) {
+                return None;
             }
-            TokenKind::RBracket => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                continue;
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
             }
-            TokenKind::Semicolon if brace_depth > 0 && paren_depth == 0 && bracket_depth == 0 => {
-                if let Some(operator) =
-                    discarded_comparison_operator(tokens, statement_start, index)
+            scan_comparison_statement(
+                tokens,
+                close + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )
+        }
+        TokenKind::KwDo => {
+            let body = scan_comparison_statement(
+                tokens,
+                start + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )?;
+            if tokens.get(body).map(|item| item.kind) != Some(TokenKind::KwWhile)
+                || tokens.get(body + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            {
+                return None;
+            }
+            let open = body + 1;
+            let close = matching_paren(tokens, open)?;
+            if close >= limit
+                || tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::Semicolon)
+            {
+                return None;
+            }
+            Some(close + 2)
+        }
+        TokenKind::KwReturn | TokenKind::KwJump | TokenKind::KwState | TokenKind::At => {
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            Some(semicolon + 1)
+        }
+        _ => {
+            if let Some(next) =
+                scan_header_block(tokens, start, limit, syntax_diagnostics, diagnostics, seen)
+            {
+                return Some(next);
+            }
+            if is_declaration_type(token.kind) {
+                let semicolon = statement_semicolon(tokens, start, limit)?;
+                return Some(semicolon + 1);
+            }
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            if tokens.get(semicolon).map(|item| item.kind) != Some(TokenKind::Semicolon) {
+                return None;
+            }
+            if let Some(operator) = discarded_comparison_operator(tokens, start, semicolon) {
+                if !has_statement_syntax_error(tokens, start, semicolon + 1, syntax_diagnostics)
+                    && seen.insert(operator)
                 {
-                    let statement_span_start = tokens
-                        .get(statement_start)
-                        .map_or(token.span.start, |item| item.span.start);
-                    let has_syntax_error = syntax_diagnostics.iter().any(|diagnostic| {
-                        diagnostic.span.start >= statement_span_start
-                            && diagnostic.span.start <= token.span.end
+                    diagnostics.push(Diagnostic {
+                        code: "SEM023",
+                        severity: Severity::Warning,
+                        kind: DiagnosticKind::Lint,
+                        message: "comparison result is discarded; use '=' for assignment or use the comparison in a condition".to_owned(),
+                        span: tokens[operator].span,
                     });
-                    if !has_syntax_error {
-                        let operator_token = &tokens[operator];
-                        diagnostics.push(Diagnostic {
-                            code: "SEM023",
-                            severity: Severity::Warning,
-                            kind: DiagnosticKind::Lint,
-                            message: "comparison result is discarded; use '=' for assignment or use the comparison in a condition".to_owned(),
-                            span: operator_token.span,
-                        });
-                    }
                 }
-                statement_start = index + 1;
-                continue;
             }
-            _ => {}
+            Some(semicolon + 1)
         }
     }
+}
+
+fn scan_header_block(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) -> Option<usize> {
+    let (_, open, _) = function_header_at(tokens, start)?;
+    let close = matching_paren(tokens, open)?;
+    if close >= limit || tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::LBrace) {
+        return None;
+    }
+    let body_close = matching_brace(tokens, close + 1)?;
+    if body_close > limit {
+        return None;
+    }
+    scan_comparison_block(
+        tokens,
+        close + 2,
+        body_close,
+        syntax_diagnostics,
+        diagnostics,
+        seen,
+    );
+    Some(body_close + 1)
+}
+
+fn has_statement_syntax_error(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    syntax_diagnostics: &[Diagnostic],
+) -> bool {
+    let start_offset = tokens.get(start).map_or(0, |token| token.span.start);
+    let end_offset = tokens
+        .get(end.saturating_sub(1))
+        .map_or(start_offset, |token| token.span.end);
+    syntax_diagnostics.iter().any(|diagnostic| {
+        diagnostic.span.start >= start_offset && diagnostic.span.start <= end_offset
+    })
 }
 
 fn discarded_comparison_operator(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
@@ -6805,6 +6959,69 @@ mod tests {
             !diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_unbraced_control_body_comparisons_not_conditions() {
+        let diagnostics = analyze_source(
+            "default\n{\n    state_entry()\n    {\n        integer a;\n        integer b;\n        integer c;\n        integer d;\n        if (a == b) c == d;\n        while (a == b) c == d;\n        for (; a == b; ) c == d;\n        do c == d; while (a == b);\n    }\n}\n",
+        );
+        let sem023 = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM023")
+            .collect::<Vec<_>>();
+        assert_eq!(sem023.len(), 4, "{diagnostics:?}");
+        assert_eq!(
+            sem023
+                .iter()
+                .map(|diagnostic| (diagnostic.span.line, diagnostic.span.column))
+                .collect::<Vec<_>>(),
+            vec![(9, 23), (10, 26), (11, 28), (12, 14)],
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_if_else_and_nested_dangling_else_bodies() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c; integer d;  if (TRUE) ; else a == b;  if (TRUE) if (FALSE) a == b; else c == d;  if (FALSE) ; else if (TRUE) a == b; else c == d; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            5,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_report_unbraced_control_conditions_or_used_bodies() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c;  if (a == b) c = a; while (a == b) c++; for (; a == b; ) foo();  do c = a; while (a == b); } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_multiple_unbraced_statement_bodies_after_complete_controls() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c;  if (a == b) ; if (a != b) c == a; a == b; a != b; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            3,
             "{diagnostics:?}"
         );
     }
