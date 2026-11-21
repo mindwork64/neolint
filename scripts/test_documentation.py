@@ -58,5 +58,15 @@ class DocumentationTests(unittest.TestCase):
         self.assertTrue((ROOT / "data/README.md").is_file())
 
 
+    def test_release_version_documentation_matches_package(self):
+        cargo = (ROOT / "Cargo.toml").read_text()
+        version = re.search(r'^version = "([^"]+)"', cargo, re.MULTILINE).group(1)
+        getting_started = (ROOT / "docs/getting-started.md").read_text()
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn(f"neolint-v{version}-x86_64-unknown-linux-gnu.tar.gz", getting_started)
+        self.assertIn(f"neolint-v{version}-x86_64-pc-windows-msvc.zip", getting_started)
+        self.assertIn(f"Current package version: `{version}`", readme)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ Neolint finds lexical, syntax, and conservative semantic problems before code re
 
 ## Status
 
-- Current package version: `0.1.0`.
+- Current package version: `1.0.0` (release candidate; not yet published).
 - Implemented diagnostics: `LEX000`–`LEX002`, parser `PAR001`–`PAR014` (no `PAR002`), and `SEM001`–`SEM022`.
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
 - Normal lint runs are deterministic and offline.
