@@ -48,7 +48,7 @@ For malformed input, neolint attempts to continue far enough to report additiona
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, which is **lint**. `SEM012` and `SEM013` default to **warning**; the rest default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which are **lint**. `SEM012`, `SEM013` and `SEM023` default to **warning**; the rest default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -74,6 +74,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, which is **lint**.
 | `SEM020` | Duplicate canonical event handler within one state. | error | Unknown extension event names are ignored. |
 | `SEM021` | Duplicate named state or state/global/function/built-in namespace collision. | error | God-only built-ins are excluded; `default` duplication remains PAR014. |
 | `SEM022` | Undefined state-change target in a known event handler. | error | Function state changes and unknown extension event bodies are not checked. |
+| `SEM023` | Standalone comparison result is discarded. | warning / lint | Only comparison expression statements are checked; calls, assignments, increment/decrement, used comparisons and ambiguous/syntax-error cases are skipped. |
 
 ## Illustrative minimal examples
 
@@ -124,6 +125,11 @@ state running { }
 ```lsl
 // SEM022: undefined state target
 default { state_entry() { state missing; } }
+```
+
+```lsl
+// SEM023: comparison result discarded; assignment was likely intended
+default { state_entry() { integer RStat; RStat == FALSE; } }
 ```
 
 ```lsl
@@ -208,6 +214,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - Unknown extension event bodies are excluded from relevant semantic checks.
 - Unresolved types and values are not assigned guessed types.
 - Some complex or malformed control-flow cases are not analyzed.
+- SEM023 intentionally skips comparisons containing calls or side effects and statements with syntax errors.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 
