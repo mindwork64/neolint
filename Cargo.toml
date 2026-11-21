@@ -17,4 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 
+[build-dependencies]
+winres = "0.1"
+
 [dev-dependencies]

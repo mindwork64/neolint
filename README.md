@@ -1,8 +1,20 @@
 # neolint
 
+<p align="center">
+  <img src="assets/branding/neolint-logo.png" alt="neolint — Code Quality Linter" width="720">
+</p>
+
+<p align="center">
+  <img src="assets/branding/neolint-social-preview.png" alt="neolint retrofuturistic banner" width="100%">
+</p>
+
 A deterministic, offline-by-default CLI linter for Linden Scripting Language (LSL), written in Rust.
 
 Neolint finds lexical, syntax, and conservative semantic problems before code reaches the official Second Life compiler. **It is not an LSL compiler and does not guarantee acceptance by Second Life or any simulator.** A clean result only means the implemented checks found no issue.
+
+## Branding
+
+Project logo, repository artwork, CLI icon, and the Windows executable icon are maintained in [`assets/branding/`](assets/branding/). The Windows release embeds `neolint.exe.ico` as its native application icon; Linux remains a console-only executable. The GitHub social preview artwork is [`assets/branding/neolint-social-preview.png`](assets/branding/neolint-social-preview.png).
 
 ## Status
 
