@@ -87,7 +87,7 @@ Matrix validation was completed before merge in workflow dispatch [run #6](https
 
 ## Stable release checklist
 
-- [ ] Issue #54 license decision is complete.
+- [x] Issue #54 license decision is complete (MIT OR Apache-2.0).
 - [ ] Issues #55 and #56 are closed by merged work.
 - [ ] Issue #58 final acceptance is complete.
 - [ ] All required CI checks pass on the release commit.

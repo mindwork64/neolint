@@ -11,7 +11,7 @@ Neolint finds lexical, syntax, and conservative semantic problems before code re
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
 - Normal lint runs are deterministic and offline.
 - No stable v1.0.0 release has been published.
-- License selection is pending.
+- Dual-licensed under **MIT OR Apache-2.0**.
 
 ## Supported release targets
 
@@ -62,4 +62,6 @@ The diagnostic families are documented in [docs/diagnostics.md](docs/diagnostics
 
 ## License
 
-License selection is pending. No license is assumed by this repository documentation.
+Neolint's own software source is available under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
+
+Vendored Linden Research LSL definitions in `data/lsl-builtins.txt`, `data/lsl-deprecated.txt`, and the upstream notice at [`LICENSES/LINDEN-RESEARCH-MIT.txt`](LICENSES/LINDEN-RESEARCH-MIT.txt) retain their separate upstream MIT license. They are not relicensed by neolint's MIT OR Apache-2.0 choice. See [`data/README.md`](data/README.md) for provenance and attribution.
