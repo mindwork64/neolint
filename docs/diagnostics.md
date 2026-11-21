@@ -1,6 +1,6 @@
 # Diagnostic reference
 
-This page describes the stable diagnostic codes emitted by the current implementation. Severity and kind are defaults; configuration may disable a code or change its severity. Source text is authoritative.
+This page describes the diagnostic codes emitted by neolint. Severity and kind are defaults; configuration may disable a code or change its severity.
 
 ## Reading diagnostics
 
@@ -62,7 +62,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, which is **lint**.
 | `SEM008` | Invalid explicit return presence/type. | error | Only explicit returns are checked. |
 | `SEM009` | Duplicate jump label in one function/event scope. | error | Labels in different code scopes are independent. |
 | `SEM010` | Undefined or inaccessible jump target. | error | Jumping into a nested block is rejected. |
-| `SEM011` | Value-returning function may reach the end without returning. | error | Conservative token CFG; malformed/unsupported CFG suppresses the rule. Unknown conditions allow both outcomes. |
+| `SEM011` | Value-returning function may reach the end without returning. | error | Conservative analysis; complex or malformed control flow may not be checked. |
 | `SEM012` | Unresolved variable reference. | warning / semantic | Unknown extension calls and unknown extension event bodies are skipped. Warnings do not fail unless escalated. |
 | `SEM013` | Call to a canonical deprecated LSL function. | warning / lint | SLua-only metadata and replacement hints are excluded. |
 | `SEM014` | Unsupported explicit cast. | error | Only known source/target type pairs are checked. |
@@ -207,7 +207,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - Unknown function calls and their arguments are not reported as definite errors.
 - Unknown extension event bodies are excluded from relevant semantic checks.
 - Unresolved types and values are not assigned guessed types.
-- SEM011 skips functions when its token CFG cannot be built safely.
+- Some complex or malformed control-flow cases are not analyzed.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

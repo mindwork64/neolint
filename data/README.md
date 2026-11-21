@@ -19,7 +19,7 @@ The file `lsl-deprecated.txt` lists functions whose canonical LSL definition has
 - Upstream source: `lsl_definitions.yaml`
 - Pinned upstream revision: `eb8354a3984ea31123ea3f69259ed99b9edb3f05`
 
-The extractor intentionally ignores `slua-deprecated`. It also does not export the upstream `use` hints because they may name SLua APIs and must not be presented as LSL replacements.
+Only LSL deprecation information is included. SLua-specific deprecations and replacement hints are not part of the LSL metadata.
 
 ## License and attribution
 

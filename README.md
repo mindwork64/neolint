@@ -17,7 +17,7 @@ Neolint finds lexical, syntax, and conservative semantic problems before code re
 
 The initial downloadable binary targets are Linux x86_64 and Windows x86_64. macOS, ARM, 32-bit, and other targets are not part of the initial binary release.
 
-Versioned Linux and Windows archives are available from the [v1.0.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.0.0). See [Getting started](docs/getting-started.md) for exact archive names, installation, checksums, and build-from-source instructions.
+Versioned Linux and Windows archives are available from the [v1.0.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.0.0). See [Getting started](docs/getting-started.md) for exact archive names, installation, and checksum verification.
 
 ## Quick start
 
@@ -29,11 +29,9 @@ neolint --config .neolint.conf ./scripts/
 neolint --disable SEM001,SEM004 ./scripts/
 neolint --severity SEM004=warning script.lsl
 cat script.lsl | neolint -
-neolint --tokens script.lsl
 ```
 
 Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/input/config error. Warnings and info diagnostics do not fail unless configured as errors.
-
 
 ## User documentation
 
@@ -44,12 +42,11 @@ Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/i
 - [LSL language support and limitations](docs/language-support.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-
 ## Scope and limits
 
-The analyzer uses a hand-written token-based parser and conservative symbol/type/control-flow analysis. It intentionally avoids speculative diagnostics: unknown extension APIs, unresolved values, and unverified language behavior are not treated as definite errors. Unknown extension event bodies are excluded from relevant semantic checks.
+Neolint performs lexical, syntax, and selected semantic checks for LSL. Its rules favor issues that can be identified with confidence and avoid speculative findings for unknown extensions or unresolved values.
 
-The diagnostic families are documented in [docs/diagnostics.md](docs/diagnostics.md), including conservative boundaries for `SEM011` control flow, `SEM012` unresolved symbols, canonical built-in metadata, and state/event rules `SEM020`–`SEM022`.
+A clean result means only that no currently implemented rule reported an issue. It is not proof that the official compiler or a simulator will accept or correctly run the script.
 
 ## License
 
