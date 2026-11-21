@@ -291,3 +291,141 @@ fn checks_multiple_explicit_files_in_one_invocation() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn documented_help_and_version_flags_succeed() {
+    let help = neolint().arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let help_stdout = String::from_utf8(help.stdout).unwrap();
+    assert!(help_stdout.contains("USAGE:"), "{help_stdout}");
+    assert!(help_stdout.contains("--format"), "{help_stdout}");
+
+    let version = neolint().arg("--version").output().unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap().trim(),
+        format!("neolint {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn documented_clean_valid_script_exits_zero() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.lsl");
+    let output = neolint().arg(&fixture).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("no diagnostics"), "{stdout}");
+}
+
+#[test]
+fn documented_diagnostic_example_exits_one_with_expected_code() {
+    let directory = temporary_directory();
+    let source = directory.join("invalid.lsl");
+    fs::write(&source, "default { state_entry() { llOwnerSay(42); } }").unwrap();
+
+    let output = neolint().arg(&source).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[SEM004]"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn documented_json_shape_contains_all_fields() {
+    let directory = temporary_directory();
+    let source = directory.join("duplicate.lsl");
+    fs::write(&source, "default { state_entry() { } state_entry() { } }").unwrap();
+
+    let output = neolint()
+        .arg("--format")
+        .arg("json")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with('['), "{stdout}");
+    assert!(stdout.trim_end().ends_with(']'), "{stdout}");
+    for field in [
+        "\"file\":",
+        "\"code\":\"SEM020\"",
+        "\"severity\":\"error\"",
+        "\"kind\":\"semantic\"",
+        "\"message\":",
+        "\"line\":",
+        "\"column\":",
+        "\"end_line\":",
+        "\"end_column\":",
+        "\"start\":",
+        "\"end\":",
+    ] {
+        assert!(stdout.contains(field), "missing {field}: {stdout}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn documented_config_example_disables_and_downgrades() {
+    let directory = temporary_directory();
+    let source = directory.join("configured.lsl");
+    let config = directory.join("neolint.conf");
+    fs::write(
+        &source,
+        "integer repeated; integer repeated; default { state_entry() { llOwnerSay(42); } }",
+    )
+    .unwrap();
+    fs::write(
+        &config,
+        "# project defaults\ndisable = SEM001\nseverity.SEM004 = warning\n",
+    )
+    .unwrap();
+
+    let output = neolint()
+        .arg("--config")
+        .arg(&config)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("warning[SEM004]"), "{stdout}");
+    assert!(!stdout.contains("SEM001"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn documented_tokens_flag_keeps_diagnostics_visible() {
+    let directory = temporary_directory();
+    let source = directory.join("invalid.lsl");
+    fs::write(&source, "default { state_entry() { llOwnerSay(42); } }").unwrap();
+
+    let output = neolint().arg("--tokens").arg(&source).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Identifier"), "{stdout}");
+    assert!(stdout.contains("error[SEM004]"), "{stdout}");
+    assert!(!stdout.contains("no diagnostics"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn documented_unknown_option_exits_input_error() {
+    let output = neolint().arg("--not-a-real-option").output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown option"), "{stderr}");
+}
+
+#[test]
+fn documented_tokens_flag_clean_file_suppresses_no_diagnostics_line() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.lsl");
+    let output = neolint().arg("--tokens").arg(&fixture).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Identifier"), "{stdout}");
+    assert!(!stdout.contains("no diagnostics"), "{stdout}");
+}

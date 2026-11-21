@@ -1,0 +1,172 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Read package version (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Read package version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          "PACKAGE_VERSION=$($metadata.packages[0].version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build optimized binary
+        shell: bash
+        run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Smoke test release binary (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/release-smoke.sh "target/${{ matrix.target }}/release/neolint" "$PACKAGE_VERSION"
+
+      - name: Smoke test release binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/release-smoke.ps1 -Binary "target/${{ matrix.target }}/release/neolint.exe" -Version $env:PACKAGE_VERSION
+
+      - name: Package archive and checksum (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$PACKAGE_VERSION"
+          target="${{ matrix.target }}"
+          archive="neolint-v${version}-${target}.tar.gz"
+          mkdir -p dist
+          package_dir=".release-package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+          binary="target/${target}/release/neolint"
+          test -f "$binary"
+          cp "$binary" "$package_dir/neolint"
+          tar -czf "dist/$archive" -C "$package_dir" neolint
+          rm -rf "$package_dir"
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+
+      - name: Package archive and checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:PACKAGE_VERSION
+          $target = "${{ matrix.target }}"
+          $archive = "neolint-v$version-$target.zip"
+          $binary = "target/$target/release/neolint.exe"
+          if (-not (Test-Path $binary)) { throw "release binary not found: $binary" }
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          $packageDir = ".release-package"
+          Remove-Item -Recurse -Force $packageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item $binary "$packageDir/neolint.exe"
+          Compress-Archive -Path "$packageDir/neolint.exe" -DestinationPath "dist/$archive" -Force
+          Remove-Item -Recurse -Force $packageDir
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Path "dist/$archive.sha256" -Encoding ascii
+
+      - name: Upload platform archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: neolint-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Attach artifacts to GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Validate tag against package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "release: tag ${GITHUB_REF_NAME} does not match Cargo package version v${version}" >&2
+            exit 1
+          fi
+
+      - name: Verify required assets exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            archive="neolint-v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')-${target}"
+            if [[ "$target" == *windows* ]]; then
+              test -f "dist/${archive}.zip"
+              test -f "dist/${archive}.zip.sha256"
+            else
+              test -f "dist/${archive}.tar.gz"
+              test -f "dist/${archive}.tar.gz.sha256"
+            fi
+          done
+
+      - name: Refuse to overwrite an existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release: ${GITHUB_REF_NAME} already exists; refusing to overwrite assets" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "neolint ${GITHUB_REF_NAME}" \
+            --notes "Automated release artifacts for ${GITHUB_REF_NAME}. Verify the published SHA-256 checksums before use."
