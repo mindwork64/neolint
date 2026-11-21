@@ -12,7 +12,8 @@
 //! default. Directory traversal is sorted and skips symlinks; explicit files are
 //! accepted regardless of extension; stdin (`-`) may appear only once.
 use neolint::config::LintConfig;
-use neolint::{analyze, lex, parse, Diagnostic, Severity};
+use neolint::semantic::analyze_with_syntax_diagnostics;
+use neolint::{lex, parse, Diagnostic, Severity};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -199,8 +200,12 @@ fn run() -> i32 {
         };
 
         let (tokens, mut diagnostics) = lex(&source);
-        diagnostics.extend(parse(&tokens));
-        diagnostics.extend(analyze(&tokens));
+        let syntax_diagnostics = parse(&tokens);
+        diagnostics.extend(syntax_diagnostics.iter().cloned());
+        diagnostics.extend(analyze_with_syntax_diagnostics(
+            &tokens,
+            &syntax_diagnostics,
+        ));
         config.apply(&mut diagnostics);
 
         results.push(FileResult {
