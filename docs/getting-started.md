@@ -11,7 +11,7 @@ The initial downloadable release targets are:
 
 macOS, ARM, 32-bit Windows/Linux, and other targets are not part of the initial binary release.
 
-No stable release has been published yet. Release assets are produced by the release workflow when a version tag is published. Once a release exists, use its GitHub Releases page: <https://github.com/mindwork64/neolint/releases>.
+Stable v1.0.0 is published at <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>. Download the archive for your platform and verify its `.sha256` file before use.
 
 ## Install a release (Linux x86_64)
 
