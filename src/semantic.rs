@@ -648,6 +648,7 @@ pub fn analyze_with_syntax_diagnostics(
     analyze_event_signatures(tokens, &mut diagnostics);
     analyze_state_topology(tokens, &scopes, &user_functions, &mut diagnostics);
     analyze_unresolved_variables(tokens, &scopes, &mut diagnostics);
+    analyze_discarded_comparison_expressions(tokens, syntax_diagnostics, &mut diagnostics);
     diagnostics
 }
 
@@ -733,6 +734,377 @@ fn unknown_function_argument_ranges(tokens: &[Token]) -> Vec<(usize, usize)> {
     }
 
     ranges
+}
+
+/// Report standalone comparison expressions whose result is discarded.
+///
+/// This is a shallow statement scanner rather than an AST. It walks statement
+/// boundaries and control-flow bodies so an unbraced `if`/`else`/`while`/`for`/
+/// `do` body is checked without treating the control condition as an expression
+/// statement. Recursive descent through the token stream binds `else` to the
+/// nearest preceding `if`. Calls, assignments, increment/decrement, or
+/// overlapping syntax diagnostics make a case ambiguous and suppress SEM023.
+fn analyze_discarded_comparison_expressions(
+    tokens: &[Token],
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut seen = HashSet::new();
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        if tokens[cursor].kind == TokenKind::LBrace {
+            if let Some(close) = matching_brace(tokens, cursor) {
+                scan_comparison_block(
+                    tokens,
+                    cursor + 1,
+                    close,
+                    syntax_diagnostics,
+                    diagnostics,
+                    &mut seen,
+                );
+                cursor = close + 1;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+}
+
+fn scan_comparison_block(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) {
+    let mut cursor = start;
+    while cursor < limit {
+        let next =
+            scan_comparison_statement(tokens, cursor, limit, syntax_diagnostics, diagnostics, seen)
+                .unwrap_or(cursor + 1);
+        cursor = next.max(cursor + 1);
+    }
+}
+
+fn scan_comparison_statement(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) -> Option<usize> {
+    let token = tokens.get(start)?;
+    if start >= limit {
+        return None;
+    }
+
+    match token.kind {
+        TokenKind::Semicolon => Some(start + 1),
+        TokenKind::LBrace => {
+            let close = matching_brace(tokens, start)?;
+            if close > limit {
+                return None;
+            }
+            scan_comparison_block(
+                tokens,
+                start + 1,
+                close,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            );
+            Some(close + 1)
+        }
+        TokenKind::KwIf => {
+            let open = start + 1;
+            if tokens.get(open).map(|item| item.kind) != Some(TokenKind::LParen) {
+                return None;
+            }
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
+            }
+            let after_then = scan_comparison_statement(
+                tokens,
+                close + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )?;
+            if tokens.get(after_then).map(|item| item.kind) == Some(TokenKind::KwElse) {
+                return scan_comparison_statement(
+                    tokens,
+                    after_then + 1,
+                    limit,
+                    syntax_diagnostics,
+                    diagnostics,
+                    seen,
+                );
+            }
+            Some(after_then)
+        }
+        TokenKind::KwWhile | TokenKind::KwFor => {
+            let open = start + 1;
+            if tokens.get(open).map(|item| item.kind) != Some(TokenKind::LParen) {
+                return None;
+            }
+            let close = matching_paren(tokens, open)?;
+            if close >= limit {
+                return None;
+            }
+            scan_comparison_statement(
+                tokens,
+                close + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )
+        }
+        TokenKind::KwDo => {
+            let body = scan_comparison_statement(
+                tokens,
+                start + 1,
+                limit,
+                syntax_diagnostics,
+                diagnostics,
+                seen,
+            )?;
+            if tokens.get(body).map(|item| item.kind) != Some(TokenKind::KwWhile)
+                || tokens.get(body + 1).map(|item| item.kind) != Some(TokenKind::LParen)
+            {
+                return None;
+            }
+            let open = body + 1;
+            let close = matching_paren(tokens, open)?;
+            if close >= limit
+                || tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::Semicolon)
+            {
+                return None;
+            }
+            Some(close + 2)
+        }
+        TokenKind::KwReturn | TokenKind::KwJump | TokenKind::KwState | TokenKind::At => {
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            Some(semicolon + 1)
+        }
+        _ => {
+            if let Some(next) =
+                scan_header_block(tokens, start, limit, syntax_diagnostics, diagnostics, seen)
+            {
+                return Some(next);
+            }
+            if is_declaration_type(token.kind) {
+                let semicolon = statement_semicolon(tokens, start, limit)?;
+                return Some(semicolon + 1);
+            }
+            let semicolon = statement_semicolon(tokens, start, limit)?;
+            if tokens.get(semicolon).map(|item| item.kind) != Some(TokenKind::Semicolon) {
+                return None;
+            }
+            if let Some(operator) = discarded_comparison_operator(tokens, start, semicolon) {
+                if !has_statement_syntax_error(tokens, start, semicolon + 1, syntax_diagnostics)
+                    && seen.insert(operator)
+                {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM023",
+                        severity: Severity::Warning,
+                        kind: DiagnosticKind::Lint,
+                        message: "comparison result is discarded; use '=' for assignment or use the comparison in a condition".to_owned(),
+                        span: tokens[operator].span,
+                    });
+                }
+            }
+            Some(semicolon + 1)
+        }
+    }
+}
+
+fn scan_header_block(
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<usize>,
+) -> Option<usize> {
+    let (_, open, _) = function_header_at(tokens, start)?;
+    let close = matching_paren(tokens, open)?;
+    if close >= limit || tokens.get(close + 1).map(|item| item.kind) != Some(TokenKind::LBrace) {
+        return None;
+    }
+    let body_close = matching_brace(tokens, close + 1)?;
+    if body_close > limit {
+        return None;
+    }
+    scan_comparison_block(
+        tokens,
+        close + 2,
+        body_close,
+        syntax_diagnostics,
+        diagnostics,
+        seen,
+    );
+    Some(body_close + 1)
+}
+
+fn has_statement_syntax_error(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    syntax_diagnostics: &[Diagnostic],
+) -> bool {
+    let start_offset = tokens.get(start).map_or(0, |token| token.span.start);
+    let end_offset = tokens
+        .get(end.saturating_sub(1))
+        .map_or(start_offset, |token| token.span.end);
+    syntax_diagnostics.iter().any(|diagnostic| {
+        diagnostic.span.start >= start_offset && diagnostic.span.start <= end_offset
+    })
+}
+
+fn discarded_comparison_operator(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
+    let mut start = start;
+    let mut end = end;
+    while start < end && has_outer_parentheses(tokens, start, end) {
+        start += 1;
+        end -= 1;
+    }
+    if start >= end || !is_expression_start(tokens[start].kind) {
+        return None;
+    }
+
+    let operator = find_top_level_binary_operator(tokens, start, end)?;
+    if !matches!(
+        tokens[operator].kind,
+        TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+    ) {
+        return None;
+    }
+    if operator == start || operator + 1 >= end {
+        return None;
+    }
+    if is_invalid_operand_end(tokens[operator - 1].kind)
+        || is_invalid_operand_end(tokens[end - 1].kind)
+        || is_invalid_operand_start(tokens[operator + 1].kind)
+    {
+        return None;
+    }
+    if has_call_or_side_effect(tokens, start, end) {
+        return None;
+    }
+    Some(operator)
+}
+
+fn is_expression_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier
+            | TokenKind::IntegerLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::Less
+            | TokenKind::Bang
+            | TokenKind::Tilde
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::PlusPlus
+            | TokenKind::MinusMinus
+    )
+}
+
+fn is_invalid_operand_end(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Comma
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::PlusPlus
+            | TokenKind::MinusMinus
+            | TokenKind::Equal
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::LessEqual
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::ShiftLeft
+            | TokenKind::ShiftRight
+            | TokenKind::Bang
+            | TokenKind::Tilde
+    )
+}
+
+fn is_invalid_operand_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Comma
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::Equal
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::LessEqual
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::ShiftLeft
+            | TokenKind::ShiftRight
+    )
+}
+
+fn has_call_or_side_effect(tokens: &[Token], start: usize, end: usize) -> bool {
+    for index in start..end {
+        if matches!(
+            tokens[index].kind,
+            TokenKind::Equal
+                | TokenKind::PlusEqual
+                | TokenKind::MinusEqual
+                | TokenKind::StarEqual
+                | TokenKind::SlashEqual
+                | TokenKind::PercentEqual
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+        ) {
+            return true;
+        }
+        if tokens[index].kind == TokenKind::Identifier
+            && tokens.get(index + 1).map(|token| token.kind) == Some(TokenKind::LParen)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn analyze_unresolved_variables(
@@ -6557,6 +6929,212 @@ mod tests {
         assert!(
             mismatches[0].message.contains("type integer"),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_discarded_comparison_with_exact_span() {
+        let diagnostics = analyze_source(
+            "default\n{\n    state_entry()\n    {\n        integer a;\n        integer b;\n        a == b;\n    }\n}\n",
+        );
+        let sem023 = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM023")
+            .collect::<Vec<_>>();
+        assert_eq!(sem023.len(), 1, "{diagnostics:?}");
+        assert_eq!(sem023[0].severity, Severity::Warning);
+        assert_eq!(sem023[0].kind, DiagnosticKind::Lint);
+        assert_eq!((sem023[0].span.line, sem023[0].span.column), (7, 11));
+    }
+
+    #[test]
+    fn suppresses_sem023_when_statement_has_syntax_error() {
+        let source = "default { state_entry() { integer a; integer b; a == b + ; } }";
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        let syntax_diagnostics = crate::parse(&tokens);
+        assert!(!syntax_diagnostics.is_empty(), "{syntax_diagnostics:?}");
+        let diagnostics = analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_unbraced_control_body_comparisons_not_conditions() {
+        let diagnostics = analyze_source(
+            "default\n{\n    state_entry()\n    {\n        integer a;\n        integer b;\n        integer c;\n        integer d;\n        if (a == b) c == d;\n        while (a == b) c == d;\n        for (; a == b; ) c == d;\n        do c == d; while (a == b);\n    }\n}\n",
+        );
+        let sem023 = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM023")
+            .collect::<Vec<_>>();
+        assert_eq!(sem023.len(), 4, "{diagnostics:?}");
+        assert_eq!(
+            sem023
+                .iter()
+                .map(|diagnostic| (diagnostic.span.line, diagnostic.span.column))
+                .collect::<Vec<_>>(),
+            vec![(9, 23), (10, 26), (11, 28), (12, 14)],
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_if_else_and_nested_dangling_else_bodies() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c; integer d;  if (TRUE) ; else a == b;  if (TRUE) if (FALSE) a == b; else c == d;  if (FALSE) ; else if (TRUE) a == b; else c == d; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            5,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_report_unbraced_control_conditions_or_used_bodies() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c;  if (a == b) c = a; while (a == b) c++; for (; a == b; ) foo();  do c = a; while (a == b); } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_comparison_inside_nested_block_and_control_body() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; \
+             if (TRUE) { while (FALSE) { a == b; } } } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn suppresses_unbraced_body_with_syntax_error() {
+        let source = "default { state_entry() { integer a; integer b; if (TRUE) a == b + ; } }";
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        let syntax_diagnostics = crate::parse(&tokens);
+        assert!(!syntax_diagnostics.is_empty(), "{syntax_diagnostics:?}");
+        let diagnostics = analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_multiple_unbraced_statement_bodies_after_complete_controls() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer c;  if (a == b) ; if (a != b) c == a; a == b; a != b; } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            3,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reports_all_comparison_operators_and_parenthesized_comparison() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; \
+             a == b; a != b; a < b; a <= b; a > b; a >= b; (a == b); } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            7,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_report_comparisons_used_by_conditions_arguments_or_initializers() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; integer initialized = (a == b); \
+             if (a == b) { } while (a == b) { } for (; a == b; ) { } \
+             llOwnerSay((string)(a == b)); a = b; a++; ++a; foo(); } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_report_comparison_used_by_return() {
+        let diagnostics = analyze_source(
+            "integer compare() { integer a; integer b; return a == b; } default { }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn suppresses_discarded_comparison_with_nested_call_or_side_effect() {
+        let diagnostics = analyze_source(
+            "integer value() { return 0; } \
+             default { state_entry() { integer a; integer b; a == value(); a == (b++); } }",
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn skips_malformed_and_reports_multiple_standalone_comparisons() {
+        let malformed = analyze_source("default { state_entry() { integer a; a == ; } }");
+        assert!(
+            !malformed
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{malformed:?}"
+        );
+
+        let multiple =
+            analyze_source("default { state_entry() { integer a; integer b; a == b; a != b; } }");
+        assert_eq!(
+            multiple
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            2,
+            "{multiple:?}"
         );
     }
 
