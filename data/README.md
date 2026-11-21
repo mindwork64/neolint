@@ -18,18 +18,11 @@ The file `lsl-deprecated.txt` lists functions whose canonical LSL definition has
 
 - Upstream source: `lsl_definitions.yaml`
 - Pinned upstream revision: `eb8354a3984ea31123ea3f69259ed99b9edb3f05`
-- Extractor: `scripts/extract-lsl-deprecated.py`
 
 The extractor intentionally ignores `slua-deprecated`. It also does not export the upstream `use` hints because they may name SLua APIs and must not be presented as LSL replacements.
 
-## License and updates
+## License and attribution
 
-The upstream repository is distributed under the MIT License. See `LICENSES/LINDEN-RESEARCH-MIT.txt` and retain this attribution when redistributing the snapshots.
+The upstream definitions are distributed under the MIT License. The applicable notice is included in [`LICENSES/LINDEN-RESEARCH-MIT.txt`](../LICENSES/LINDEN-RESEARCH-MIT.txt). This attribution must be retained when redistributing the metadata snapshots.
 
-Normal neolint execution reads checked-in snapshots and does not access the network. Updating both files is an explicit maintainer action:
-
-```sh
-bash scripts/update-lsl-builtins.sh
-```
-
-An optional 40-character upstream commit SHA can be passed to update both snapshots from the same revision.
+The upstream data has a license separate from the MIT OR Apache-2.0 license covering neolint's own source code.

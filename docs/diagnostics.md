@@ -26,7 +26,7 @@ Examples: `integer café;`, `"unterminated`, `/* unterminated`.
 
 ## Parser/syntax diagnostics
 
-All parser diagnostics have default severity **error** and kind **syntax**. There is no `PAR002`.
+All parser diagnostics have default severity **error** and kind **syntax**.
 
 | Code | Meaning | Typical example |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ All parser diagnostics have default severity **error** and kind **syntax**. Ther
 | `PAR013` | Missing, late, or out-of-order default state. | empty file, `state x {}` before `default` |
 | `PAR014` | Duplicate default state. | `default {} default {}` |
 
-Parser recovery is described in [lsl-grammar.md](lsl-grammar.md#h1-parser-recovery-contract). Recovery is conservative and heuristic for unbalanced outer braces; diagnostics can therefore identify the enclosing construct rather than reconstruct missing syntax.
+For malformed input, neolint attempts to continue far enough to report additional independent problems. Recovery is best-effort: unbalanced outer braces can affect which surrounding construct receives a diagnostic.
 
 ## Semantic and lint diagnostics
 
@@ -214,6 +214,5 @@ default { state_entry() { integer value; float result = value.x; } }
 ## Related references
 
 - [Language support](language-support.md)
-- [Grammar and parser recovery](lsl-grammar.md)
 - [CLI reference](cli-reference.md)
 - [Troubleshooting](troubleshooting.md)

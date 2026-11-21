@@ -6,8 +6,8 @@ Neolint finds lexical, syntax, and conservative semantic problems before code re
 
 ## Status
 
-- Current package version: `1.0.0`.
-- Implemented diagnostics: `LEX000`–`LEX002`, parser `PAR001`–`PAR014` (no `PAR002`), and `SEM001`–`SEM022`.
+- Current version: `1.0.0`.
+- Diagnostic families: lexical (`LEX`), syntax (`PAR`), and semantic/lint (`SEM`).
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
 - Normal lint runs are deterministic and offline.
 - Stable v1.0.0 is published: <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>.
@@ -34,25 +34,16 @@ neolint --tokens script.lsl
 
 Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/input/config error. Warnings and info diagnostics do not fail unless configured as errors.
 
-Build from source with stable Rust:
 
-```sh
-cargo build --release
-./target/release/neolint --version
-```
-
-## Documentation
+## User documentation
 
 - [Getting started and installation](docs/getting-started.md)
-- [CLI reference](docs/cli-reference.md)
+- [Command-line reference](docs/cli-reference.md)
 - [Configuration](docs/configuration.md)
-- [Complete diagnostic reference](docs/diagnostics.md)
+- [Diagnostic reference](docs/diagnostics.md)
+- [LSL language support and limitations](docs/language-support.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Language support](docs/language-support.md)
-- [Grammar inventory and parser recovery](docs/lsl-grammar.md)
-- [Regression corpus](docs/corpus.md)
-- [Release engineering](docs/releasing.md)
-- [Contributing](docs/contributing.md)
+
 
 ## Scope and limits
 
