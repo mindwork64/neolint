@@ -397,6 +397,22 @@ fn documented_config_example_disables_and_downgrades() {
 }
 
 #[test]
+fn documented_tokens_flag_keeps_diagnostics_visible() {
+    let directory = temporary_directory();
+    let source = directory.join("invalid.lsl");
+    fs::write(&source, "default { state_entry() { llOwnerSay(42); } }").unwrap();
+
+    let output = neolint().arg("--tokens").arg(&source).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Identifier"), "{stdout}");
+    assert!(stdout.contains("error[SEM004]"), "{stdout}");
+    assert!(!stdout.contains("no diagnostics"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn documented_unknown_option_exits_input_error() {
     let output = neolint().arg("--not-a-real-option").output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -405,7 +421,7 @@ fn documented_unknown_option_exits_input_error() {
 }
 
 #[test]
-fn documented_tokens_flag_prints_tokens_without_diagnostics() {
+fn documented_tokens_flag_clean_file_suppresses_no_diagnostics_line() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.lsl");
     let output = neolint().arg("--tokens").arg(&fixture).output().unwrap();
     assert!(output.status.success());

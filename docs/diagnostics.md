@@ -126,6 +126,81 @@ state running { }
 default { state_entry() { state missing; } }
 ```
 
+```lsl
+// SEM003: wrong event parameter count
+default { touch_start() { } }
+```
+
+```lsl
+// SEM005: wrong user-function argument count
+integer add(integer value) { return value; }
+default { state_entry() { add(); } }
+```
+
+```lsl
+// SEM006: provable user-function argument type mismatch
+integer add(integer value) { return value; }
+default { state_entry() { add("text"); } }
+```
+
+```lsl
+// SEM007: duplicate local in one scope
+default { state_entry() { integer value; integer value; } }
+```
+
+```lsl
+// SEM008: incompatible return expression
+integer f() { return "text"; }
+default { }
+```
+
+```lsl
+// SEM009: duplicate jump label
+integer f() { @again; @again; return 1; }
+default { }
+```
+
+```lsl
+// SEM010: undefined jump target
+integer f() { jump missing; return 1; }
+default { }
+```
+
+```lsl
+// SEM013: deprecated canonical function
+default { state_entry() { llSoundPreload("sound"); } }
+```
+
+```lsl
+// SEM014: unsupported explicit cast
+default { state_entry() { vector position; integer value = (integer)position; } }
+```
+
+```lsl
+// SEM015: incompatible initializer
+default { state_entry() { integer value = 1.5; } }
+```
+
+```lsl
+// SEM016: incompatible plain assignment
+default { state_entry() { integer value; value = 1.5; } }
+```
+
+```lsl
+// SEM017: unsupported compound assignment operands
+default { state_entry() { integer value; value += "text"; } }
+```
+
+```lsl
+// SEM018: invalid component write
+default { state_entry() { integer value; value.x = 1.0; } }
+```
+
+```lsl
+// SEM019: invalid component read
+default { state_entry() { integer value; float result = value.x; } }
+```
+
 ## Conservative boundaries
 
 - Unknown simulator extensions and extension APIs are not treated as known LSL definitions.

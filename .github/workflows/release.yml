@@ -34,21 +34,19 @@ jobs:
 
       - name: Read package version (Linux)
         if: runner.os == 'Linux'
-        id: version
         shell: bash
         run: |
           set -euo pipefail
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Read package version (Windows)
         if: runner.os == 'Windows'
-        id: version
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          "version=$($metadata.packages[0].version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "PACKAGE_VERSION=$($metadata.packages[0].version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build optimized binary
         shell: bash
@@ -57,19 +55,19 @@ jobs:
       - name: Smoke test release binary (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: bash scripts/release-smoke.sh "target/${{ matrix.target }}/release/neolint" "${{ steps.version.outputs.version }}"
+        run: bash scripts/release-smoke.sh "target/${{ matrix.target }}/release/neolint" "$PACKAGE_VERSION"
 
       - name: Smoke test release binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/release-smoke.ps1 -Binary "target/${{ matrix.target }}/release/neolint.exe" -Version "${{ steps.version.outputs.version }}"
+        run: ./scripts/release-smoke.ps1 -Binary "target/${{ matrix.target }}/release/neolint.exe" -Version $env:PACKAGE_VERSION
 
       - name: Package archive and checksum (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="$PACKAGE_VERSION"
           target="${{ matrix.target }}"
           archive="neolint-v${version}-${target}.tar.gz"
           mkdir -p dist
@@ -88,7 +86,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = "${{ steps.version.outputs.version }}"
+          $version = $env:PACKAGE_VERSION
           $target = "${{ matrix.target }}"
           $archive = "neolint-v$version-$target.zip"
           $binary = "target/$target/release/neolint.exe"

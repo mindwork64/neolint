@@ -17,7 +17,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--config FILE` | Load rule settings from a configuration file. |
 | `--disable RULES` | Disable comma-separated rule codes. |
 | `--severity RULE=LEVEL` | Override severity for a rule; `LEVEL` is `error`, `warning`, or `info`. |
-| `--tokens` | Print lexer tokens instead of the normal human diagnostic output. Development aid. |
+| `--tokens` | Print lexer token lines before human diagnostics; on a clean file the `no diagnostics` line is suppressed. Development aid. Cannot be combined with `--format json`. |
 
 Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule.
 
