@@ -7012,6 +7012,38 @@ mod tests {
     }
 
     #[test]
+    fn reports_comparison_inside_nested_block_and_control_body() {
+        let diagnostics = analyze_source(
+            "default { state_entry() { integer a; integer b; \
+             if (TRUE) { while (FALSE) { a == b; } } } }",
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM023")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn suppresses_unbraced_body_with_syntax_error() {
+        let source = "default { state_entry() { integer a; integer b; if (TRUE) a == b + ; } }";
+        let (tokens, lexical_diagnostics) = lex(source);
+        assert!(lexical_diagnostics.is_empty(), "{lexical_diagnostics:?}");
+        let syntax_diagnostics = crate::parse(&tokens);
+        assert!(!syntax_diagnostics.is_empty(), "{syntax_diagnostics:?}");
+        let diagnostics = analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM023"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_multiple_unbraced_statement_bodies_after_complete_controls() {
         let diagnostics = analyze_source(
             "default { state_entry() { integer a; integer b; integer c;  if (a == b) ; if (a != b) c == a; a == b; a != b; } }",
