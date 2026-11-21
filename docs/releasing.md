@@ -81,7 +81,7 @@ No personal token, repository secret, crates.io publication, or package-manager 
 
 ## Manual dispatch
 
-After the workflow exists on the default branch, maintainers can run **Actions → Release artifacts → Run workflow** on a branch. Manual dispatch builds and smoke-tests both targets. It does not publish a release, because publish requires a `v*` tag push.
+After the workflow exists on the default branch, maintainers can run **Actions → Release artifacts → Run workflow** on a branch. Manual dispatch builds and smoke-tests both targets, downloads both uploaded artifacts with `actions/download-artifact@v8`, and validates both SHA-256 checksums and archive contents. It does not publish a release, because publish requires a `v*` tag push.
 
 This PR cannot execute the workflow before merge: GitHub only offers `workflow_dispatch` for workflows present on the default branch. The first matrix validation must be run manually after merge, before a public release.
 
