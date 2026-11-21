@@ -81,9 +81,9 @@ No personal token, repository secret, crates.io publication, or package-manager 
 
 ## Manual dispatch
 
-After the workflow exists on the default branch, maintainers can run **Actions → Release artifacts → Run workflow** on a branch. Manual dispatch builds and smoke-tests both targets. It does not publish a release, because publish requires a `v*` tag push.
+After the workflow exists on the default branch, maintainers can run **Actions → Release artifacts → Run workflow** on a branch. Manual dispatch builds and smoke-tests both targets, downloads both uploaded artifacts with `actions/download-artifact@v8`, and validates both SHA-256 checksums and archive contents. It does not publish a release, because publish requires a `v*` tag push.
 
-This PR cannot execute the workflow before merge: GitHub only offers `workflow_dispatch` for workflows present on the default branch. The first matrix validation must be run manually after merge, before a public release.
+Matrix validation was completed before merge in workflow dispatch [run #6](https://github.com/mindwork64/neolint/actions/runs/44857913971) on head `6c2473126d0db745ea3a5fd79175d1ff566ffebc`: Linux, Windows and the artifact-validation job all passed, and publishing was skipped. After merge, maintainers can dispatch the workflow again on `main` before a public release if a fresh validation is required; manual dispatch never publishes.
 
 ## Stable release checklist
 
