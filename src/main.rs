@@ -1,3 +1,16 @@
+//! Command-line entry point for neolint.
+//!
+//! Pipeline:
+//! argument parsing → configuration loading/validation → input collection
+//! (files, directories, stdin) → source reading → [`neolint::lex`] →
+//! [`neolint::parse`] → [`neolint::analyze`] → configuration application →
+//! human/JSON rendering → exit code.
+//!
+//! Exit codes are `0` when no error-severity diagnostics remain, `1` when at
+//! least one error-severity diagnostic remains, and `2` for command-line,
+//! configuration, input, or file-read errors. Warnings/info do not fail by
+//! default. Directory traversal is sorted and skips symlinks; explicit files are
+//! accepted regardless of extension; stdin (`-`) may appear only once.
 use neolint::config::LintConfig;
 use neolint::{analyze, lex, parse, Diagnostic, Severity};
 use std::collections::HashSet;
@@ -24,6 +37,7 @@ fn main() {
     process::exit(code);
 }
 
+/// Execute the complete CLI pipeline and return the process exit code.
 fn run() -> i32 {
     let mut format = OutputFormat::Human;
     let mut show_tokens = false;
@@ -226,6 +240,16 @@ fn parse_severity(value: &str) -> Option<Severity> {
 
 /// Resolve explicit files and recursively expand directories into sorted .lsl files.
 /// Symlinks encountered during traversal are skipped to avoid directory cycles.
+/// Expand explicit files/directories and stdin into a deterministic input list.
+///
+/// Directory inputs are recursively scanned for case-insensitive `.lsl` files;
+/// entries are sorted by name and symlinks are skipped. Duplicate displayed
+/// paths are removed. `-` is retained at most once.
+///
+/// # Errors
+///
+/// Returns an error for inaccessible inputs, unsupported file types, or an empty
+/// expanded input set.
 fn collect_input_paths(inputs: &[String]) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
@@ -264,6 +288,7 @@ fn collect_input_paths(inputs: &[String]) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+/// Recursively collect `.lsl` files from one directory in sorted name order.
 fn collect_directory(
     directory: &Path,
     paths: &mut Vec<String>,
@@ -312,6 +337,7 @@ fn print_help() {
     );
 }
 
+/// Render tokens (when requested) and diagnostics in `path:line:column` form.
 fn print_human(results: &[FileResult], show_tokens: bool) {
     for result in results {
         if show_tokens {
@@ -343,6 +369,7 @@ fn print_human(results: &[FileResult], show_tokens: bool) {
     }
 }
 
+/// Render all diagnostics as a JSON array with stable field ordering.
 fn print_json(results: &[FileResult]) {
     let mut first = true;
     print!("[");

@@ -1,82 +1,161 @@
+//! Lexical analysis for LSL source text.
+//!
+//! The lexer is a single-pass byte-oriented scanner. It preserves UTF-8 byte
+//! offsets together with one-based line/column positions ([`Span`]), emits
+//! keyword, identifier, literal, punctuation, and operator tokens, and reports
+//! unterminated strings/comments and unsupported characters as lexical
+//! diagnostics. Malformed input is returned as diagnostics alongside the
+//! successfully recovered token stream rather than as a Rust error.
+//!
+//! Identifiers are intentionally ASCII-only. Unicode is accepted inside strings
+//! and comments, but an identifier such as `café` produces a lexical diagnostic.
 use crate::diagnostic::{Diagnostic, Span};
 
+/// Every token category recognized by the LSL lexer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
+    /// Identifier or unclassified name.
     Identifier,
+    /// Decimal or hexadecimal integer literal.
     IntegerLiteral,
+    /// Floating-point literal, including exponent forms.
     FloatLiteral,
+    /// Quoted string literal (the lexeme retains quotes/escapes).
     StringLiteral,
 
+    /// Keyword `integer`.
     KwInteger,
+    /// Keyword `float`.
     KwFloat,
+    /// Keyword `string`.
     KwString,
+    /// Keyword `key`.
     KwKey,
+    /// Keyword `list`.
     KwList,
+    /// Keyword `vector`.
     KwVector,
+    /// Keyword `rotation`.
     KwRotation,
+    /// Keyword `void` (rejected as a source value type).
     KwVoid,
+    /// Keyword `default`.
     KwDefault,
+    /// Keyword `state`.
     KwState,
+    /// Keyword `if`.
     KwIf,
+    /// Keyword `else`.
     KwElse,
+    /// Keyword `for`.
     KwFor,
+    /// Keyword `while`.
     KwWhile,
+    /// Keyword `do`.
     KwDo,
+    /// Keyword `jump`.
     KwJump,
+    /// Keyword `return`.
     KwReturn,
 
+    /// Left parenthesis `(`.
     LParen,
+    /// Right parenthesis `)`.
     RParen,
+    /// Left brace `{`.
     LBrace,
+    /// Right brace `}`.
     RBrace,
+    /// Left bracket `[`.
     LBracket,
+    /// Right bracket `]`.
     RBracket,
+    /// Less-than/vector-literal opener `<`.
     Less,
+    /// Greater-than/vector-literal closer `>`.
     Greater,
+    /// Comma `,`.
     Comma,
+    /// Semicolon `;`.
     Semicolon,
+    /// Colon `:`.
     Colon,
+    /// Label marker `@`.
     At,
+    /// Question mark `?` (unsupported ternary syntax).
     Question,
+    /// Member/component selector `.`.
     Dot,
 
+    /// Addition or unary plus `+`.
     Plus,
+    /// Subtraction or unary minus `-`.
     Minus,
+    /// Multiplication `*`.
     Star,
+    /// Division `/`.
     Slash,
+    /// Remainder `%`.
     Percent,
+    /// Increment `++`.
     PlusPlus,
+    /// Decrement `--`.
     MinusMinus,
+    /// Compound assignment `+=`.
     PlusEqual,
+    /// Compound assignment `-=`.
     MinusEqual,
+    /// Compound assignment `*=`.
     StarEqual,
+    /// Compound assignment `/=`.
     SlashEqual,
+    /// Compound assignment `%=`.
     PercentEqual,
+    /// Assignment `=`.
     Equal,
+    /// Equality `==`.
     EqualEqual,
+    /// Logical negation `!`.
     Bang,
+    /// Inequality `!=`.
     BangEqual,
+    /// Less-than-or-equal `<=`.
     LessEqual,
+    /// Greater-than-or-equal `>=`.
     GreaterEqual,
+    /// Bitwise AND `&`.
     And,
+    /// Bitwise OR `|`.
     Or,
+    /// Bitwise XOR `^`.
     Xor,
+    /// Bitwise NOT `~`.
     Tilde,
+    /// Logical AND `&&`.
     AndAnd,
+    /// Logical OR `||`.
     OrOr,
+    /// Left shift `<<`.
     ShiftLeft,
+    /// Right shift `>>`.
     ShiftRight,
 
+    /// End-of-input sentinel.
     Eof,
 }
 
+/// One token produced by the lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
+    /// Token category.
     pub kind: TokenKind,
+    /// Original source lexeme, including quotes/escapes for strings.
     pub lexeme: String,
+    /// Source range and one-based start/end coordinates.
     pub span: Span,
 }
 
+/// Single-pass scanner state over borrowed UTF-8 source.
 struct Lexer<'a> {
     source: &'a str,
     offset: usize,
@@ -98,6 +177,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Scan until EOF, retaining recovered tokens and lexical diagnostics.
     fn run(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
         while let Some(ch) = self.peek() {
             if ch.is_whitespace() {
@@ -490,6 +570,22 @@ fn is_identifier_continue(ch: char) -> bool {
 }
 
 /// Tokenize LSL source and return tokens plus lexical diagnostics.
+/// Lex an LSL source string.
+///
+/// # Arguments
+///
+/// * `source` — complete UTF-8 source text.
+///
+/// # Returns
+///
+/// A token vector ending in [`TokenKind::Eof`] plus lexical diagnostics. Tokens
+/// recovered before an error are retained; lexical problems are returned as
+/// diagnostics rather than as a Rust error.
+///
+/// # Errors
+///
+/// Lexical problems are returned as diagnostics rather than Rust errors:
+/// [`crate::diagnostic::DiagnosticKind::Lexical`] with `LEX000`–`LEX002`.
 pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     Lexer::new(source).run()
 }

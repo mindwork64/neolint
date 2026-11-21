@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     name: Format, lint and test
@@ -16,6 +20,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,3 +39,18 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-targets --all-features
+
+      - name: Check Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+      - name: Check pull request whitespace
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git diff --check "refs/remotes/origin/${BASE_REF}...HEAD"
