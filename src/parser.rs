@@ -1,6 +1,22 @@
+//! Syntax validation and bounded recovery for LSL token streams.
+//!
+//! The parser is deliberately hand-written and token-based; it does **not**
+//! build a full AST. It validates declarations, functions, states, events,
+//! statements, expressions, operator precedence, assignment targets, and
+//! increment/decrement targets. Recovery synchronizes at top-level, state, event,
+//! parameter, argument, condition, or statement boundaries while preserving
+//! later independent constructs whenever the delimiters make that safe.
+//!
+//! Diagnostics use the `PARxxx` codes and [`DiagnosticKind::Syntax`]. The parser
+//! is syntax-only: symbol resolution, typing, return-path analysis, and semantic
+//! rule ownership remain in [`crate::semantic`].
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::lexer::{Token, TokenKind};
 
+/// Mutable recursive-descent parser state over a borrowed token stream.
+///
+/// `current` always points at the next token to consume; recovery helpers are
+/// loop-guarded by the caller and by their own delimiter-aware scans.
 struct Parser<'a> {
     tokens: &'a [Token],
     current: usize,
@@ -24,6 +40,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse the complete token stream and return deterministic syntax findings.
     fn run(mut self) -> Vec<Diagnostic> {
         while !self.at_end() {
             let before = self.current;
@@ -332,6 +349,11 @@ impl<'a> Parser<'a> {
     }
 
     // Precedence climbing validates expressions without constructing the AST yet.
+    /// Parse an expression with precedence climbing.
+    ///
+    /// Returns `false` only when the expression could not be started or a
+    /// required right-hand operand is missing; callers then synchronize at the
+    /// enclosing statement/condition boundary.
     fn parse_expression(&mut self, min_precedence: u8) -> bool {
         let expression_start = self.current;
         if !self.parse_prefix() {
@@ -694,7 +716,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Recover from a malformed event header or body. Braces that belong to a
+    /// Recover from a malformed event header/body without consuming the
+    /// containing state's closing brace or the next event-like declaration.
+    ///
+    // Braces that belong to a
     // malformed handler are skipped, while the containing state's closing
     // brace and the next event-like declaration are left for the caller.
     fn synchronize_event(&mut self) {
@@ -730,6 +755,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Recover a malformed `for` initializer/increment list at its clause end.
     fn synchronize_for_list(&mut self, end: TokenKind) {
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -1017,6 +1043,12 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
 
 /// Parse a token stream and return syntax diagnostics. Lexical diagnostics are
 /// produced separately by lexing and must be retained by the caller.
+/// Parse a token stream and return all syntax diagnostics.
+///
+/// The input must include the lexer's final [`TokenKind::Eof`] sentinel. The
+/// parser never builds an AST and never panics on malformed input; recovery is
+/// bounded to delimiter-aware synchronization boundaries described in the
+/// grammar documentation.
 pub fn parse(tokens: &[Token]) -> Vec<Diagnostic> {
     Parser::new(tokens).run()
 }

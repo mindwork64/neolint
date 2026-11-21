@@ -1,34 +1,57 @@
+//! Vendored LSL built-in signature metadata and lookup.
+//!
+//! `data/lsl-builtins.txt` is the generated signature snapshot and
+//! `data/lsl-deprecated.txt` contains canonically deprecated function names.
+//! The snapshots are parsed once into a process-wide [`LslDefinitions`] value.
+//! Normal linting reads only these checked-in files and performs no network I/O.
+//! See `data/README.md` for provenance and the separate upstream license.
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const BUILTIN_SOURCE: &str = include_str!("../data/lsl-builtins.txt");
 const DEPRECATED_SOURCE: &str = include_str!("../data/lsl-deprecated.txt");
 
+/// One parameter of a canonical built-in function or event signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
+    /// LSL type name (`integer`, `string`, etc.).
     pub type_name: String,
+    /// Parameter name from the vendored metadata.
     pub name: String,
 }
 
+/// Canonical signature for a built-in function or event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
+    /// Canonical function/event name.
     pub name: String,
+    /// Return type, or `event` for an event signature.
     pub return_type: String,
+    /// Ordered parameter list.
     pub parameters: Vec<Parameter>,
 }
 
+/// Canonical built-in constant definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstantDefinition {
+    /// Constant name.
     pub name: String,
+    /// Declared LSL type.
     pub type_name: String,
+    /// Canonical literal value text.
     pub value: String,
 }
 
+/// Read-only index of vendored LSL definitions.
 #[derive(Debug, Default)]
 pub struct LslDefinitions {
+    /// Built-in function signatures keyed by canonical name.
     pub functions: HashMap<String, Signature>,
+    /// Event signatures keyed by canonical name.
     pub events: HashMap<String, Signature>,
+    /// Built-in constants keyed by name.
     pub constants: HashMap<String, ConstantDefinition>,
+    /// Canonical deprecated function names.
     pub deprecated_functions: HashSet<String>,
 }
 

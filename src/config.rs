@@ -1,6 +1,13 @@
+//! Dependency-free rule configuration for the CLI.
+//!
+//! Configuration is a small line-oriented `key = value` format. It supports
+//! disabling rule codes and overriding their severity; command-line overrides
+//! are applied afterward by the binary. Parsing and validation return human
+//! readable errors so the CLI can exit with code 2 without panicking.
 use crate::diagnostic::{Diagnostic, Severity};
 use std::collections::{HashMap, HashSet};
 
+/// Immutable rule configuration after parsing and command-line overrides.
 #[derive(Debug, Clone, Default)]
 pub struct LintConfig {
     disabled_rules: HashSet<String>,
@@ -14,6 +21,15 @@ impl LintConfig {
     /// severity.SEM004 = warning
     ///
     /// Blank lines and lines beginning with '#' are ignored.
+    /// Parse the line-oriented configuration format.
+    ///
+    /// Blank lines and comments are ignored. Supported settings are
+    /// `disable = RULE[, RULE...]` and `severity.RULE = error|warning|info`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a line-numbered error for malformed settings, invalid rule
+    /// codes, or invalid severity names.
     pub fn parse(source: &str) -> Result<Self, String> {
         let mut config = Self::default();
 
@@ -61,6 +77,12 @@ impl LintConfig {
         Ok(config)
     }
 
+    /// Disable each supplied rule code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a code is empty or contains characters other than
+    /// uppercase ASCII letters and digits.
     pub fn disable(&mut self, rules: impl IntoIterator<Item = String>) -> Result<(), String> {
         for rule in rules {
             validate_rule_code(&rule)?;
@@ -69,12 +91,21 @@ impl LintConfig {
         Ok(())
     }
 
+    /// Override the severity for one rule code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rule code is syntactically invalid.
     pub fn set_severity(&mut self, rule: &str, severity: Severity) -> Result<(), String> {
         validate_rule_code(rule)?;
         self.severity_overrides.insert(rule.to_owned(), severity);
         Ok(())
     }
 
+    /// Apply disabled-rule filtering and severity overrides in place.
+    ///
+    /// Disabled diagnostics are removed; remaining diagnostics are updated in
+    /// their original order.
     pub fn apply(&self, diagnostics: &mut Vec<Diagnostic>) {
         diagnostics.retain(|diagnostic| !self.disabled_rules.contains(diagnostic.code));
 

@@ -1,3 +1,35 @@
+//! Conservative semantic analysis for LSL token streams.
+//!
+//! This module is intentionally a collection of bounded token-based passes, not
+//! a compiler frontend with a complete AST. [`analyze`] first builds a lexical
+//! scope model that records function/event parameters, global/local variables,
+//! nested blocks, and variable initializers. It then runs independent checks for
+//! duplicate declarations, built-in and user-function calls, returns, jumps,
+//! casts, assignments, components, unresolved names, control-flow reachability,
+//! event signatures, and state/event topology.
+//!
+//! # Design invariants
+//!
+//! * Every diagnostic has a stable `SEMxxx` code, an explicit severity, and a
+//!   source span. Rules do not invent facts when type or value information is
+//!   unresolved.
+//! * Unknown extension functions and unknown extension event bodies are treated
+//!   as environment-provided capabilities; they are not reported as definite
+//!   undefined symbols or speculative type errors.
+//! * Type inference is partial and conservative. It covers literals, canonical
+//!   constants, explicit casts, variable declarations, function returns, and
+//!   selected binary expressions, but leaves uncertain expressions unresolved.
+//! * Analysis is deterministic and offline. Built-in metadata is read from the
+//!   vendored snapshots in `data/`.
+//! * Resource-bounded analyses (constant evaluation and SEM011 control flow)
+//!   stop at documented token/node/depth limits and skip the affected function
+//!   rather than producing partial or cascading diagnostics.
+//!
+//! # Aliasing and error policy
+//!
+//! Passes share immutable token/scope data and append only to the caller-owned
+//! diagnostic vector. Recoverable ambiguity is represented by "unknown" rather
+//! than by an error. Panics are reserved for impossible internal invariants.
 use crate::builtins::definitions;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::lexer::{Token, TokenKind};
@@ -41,6 +73,7 @@ fn function_header_at(tokens: &[Token], index: usize) -> Option<(usize, usize, S
     None
 }
 
+/// One declaration of a variable name in a lexical scope.
 #[derive(Debug, Clone)]
 struct VariableBinding {
     type_name: String,
@@ -48,6 +81,7 @@ struct VariableBinding {
     span: crate::diagnostic::Span,
 }
 
+/// Initializer expression queued for SEM015 after scope construction.
 #[derive(Debug, Clone)]
 struct VariableInitializer {
     name_index: usize,
@@ -56,12 +90,18 @@ struct VariableInitializer {
     expression_end: usize,
 }
 
+/// One lexical scope: global, function/event body, or nested block.
 #[derive(Debug, Default)]
 struct LexicalScope {
     parent: Option<usize>,
     variables: HashMap<String, Vec<VariableBinding>>,
 }
 
+/// Token-indexed lexical scope model shared by semantic passes.
+///
+/// The model intentionally stores declarations and initializer ranges rather
+/// than an AST. `scope_at[i]` is the innermost scope containing token `i`; parent
+/// links implement shadowing and jump-target accessibility.
 struct ScopeModel {
     scopes: Vec<LexicalScope>,
     scope_at: Vec<usize>,
@@ -70,6 +110,7 @@ struct ScopeModel {
 }
 
 impl ScopeModel {
+    /// Build scopes from brace structure and register parameters/declarations.
     fn build(tokens: &[Token]) -> Self {
         let mut scopes = vec![LexicalScope::default()];
         let mut stack = vec![0usize];
@@ -488,6 +529,17 @@ fn collect_user_functions(tokens: &[Token]) -> HashMap<String, UserFunctionSigna
 /// The first rule catches duplicate top-level variables and user-defined
 /// functions. Parameters and local declarations are excluded by tracking
 /// braces and parentheses.
+/// Run all conservative semantic checks over a token stream.
+///
+/// # Arguments
+///
+/// * `tokens` — tokens produced by [`crate::lex`], including `Eof`.
+///
+/// # Returns
+///
+/// Semantic and lint diagnostics in deterministic pass order. Diagnostics are
+/// not deduplicated across independent rules because the rules describe
+/// different findings (for example SEM008 and SEM011).
 pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut globals: HashMap<&str, &Token> = HashMap::new();
@@ -1208,6 +1260,12 @@ const MAX_CFG_NODES: usize = 4_096;
 const MAX_CFG_EDGES: usize = 8_192;
 const MAX_CFG_DEPTH: usize = 128;
 
+/// Bounded token-derived control-flow graph used only by SEM011.
+///
+/// Nodes represent statement/control-flow positions. Edges are deduplicated, and
+/// jumps are connected after both forward and backward labels are known. Any
+/// node/edge/token/depth budget overflow sets `limit_exceeded`; SEM011 then skips
+/// the whole function rather than analyzing a partial graph.
 #[derive(Default)]
 struct ControlFlowGraph {
     successors: Vec<Vec<usize>>,
@@ -1269,6 +1327,7 @@ impl ControlFlowGraph {
     }
 }
 
+/// Entry/exit node sets returned by the CFG builder for one statement.
 struct FlowFragment {
     entry: usize,
     exits: Vec<usize>,
@@ -1466,6 +1525,11 @@ fn evaluate_constant_integer_expression_at_depth(
     }
 }
 
+/// Evaluate a condition into `(can_be_true, can_be_false)`.
+///
+/// Only integer constants and supported operators produce certainty. Unknown
+/// identifiers, calls, malformed expressions, division by zero, and excessive
+/// size/depth return both outcomes so control-flow analysis stays conservative.
 fn condition_possibilities(
     tokens: &[Token],
     start: usize,
@@ -1560,6 +1624,12 @@ fn connect_exits(graph: &mut ControlFlowGraph, exits: &[usize], target: usize) -
 
 /// Build a small control-flow graph directly from the token stream.
 /// The parser remains syntax-only; this graph is local to one function body.
+/// Build CFG nodes/edges for one statement or structured control-flow node.
+///
+/// The builder is token-based and recursive over blocks. It models sequential
+/// statements, `if/else`, all three loop forms, returns, and labeled jumps.
+/// Unknown or malformed control-flow forms return `None`, causing SEM011 to skip
+/// that function and avoid cascading diagnostics.
 fn build_control_flow_statement(
     tokens: &[Token],
     start: usize,
@@ -1844,6 +1914,11 @@ fn statement_semicolon(tokens: &[Token], start: usize, limit: usize) -> Option<u
     None
 }
 
+/// Run SEM011 for value-returning functions.
+///
+/// Functions with invalid jump diagnostics are skipped to avoid cascades. The
+/// builder is restricted by the token/node/edge/depth budgets above; any budget
+/// overflow or unsupported construct suppresses the rule for that function only.
 fn analyze_missing_return_paths(
     tokens: &[Token],
     scopes: &ScopeModel,
@@ -1973,6 +2048,10 @@ struct EventInfo {
     body_end: usize,
 }
 
+/// Collect named/default states and their canonical event-handler ranges.
+///
+/// Unknown extension event names are intentionally omitted, keeping SEM020–SEM022
+/// within the conservative extension boundary.
 fn collect_state_info(tokens: &[Token], scopes: &ScopeModel) -> Vec<StateInfo> {
     let mut states = Vec::new();
     let mut brace_depth = 0usize;
@@ -3173,6 +3252,12 @@ fn analyze_explicit_casts(
     }
 }
 
+/// Infer an LSL type only when the token range proves one.
+///
+/// This is shared by call/return/assignment/cast checks. It handles literals,
+/// built-in constants, casts, declarations, known user/built-in returns, and
+/// selected binary expressions. Unresolved syntax returns `None`; callers must
+/// skip the check rather than guess.
 fn infer_expression_type(
     tokens: &[Token],
     mut start: usize,
