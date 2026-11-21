@@ -7,3 +7,8 @@ The bundled metadata is used to provide built-in signature checks and deprecatio
 ## License and attribution
 
 The upstream definitions are distributed under the MIT License. The applicable notice is included in [`LICENSES/LINDEN-RESEARCH-MIT.txt`](../LICENSES/LINDEN-RESEARCH-MIT.txt). This separate license applies to the bundled upstream data; neolint's own source code is available under MIT OR Apache-2.0.
+
+
+## Pattern policy rules
+
+`pattern-rules.toml` contains neolint-authored starter policies for the optional Git-diff pattern scanner. These rules are maintained as neolint project policy and are not copied source code from the Cinnamon Spices GitHub Action. The public Cinnamon Spices review workflow was used as a design reference for the scanner's diff-only, extension-aware, severity-tagged model.

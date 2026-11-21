@@ -2,6 +2,7 @@
 
 ```text
 neolint [OPTIONS] <FILE|DIRECTORY...|->
+neolint scan-diff [OPTIONS] [PATCH|-]
 ```
 
 At least one input is required. With no input, neolint prints help and exits with code 2.
@@ -103,4 +104,16 @@ cat hello.lsl | neolint -
 neolint --tokens hello.lsl
 ```
 
-See [configuration.md](configuration.md) and [diagnostics.md](diagnostics.md).
+## Pattern scan-diff subcommand
+
+`neolint scan-diff` is a separate, language-independent regex scanner. It reads a unified Git diff from stdin or a patch file and evaluates only added lines. It does not run the LSL lexer/parser and does not alter normal LSL lint behavior.
+
+```sh
+git diff --no-ext-diff --unified=0 origin/main...HEAD | neolint scan-diff
+git diff --cached --unified=0 | neolint scan-diff --format json
+git diff --unified=0 HEAD~1 | neolint scan-diff --fail-on-match
+```
+
+Options are `--rules FILE` (replace built-in rules with a TOML file), `--extensions .js,.py` (narrow the extension scope), `--format human|json`, and `--fail-on-match`. Findings are advisory by default; `--fail-on-match` makes any finding return exit code 1. Invalid input or rule files return code 2. See [pattern-scanner.md](pattern-scanner.md) for rule format, built-in rules and scanner limitations.
+
+See [configuration.md](configuration.md) and [diagnostics.md](diagnostics.md) for the LSL linter.

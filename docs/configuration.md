@@ -46,3 +46,6 @@ severity.SEM004 = fatal
 ```
 
 This is rejected with exit code 2 and a message identifying the line.
+
+
+The separate `neolint scan-diff` subcommand has its own TOML regex-rule file; it does not use `.neolint.conf`. See [Pattern scanner](pattern-scanner.md) for its schema and built-in policy profile.

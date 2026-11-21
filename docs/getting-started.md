@@ -111,6 +111,6 @@ Read source from stdin:
 cat hello.lsl | neolint -
 ```
 
-See [cli-reference.md](cli-reference.md) for every option and [configuration.md](configuration.md) for rule configuration.
+See [cli-reference.md](cli-reference.md) for every option and [configuration.md](configuration.md) for LSL rule configuration. The optional [pattern scanner](pattern-scanner.md) can inspect added lines in Git diffs for project-specific regex policies.
 
 The package has no runtime dependencies. Normal linting reads vendored metadata and does not access the network.

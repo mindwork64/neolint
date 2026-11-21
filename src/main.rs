@@ -12,6 +12,7 @@
 //! default. Directory traversal is sorted and skips symlinks; explicit files are
 //! accepted regardless of extension; stdin (`-`) may appear only once.
 use neolint::config::LintConfig;
+use neolint::patterns::{PatternFinding, PatternScanner};
 use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{lex, parse, Diagnostic, Severity};
 use std::collections::HashSet;
@@ -40,13 +41,18 @@ fn main() {
 
 /// Execute the complete CLI pipeline and return the process exit code.
 fn run() -> i32 {
+    let all_args = env::args().skip(1).collect::<Vec<_>>();
+    if all_args.first().is_some_and(|arg| arg == "scan-diff") {
+        return run_scan_diff(&all_args[1..]);
+    }
+
     let mut format = OutputFormat::Human;
     let mut show_tokens = false;
     let mut input_args = Vec::new();
     let mut config_path = None;
     let mut disabled_rules = Vec::new();
     let mut severity_overrides = Vec::new();
-    let mut args = env::args().skip(1);
+    let mut args = all_args.into_iter();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -234,6 +240,192 @@ fn run() -> i32 {
     }
 }
 
+/// Run the language-independent scanner over a unified Git diff.
+///
+/// The default rule set is embedded in the executable; a custom TOML rule file
+/// can replace it with `--rules`. The patch is read from stdin unless a path is
+/// supplied as the final positional argument.
+fn run_scan_diff(arguments: &[String]) -> i32 {
+    let mut rules_path = None;
+    let mut patch_path = None;
+    let mut format = OutputFormat::Human;
+    let mut fail_on_match = false;
+    let mut extension_filter = None;
+    let mut args = arguments.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_scan_diff_help();
+                return 0;
+            }
+            "--rules" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint scan-diff: --rules requires a TOML file path");
+                    return 2;
+                };
+                rules_path = Some(value.clone());
+            }
+            "--format" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint scan-diff: --format requires 'human' or 'json'");
+                    return 2;
+                };
+                format = match value.as_str() {
+                    "human" => OutputFormat::Human,
+                    "json" => OutputFormat::Json,
+                    _ => {
+                        eprintln!("neolint scan-diff: unsupported output format '{value}'");
+                        return 2;
+                    }
+                };
+            }
+            "--extensions" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint scan-diff: --extensions requires a comma-separated list");
+                    return 2;
+                };
+                let values = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if values.is_empty() {
+                    eprintln!(
+                        "neolint scan-diff: --extensions must include at least one extension"
+                    );
+                    return 2;
+                }
+                extension_filter = Some(values);
+            }
+            "--fail-on-match" => fail_on_match = true,
+            "--" => {
+                if let Some(path) = args.next() {
+                    if patch_path.replace(path.clone()).is_some() || args.next().is_some() {
+                        eprintln!("neolint scan-diff: expected at most one patch path");
+                        return 2;
+                    }
+                }
+                break;
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                eprintln!("neolint scan-diff: unknown option '{arg}'");
+                eprintln!("Try 'neolint scan-diff --help' for usage.");
+                return 2;
+            }
+            _ => {
+                if patch_path.replace(arg.clone()).is_some() {
+                    eprintln!("neolint scan-diff: expected at most one patch path");
+                    return 2;
+                }
+            }
+        }
+    }
+
+    let rule_source = if let Some(path) = rules_path {
+        match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("neolint scan-diff: cannot read rules '{path}': {error}");
+                return 2;
+            }
+        }
+    } else {
+        include_str!("../data/pattern-rules.toml").to_owned()
+    };
+    let scanner = match PatternScanner::from_toml(&rule_source) {
+        Ok(scanner) => scanner,
+        Err(error) => {
+            eprintln!("neolint scan-diff: {error}");
+            return 2;
+        }
+    };
+
+    let patch = match patch_path.as_deref() {
+        Some(path) if path != "-" => match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("neolint scan-diff: cannot read patch '{path}': {error}");
+                return 2;
+            }
+        },
+        _ => {
+            let mut source = String::new();
+            if let Err(error) = io::stdin().read_to_string(&mut source) {
+                eprintln!("neolint scan-diff: cannot read stdin: {error}");
+                return 2;
+            }
+            source
+        }
+    };
+
+    let findings = match scanner.scan_unified_diff(&patch, extension_filter.as_deref()) {
+        Ok(findings) => findings,
+        Err(error) => {
+            eprintln!("neolint scan-diff: {error}");
+            return 2;
+        }
+    };
+
+    match format {
+        OutputFormat::Human => print_pattern_human(&findings),
+        OutputFormat::Json => print_pattern_json(&findings),
+    }
+
+    if fail_on_match && !findings.is_empty() {
+        1
+    } else {
+        0
+    }
+}
+
+fn print_scan_diff_help() {
+    println!(
+        "neolint scan-diff — regex policy scanner for added Git diff lines\n\nUSAGE:\n    neolint scan-diff [OPTIONS] [PATCH|-]\n\nOPTIONS:\n    --rules <FILE>          Load a custom TOML pattern rule file (replaces built-in rules)\n    --extensions <LIST>    Narrow scanning to comma-separated extensions (for example .js,.py)\n    --format <human|json>  Output format (default: human)\n    --fail-on-match        Exit with code 1 when at least one finding is reported\n    -h, --help             Print this help\n\nINPUT:\n    Reads a unified Git diff from stdin when PATCH is omitted or '-'.\n\nEXIT CODES:\n    0  Scan completed; findings are advisory unless --fail-on-match is set\n    1  At least one finding and --fail-on-match was supplied\n    2  Invalid options, rule file, patch file or diff syntax",
+    );
+}
+
+fn print_pattern_human(findings: &[PatternFinding]) {
+    if findings.is_empty() {
+        println!("No pattern matches.");
+        return;
+    }
+
+    for finding in findings {
+        println!(
+            "{}:{}: {}[{}] ({}): {}",
+            finding.file,
+            finding.line,
+            finding.severity.as_str(),
+            finding.code,
+            finding.name,
+            finding.message
+        );
+        println!("    + {}", finding.source);
+    }
+}
+
+fn print_pattern_json(findings: &[PatternFinding]) {
+    print!("[");
+    for (index, finding) in findings.iter().enumerate() {
+        if index > 0 {
+            print!(",");
+        }
+        print!(
+            "{{\"file\":\"{}\",\"line\":{},\"code\":\"{}\",\"name\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"source\":\"{}\"}}",
+            json_escape(&finding.file),
+            finding.line,
+            json_escape(&finding.code),
+            json_escape(&finding.name),
+            finding.severity.as_str(),
+            json_escape(&finding.message),
+            json_escape(&finding.source)
+        );
+    }
+    println!("]");
+}
+
 fn parse_severity(value: &str) -> Option<Severity> {
     match value {
         "error" => Some(Severity::Error),
@@ -337,7 +529,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error",
+        "neolint {} — CLI-only LSL linter with an optional diff pattern scanner\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n    neolint scan-diff [OPTIONS] [PATCH|-]\n\nSUBCOMMANDS:\n    scan-diff             Scan added lines in a unified Git diff using regex rules\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics (normal LSL mode)\n    1  At least one error-severity diagnostic (normal LSL mode)\n    2  Input, configuration or command-line error",
         env!("CARGO_PKG_VERSION")
     );
 }

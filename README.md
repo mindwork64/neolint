@@ -21,7 +21,8 @@ Project logo, repository artwork, CLI icon, and the Windows executable icon are 
 - Current version: `1.0.0`.
 - Diagnostic families: lexical (`LEX`), syntax (`PAR`), and semantic/lint (`SEM`).
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
-- Normal lint runs are deterministic and offline.
+- Normal LSL lint runs are deterministic and offline.
+- Optional `scan-diff` subcommand provides an offline regex policy scanner for added lines in Git diffs.
 - Stable v1.0.0 is published: <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
@@ -41,9 +42,10 @@ neolint --config .neolint.conf ./scripts/
 neolint --disable SEM001,SEM004 ./scripts/
 neolint --severity SEM004=warning script.lsl
 cat script.lsl | neolint -
+git diff --no-ext-diff --unified=0 origin/main...HEAD | neolint scan-diff
 ```
 
-Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/input/config error. Warnings and info diagnostics do not fail unless configured as errors.
+For the normal LSL mode, exit codes are `0` (no error-severity diagnostics), `1` (at least one error), and `2` (CLI/input/config error). Warnings and info diagnostics do not fail unless configured as errors.
 
 ## User documentation
 
@@ -53,10 +55,13 @@ Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/i
 - [Diagnostic reference](docs/diagnostics.md)
 - [LSL language support and limitations](docs/language-support.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Regex pattern scanner](docs/pattern-scanner.md)
 
 ## Scope and limits
 
 Neolint performs lexical, syntax, and selected semantic checks for LSL. Its rules favor issues that can be identified with confidence and avoid speculative findings for unknown extensions or unresolved values.
+
+The separate `scan-diff` subcommand checks added lines in unified Git diffs using configurable regex policy rules. It can inspect non-LSL source files, but does not parse or understand their languages. It does not change the normal LSL analysis pipeline.
 
 A clean result means only that no currently implemented rule reported an issue. It is not proof that the official compiler or a simulator will accept or correctly run the script.
 

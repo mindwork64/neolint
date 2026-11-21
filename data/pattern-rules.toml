@@ -1,0 +1,85 @@
+[settings]
+max_findings_per_file = 10
+exclude_extensions = [".po", ".pot", ".md", ".svg", ".desktop"]
+
+# XDG path conventions for Cinnamon/GLib JavaScript applets.
+[[rules]]
+id = "XDG001"
+name = "Hardcoded XDG data directory"
+severity = "warning"
+extensions = [".js"]
+pattern = '''["']/?\.local/share'''
+message = "Avoid embedding the XDG data directory in a path; use GLib.get_user_data_dir() so XDG_DATA_HOME is respected."
+
+[[rules]]
+id = "XDG002"
+name = "Hardcoded XDG configuration directory"
+severity = "warning"
+extensions = [".js"]
+pattern = '''["']/?\.config'''
+message = "Avoid embedding the XDG configuration directory in a path; use GLib.get_user_config_dir() so XDG_CONFIG_HOME is respected."
+
+[[rules]]
+id = "XDG003"
+name = "Hardcoded XDG cache directory"
+severity = "warning"
+extensions = [".js"]
+pattern = '''["']/?\.cache'''
+message = "Avoid embedding the XDG cache directory in a path; use GLib.get_user_cache_dir() so XDG_CACHE_HOME is respected."
+
+[[rules]]
+id = "XDG004"
+name = "Hardcoded XDG state directory"
+severity = "warning"
+extensions = [".js"]
+pattern = '''["']/?\.local/state'''
+message = "Avoid embedding the XDG state directory in a path; use GLib.get_user_state_dir() so XDG_STATE_HOME is respected."
+
+# Synchronous GLib/GIO calls that can stall a UI main loop.
+[[rules]]
+id = "ASYNC001"
+name = "Synchronous process spawning"
+severity = "warning"
+extensions = [".c", ".h", ".js", ".py", ".vala"]
+pattern = '''(g_spawn_command_line_sync|GLib\.spawn_command_line_sync)\s*\('''
+message = "Synchronous process spawning can block the UI thread; prefer an asynchronous spawn API or Gio.Subprocess."
+
+[[rules]]
+id = "ASYNC002"
+name = "Synchronous process execution"
+severity = "warning"
+extensions = [".c", ".h", ".js", ".py", ".vala"]
+pattern = '''(g_spawn_sync|GLib\.spawn_sync)\s*\('''
+message = "Synchronous process execution can block the UI thread; prefer GLib.spawn_async() or Gio.Subprocess."
+
+[[rules]]
+id = "ASYNC003"
+name = "Synchronous file content read"
+severity = "warning"
+extensions = [".c", ".h", ".js", ".py", ".vala"]
+pattern = '''(g_file_get_contents|GLib\.file_get_contents)\s*\('''
+message = "Synchronous file reads can stall the main loop; prefer an asynchronous GIO operation where appropriate."
+
+[[rules]]
+id = "ASYNC004"
+name = "Synchronous child enumeration"
+severity = "warning"
+extensions = [".c", ".h", ".js", ".py", ".vala"]
+pattern = '''(g_file_enumerate_children|\.enumerate_children)\s*\('''
+message = "Synchronous directory enumeration can block on slow or remote filesystems; use the asynchronous GIO API."
+
+[[rules]]
+id = "ASYNC005"
+name = "Synchronous Cinnamon file read"
+severity = "warning"
+extensions = [".js"]
+pattern = '''Cinnamon\.get_file_contents_utf8_sync\s*\('''
+message = "This Cinnamon helper reads a file synchronously; prefer Gio.File.load_contents_async()."
+
+[[rules]]
+id = "ASYNC006"
+name = "Synchronous file metadata check"
+severity = "info"
+extensions = [".c", ".h", ".js", ".py", ".vala"]
+pattern = '''(g_file_test|GLib\.file_test)\s*\('''
+message = "This file-test helper performs synchronous filesystem access; consider handling errors from the operation itself when latency matters."

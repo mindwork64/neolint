@@ -18,6 +18,7 @@ pub mod config;
 pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
+pub mod patterns;
 pub mod semantic;
 
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};

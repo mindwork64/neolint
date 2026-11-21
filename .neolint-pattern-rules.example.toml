@@ -1,0 +1,11 @@
+[settings]
+max_findings_per_file = 10
+exclude_extensions = [".md", ".po", ".pot"]
+
+[[rules]]
+id = "SEC001"
+name = "Review shell=True subprocess calls"
+severity = "warning"
+extensions = [".py"]
+pattern = '''subprocess\.run\([^)]*shell\s*=\s*True'''
+message = "Review shell execution carefully; pass an argument array when possible."

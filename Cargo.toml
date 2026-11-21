@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
-description = "CLI-only linter for Linden Scripting Language (LSL)"
+description = "CLI-only LSL linter with an optional regex diff policy scanner"
 repository = "https://github.com/mindwork64/neolint"
 
 [[bin]]
@@ -16,6 +16,9 @@ name = "neolint"
 path = "src/lib.rs"
 
 [dependencies]
+fancy-regex = "0.14"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [build-dependencies]
 winres = "0.1"
