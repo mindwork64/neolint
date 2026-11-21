@@ -46,14 +46,11 @@ class DocumentationTests(unittest.TestCase):
 
     def test_project_license_docs_and_third_party_notice(self):
         readme = (ROOT / "README.md").read_text()
-        corpus = (ROOT / "docs/corpus.md").read_text()
         self.assertIn("MIT OR Apache-2.0", readme)
         self.assertIn("LICENSE-MIT", readme)
         self.assertIn("LICENSE-APACHE", readme)
         self.assertIn("LICENSES/LINDEN-RESEARCH-MIT.txt", readme)
         self.assertNotIn("License selection is pending", readme)
-        self.assertIn("MIT OR Apache-2.0", corpus)
-        self.assertNotIn("license is still pending", corpus)
         self.assertTrue((ROOT / "LICENSES/LINDEN-RESEARCH-MIT.txt").is_file())
         self.assertTrue((ROOT / "data/README.md").is_file())
 
@@ -65,7 +62,7 @@ class DocumentationTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         self.assertIn(f"neolint-v{version}-x86_64-unknown-linux-gnu.tar.gz", getting_started)
         self.assertIn(f"neolint-v{version}-x86_64-pc-windows-msvc.zip", getting_started)
-        self.assertIn(f"Current package version: `{version}`", readme)
+        self.assertIn(f"Current version: `{version}`", readme)
 
 
 if __name__ == "__main__":

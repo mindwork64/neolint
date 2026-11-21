@@ -113,13 +113,4 @@ cat hello.lsl | neolint -
 
 See [cli-reference.md](cli-reference.md) for every option and [configuration.md](configuration.md) for rule configuration.
 
-## Build from source
-
-Install stable Rust, then from the repository root:
-
-```sh
-cargo build --release
-./target/release/neolint --version
-```
-
 The package has no runtime dependencies. Normal linting reads vendored metadata and does not access the network.

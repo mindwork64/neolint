@@ -1,35 +1,9 @@
-# Vendored LSL definitions
+# Bundled LSL metadata
 
-## Built-in prototypes
+Neolint includes bundled definitions for canonical LSL functions, event handlers, constants, and deprecated functions. These definitions are based on the official [Second Life LSL definitions](https://github.com/secondlife/lsl-definitions) project.
 
-The file `lsl-builtins.txt` is copied from the official generated builtin prototype list:
+The bundled metadata is used to provide built-in signature checks and deprecation warnings. Normal linting uses the copy included with neolint and does not require a network connection.
 
-- Upstream: https://github.com/secondlife/lsl-definitions
-- Source path: `generated/builtins.txt`
-- Pinned upstream revision: `eb8354a3984ea31123ea3f69259ed99b9edb3f05`
-- Upstream blob SHA: `2c5735c774e88d9e6c93e15c92bd5b9ec9b432aa`
-- Snapshot date: 2026-11-20
+## License and attribution
 
-It contains prototypes for LSL functions, event handlers, and constants.
-
-## Deprecation metadata
-
-The file `lsl-deprecated.txt` lists functions whose canonical LSL definition has a `deprecated` property:
-
-- Upstream source: `lsl_definitions.yaml`
-- Pinned upstream revision: `eb8354a3984ea31123ea3f69259ed99b9edb3f05`
-- Extractor: `scripts/extract-lsl-deprecated.py`
-
-The extractor intentionally ignores `slua-deprecated`. It also does not export the upstream `use` hints because they may name SLua APIs and must not be presented as LSL replacements.
-
-## License and updates
-
-The upstream repository is distributed under the MIT License. See `LICENSES/LINDEN-RESEARCH-MIT.txt` and retain this attribution when redistributing the snapshots.
-
-Normal neolint execution reads checked-in snapshots and does not access the network. Updating both files is an explicit maintainer action:
-
-```sh
-bash scripts/update-lsl-builtins.sh
-```
-
-An optional 40-character upstream commit SHA can be passed to update both snapshots from the same revision.
+The upstream definitions are distributed under the MIT License. The applicable notice is included in [`LICENSES/LINDEN-RESEARCH-MIT.txt`](../LICENSES/LINDEN-RESEARCH-MIT.txt). This separate license applies to the bundled upstream data; neolint's own source code is available under MIT OR Apache-2.0.
