@@ -750,12 +750,19 @@ fn analyze_discarded_comparison_expressions(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let mut statement_start = 0usize;
+    let mut brace_depth = 0usize;
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
 
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
-            TokenKind::LBrace | TokenKind::RBrace => {
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                statement_start = index + 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                brace_depth = brace_depth.saturating_sub(1);
                 statement_start = index + 1;
                 continue;
             }
@@ -775,7 +782,7 @@ fn analyze_discarded_comparison_expressions(
                 bracket_depth = bracket_depth.saturating_sub(1);
                 continue;
             }
-            TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+            TokenKind::Semicolon if brace_depth > 0 && paren_depth == 0 && bracket_depth == 0 => {
                 if let Some(operator) =
                     discarded_comparison_operator(tokens, statement_start, index)
                 {
