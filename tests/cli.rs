@@ -41,6 +41,54 @@ fn unresolved_variable_warning_does_not_fail_cli_by_default() {
 }
 
 #[test]
+fn discarded_comparison_warning_does_not_fail_and_can_be_configured() {
+    let directory = temporary_directory();
+    let source = directory.join("discarded.lsl");
+    fs::write(
+        &source,
+        "default { state_entry() { integer a; integer b; a == b; } }",
+    )
+    .unwrap();
+
+    let default_output = neolint().arg(&source).output().unwrap();
+    assert!(default_output.status.success());
+    let default_stdout = String::from_utf8(default_output.stdout).unwrap();
+    assert!(
+        default_stdout.contains("warning[SEM023]"),
+        "{default_stdout}"
+    );
+
+    let escalated = neolint()
+        .arg("--severity")
+        .arg("SEM023=error")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(escalated.status.code(), Some(1));
+    let escalated_stdout = String::from_utf8(escalated.stdout).unwrap();
+    assert!(
+        escalated_stdout.contains("error[SEM023]"),
+        "{escalated_stdout}"
+    );
+
+    let disabled = neolint()
+        .arg("--disable")
+        .arg("SEM023")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(disabled.status.success());
+    let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
+    assert!(!disabled_stdout.contains("SEM023"), "{disabled_stdout}");
+    assert!(
+        disabled_stdout.contains("no diagnostics"),
+        "{disabled_stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn unresolved_variable_warning_can_be_escalated_or_disabled() {
     let directory = temporary_directory();
     let source = directory.join("unresolved.lsl");
