@@ -49,3 +49,4 @@ if ($first.code -ne "SEM020") {
 }
 
 Write-Output "release smoke: ok"
+exit 0
