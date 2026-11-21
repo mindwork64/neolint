@@ -1046,9 +1046,9 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
 /// Parse a token stream and return all syntax diagnostics.
 ///
 /// The input must include the lexer's final [`TokenKind::Eof`] sentinel. The
-/// parser never builds an AST and never panics on malformed input; recovery is
-/// bounded to delimiter-aware synchronization boundaries described in the
-/// grammar documentation.
+/// parser never builds an AST; recovery is bounded to delimiter-aware
+/// synchronization boundaries. Tested malformed input is handled without a
+/// panic, but extremely deep nesting remains a documented practical limitation.
 pub fn parse(tokens: &[Token]) -> Vec<Diagnostic> {
     Parser::new(tokens).run()
 }

@@ -7,7 +7,8 @@
 use crate::diagnostic::{Diagnostic, Severity};
 use std::collections::{HashMap, HashSet};
 
-/// Immutable rule configuration after parsing and command-line overrides.
+/// Rule configuration for disabling rules and overriding their severity.
+
 #[derive(Debug, Clone, Default)]
 pub struct LintConfig {
     disabled_rules: HashSet<String>,

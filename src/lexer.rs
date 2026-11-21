@@ -4,8 +4,8 @@
 //! offsets together with one-based line/column positions ([`Span`]), emits
 //! keyword, identifier, literal, punctuation, and operator tokens, and reports
 //! unterminated strings/comments and unsupported characters as lexical
-//! diagnostics. It never panics on malformed input; a lexical error is returned
-//! alongside the successfully recovered token stream.
+//! diagnostics. Malformed input is returned as diagnostics alongside the
+//! successfully recovered token stream rather than as a Rust error.
 //!
 //! Identifiers are intentionally ASCII-only. Unicode is accepted inside strings
 //! and comments, but an identifier such as `café` produces a lexical diagnostic.
@@ -579,8 +579,8 @@ fn is_identifier_continue(ch: char) -> bool {
 /// # Returns
 ///
 /// A token vector ending in [`TokenKind::Eof`] plus lexical diagnostics. Tokens
-/// recovered before an error are retained; the lexer does not panic on malformed
-/// input.
+/// recovered before an error are retained; lexical problems are returned as
+/// diagnostics rather than as a Rust error.
 ///
 /// # Errors
 ///
