@@ -18,7 +18,7 @@ No stable release has been published yet. Release assets are produced by the rel
 Download the archive matching the current package version and target:
 
 ```sh
-tar -xzf neolint-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf neolint-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
 chmod +x neolint
 ./neolint --version
 ```
@@ -41,7 +41,7 @@ neolint --version
 In PowerShell, from the directory containing the downloaded archive:
 
 ```powershell
-Expand-Archive .\neolint-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\neolint-v1.0.0-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\neolint.exe --version
 ```
 
@@ -61,14 +61,14 @@ Download the matching `.sha256` file alongside the archive.
 Linux:
 
 ```sh
-sha256sum -c neolint-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c neolint-v1.0.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 Windows PowerShell:
 
 ```powershell
-$expected = (Get-Content .\neolint-v0.1.0-x86_64-pc-windows-msvc.zip.sha256).Split()[0]
-(Get-FileHash .\neolint-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower() -eq $expected
+$expected = (Get-Content .\neolint-v1.0.0-x86_64-pc-windows-msvc.zip.sha256).Split()[0]
+(Get-FileHash .\neolint-v1.0.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower() -eq $expected
 ```
 
 The checksum file is generated after the archive and refers to the exact uploaded archive.
