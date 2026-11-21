@@ -34,5 +34,29 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("sha256", workflow.lower())
 
 
+    def test_project_dual_license_metadata_and_files(self):
+        cargo = (ROOT / "Cargo.toml").read_text()
+        self.assertIn('license = "MIT OR Apache-2.0"', cargo)
+        mit = (ROOT / "LICENSE-MIT").read_text()
+        apache = (ROOT / "LICENSE-APACHE").read_text()
+        self.assertIn("Copyright (c) 2026 mindwork64", mit)
+        self.assertIn("Permission is hereby granted", mit)
+        self.assertIn("Apache License", apache)
+        self.assertIn("Version 2.0", apache)
+
+    def test_project_license_docs_and_third_party_notice(self):
+        readme = (ROOT / "README.md").read_text()
+        corpus = (ROOT / "docs/corpus.md").read_text()
+        self.assertIn("MIT OR Apache-2.0", readme)
+        self.assertIn("LICENSE-MIT", readme)
+        self.assertIn("LICENSE-APACHE", readme)
+        self.assertIn("LICENSES/LINDEN-RESEARCH-MIT.txt", readme)
+        self.assertNotIn("License selection is pending", readme)
+        self.assertIn("MIT OR Apache-2.0", corpus)
+        self.assertNotIn("license is still pending", corpus)
+        self.assertTrue((ROOT / "LICENSES/LINDEN-RESEARCH-MIT.txt").is_file())
+        self.assertTrue((ROOT / "data/README.md").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
