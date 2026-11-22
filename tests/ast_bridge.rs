@@ -23,6 +23,9 @@ fn visit_type(ty: &Type, visit: &mut impl FnMut(Span)) {
 fn visit_declarator(declarator: &VariableDeclarator, visit: &mut impl FnMut(Span)) {
     visit(declarator.span);
     visit(declarator.name_span);
+    if let Some(error) = &declarator.name_error {
+        visit(error.span);
+    }
     if let Some(initializer) = &declarator.initializer {
         visit_expression(initializer, visit);
     }

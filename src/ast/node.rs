@@ -44,8 +44,10 @@ pub struct VariableDeclarator {
     pub span: Span,
     /// Variable name.
     pub name: String,
-    /// Name token span.
+    /// Name token span (the recovery location when the name is missing).
     pub name_span: Span,
+    /// Explicit missing-name error for a malformed declarator after a comma.
+    pub name_error: Option<ErrorNode>,
     /// Optional initializer.
     pub initializer: Option<Expression>,
     /// Explicit malformed initializer, when `=` was present but parsing failed.

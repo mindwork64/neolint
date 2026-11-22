@@ -3,11 +3,12 @@
 
 //! Core library for the CLI-only LSL linter.
 //!
-//! The crate exposes the lexical, syntactic, and conservative semantic pipeline
-//! without constructing a full AST. [`lex`] turns UTF-8 source into tokens and
-//! lexical diagnostics; [`parse`] validates the token stream and returns syntax
-//! diagnostics plus recovery information; [`analyze`] performs scope, type,
-//! control-flow, built-in, and state/event checks.
+//! The crate exposes the established lexical, syntactic, and conservative
+//! semantic pipeline alongside an independent typed AST parser. [`lex`] turns
+//! UTF-8 source into tokens and lexical diagnostics; [`parse`] validates the token
+//! stream and returns Legacy syntax diagnostics plus recovery information;
+//! [`parse_ast`] builds a typed syntax tree without replacing the Legacy path;
+//! [`analyze`] performs scope, type, control-flow, built-in, and state/event checks.
 //!
 //! Normal analysis is deterministic and offline. Unknown extension APIs,
 //! unresolved expressions, and unverified language behavior are deliberately

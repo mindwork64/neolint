@@ -167,7 +167,10 @@ impl<'a> Parser<'a> {
         declarators.push(self.declarator(name_index, pending_initializer));
         while self.matches(TokenKind::Comma) {
             if !self.expect(TokenKind::Identifier, "expected a variable name after ','") {
-                break;
+                let error_span = self.here_span();
+                self.synchronize_statement();
+                declarators.push(self.missing_declarator(error_span));
+                return declarators;
             }
             let name_index = self.current - 1;
             let mut initializer = None;
@@ -195,6 +198,20 @@ impl<'a> Parser<'a> {
         declarators
     }
 
+    fn missing_declarator(&self, error_span: Span) -> VariableDeclarator {
+        VariableDeclarator {
+            span: error_span,
+            name: String::new(),
+            name_span: error_span,
+            name_error: Some(ErrorNode {
+                span: error_span,
+                code: Some("PAR007"),
+            }),
+            initializer: None,
+            initializer_error: None,
+        }
+    }
+
     fn declarator(&self, name_index: usize, initializer: Option<Expression>) -> VariableDeclarator {
         let name_span = self.tokens[name_index].span;
         let end = initializer
@@ -217,6 +234,7 @@ impl<'a> Parser<'a> {
             },
             name: self.tokens[name_index].lexeme.clone(),
             name_span,
+            name_error: None,
             initializer,
             initializer_error: None,
         }

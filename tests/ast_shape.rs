@@ -503,3 +503,38 @@ fn malformed_global_initializers_preserve_error_declarators() {
     assert!(second.declarators[1].initializer.is_none());
     assert!(second.declarators[1].initializer_error.is_some());
 }
+
+
+#[test]
+fn missing_global_declarator_after_comma_is_preserved() {
+    let source = "integer first = 1, ; default { state_entry() { } }";
+    let (ast, diagnostics) = parse(source);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "PAR007"));
+
+    let TopLevel::Global(global) = &ast.items[0] else {
+        panic!("global")
+    };
+    assert_eq!(global.declarators.len(), 2);
+
+    let first = &global.declarators[0];
+    assert_eq!(first.name, "first");
+    assert!(first.name_error.is_none());
+    assert!(first.initializer.is_some());
+
+    let missing = &global.declarators[1];
+    assert_eq!(missing.name, "");
+    assert!(missing.initializer.is_none());
+    assert!(missing.initializer_error.is_none());
+    let error = missing
+        .name_error
+        .as_ref()
+        .expect("missing declarator name must be explicit");
+    assert_eq!(error.code, Some("PAR007"));
+    assert_eq!(
+        &source[error.span.start..error.span.end],
+        ";",
+        "the missing-name error should point at the unexpected delimiter"
+    );
+}
