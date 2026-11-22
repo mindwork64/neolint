@@ -84,7 +84,7 @@ impl<'a> Preprocessor<'a> {
             if !in_block_comment {
                 if let Some(hash) = directive_hash(self.text, position) {
                     let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
-                    let directive_span = RawSpan::new(self.source, line_start, end);
+                    let directive_span = directive_span(self.source, self.text, hash, end);
                     self.process_directive(line_start, hash, &mapped, directive_span);
                     self.last_directive_end = Some(end);
                     self.emit_last_newline(line_start, end);
@@ -97,7 +97,7 @@ impl<'a> Preprocessor<'a> {
                     self.append_direct(position, comment_end);
                 }
                 let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
-                let directive_span = RawSpan::new(self.source, comment_end, end);
+                let directive_span = directive_span(self.source, self.text, hash, end);
                 self.process_directive(comment_end, hash, &mapped, directive_span);
                 self.last_directive_end = Some(end);
                 self.emit_last_newline(comment_end, end);
@@ -276,11 +276,11 @@ impl<'a> Preprocessor<'a> {
         let rest = mapped.slice(position, text.len());
         match name {
             "define" => self.define(directive_span, &rest),
-            "undef" => self.undef(&rest, name_span),
+            "undef" => self.undef(&rest, directive_span),
             "if" => self.open_if(&rest, directive_span, name_span, ConditionalKind::If),
             "ifdef" => self.open_if(&rest, directive_span, name_span, ConditionalKind::Ifdef),
             "ifndef" => self.open_if(&rest, directive_span, name_span, ConditionalKind::Ifndef),
-            "elif" => self.elif(&rest, name_span),
+            "elif" => self.elif(&rest, name_span, directive_span),
             "else" => self.else_directive(name_span),
             "endif" => self.endif(name_span),
             "include" | "pragma" => {
@@ -363,7 +363,21 @@ impl<'a> Preprocessor<'a> {
                 .trim_start_matches(|ch: char| ch.is_whitespace())
                 .len();
         let replacement_text = replacement_text.slice(leading, replacement_text.text().len());
-        let pieces = tokenize_mapped(&replacement_text);
+        let mut pieces = tokenize_mapped(&replacement_text);
+        if let Some(first) = pieces
+            .iter()
+            .position(|piece| !matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment))
+        {
+            let last = pieces
+                .iter()
+                .rposition(|piece| {
+                    !matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment)
+                })
+                .unwrap_or(first);
+            pieces = pieces[first..=last].to_vec();
+        } else {
+            pieces.clear();
+        }
         for piece in &pieces {
             if piece.text == "#" || piece.text == "##" {
                 self.diags.push(
@@ -404,7 +418,7 @@ impl<'a> Preprocessor<'a> {
         }
     }
 
-    fn undef(&mut self, rest: &MappedText, name_span: RawSpan) {
+    fn undef(&mut self, rest: &MappedText, directive_span: RawSpan) {
         if !self.is_active() {
             return;
         }
@@ -416,7 +430,7 @@ impl<'a> Preprocessor<'a> {
                 self.diags.push(
                     PRE_INVALID_UNDEF,
                     "#undef requires exactly one identifier",
-                    name_span,
+                    directive_span,
                 );
             }
         }
@@ -458,11 +472,11 @@ impl<'a> Preprocessor<'a> {
         match kind {
             ConditionalKind::If => {
                 if parent_active {
-                    if rest.trimmed().0.is_empty() {
+                    if !has_expression_token(rest) {
                         self.diags.push_with_related(
                             PRE_MISSING_OPERAND,
                             "#if requires an expression",
-                            name_span,
+                            RawSpan::point(self.source, directive_span.end),
                             vec![RawRelated {
                                 span: directive_span,
                                 label: "conditional directive",
@@ -509,7 +523,7 @@ impl<'a> Preprocessor<'a> {
         });
     }
 
-    fn elif(&mut self, rest: &MappedText, name_span: RawSpan) {
+    fn elif(&mut self, rest: &MappedText, name_span: RawSpan, directive_span: RawSpan) {
         let Some(frame) = self.conditions.last_mut() else {
             self.diags.push(
                 PRE_ELIF_WITHOUT_IF,
@@ -531,13 +545,12 @@ impl<'a> Preprocessor<'a> {
             return;
         }
         let opening = frame.opening;
-        let (operand, _) = rest.trimmed();
         let mut active = false;
-        if operand.is_empty() {
+        if !has_expression_token(rest) {
             self.diags.push_with_related(
                 PRE_MISSING_OPERAND,
                 "#elif requires an expression",
-                name_span,
+                RawSpan::point(self.source, directive_span.end),
                 vec![RawRelated {
                     span: opening,
                     label: "conditional directive",
@@ -853,6 +866,16 @@ fn closing_comment_directive(text: &str, start: usize) -> Option<(usize, usize)>
     }
 }
 
+fn directive_span(source: SourceId, text: &str, start: usize, end: usize) -> RawSpan {
+    let mut content_end = end;
+    if text[start..end].ends_with("\r\n") {
+        content_end = end.saturating_sub(2);
+    } else if text[start..end].ends_with('\n') || text[start..end].ends_with('\r') {
+        content_end = end.saturating_sub(1);
+    }
+    RawSpan::new(source, start, content_end.max(start))
+}
+
 fn directive_hash(text: &str, start: usize) -> Option<usize> {
     let mut index = start;
     loop {
@@ -983,15 +1006,20 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
     }
     position += 1;
     let mut params = Vec::new();
+    let mut first_parameter = true;
     loop {
         skip_directive_space(text, &mut position);
         if position >= text.len() {
             return None;
         }
         if text[position..].starts_with(')') {
+            if !first_parameter {
+                return None;
+            }
             position += 1;
             break;
         }
+        first_parameter = false;
         if text[position..].starts_with("...") {
             return None;
         }
@@ -1019,6 +1047,10 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
         }
         if text[position..].starts_with(',') {
             position += 1;
+            skip_directive_space(text, &mut position);
+            if position >= text.len() || text[position..].starts_with(')') {
+                return None;
+            }
             continue;
         }
         if text[position..].starts_with(')') {
@@ -1051,6 +1083,12 @@ fn skip_directive_space(text: &str, position: &mut usize) {
         }
         break;
     }
+}
+
+fn has_expression_token(rest: &MappedText) -> bool {
+    tokenize_mapped(rest)
+        .iter()
+        .any(|piece| !matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment))
 }
 
 fn single_identifier(rest: &MappedText) -> Option<(String, RawSpan)> {
@@ -1298,7 +1336,7 @@ mod phase2_tests {
         let prepared = run("#if 1\nx\n");
         assert_eq!(codes(&prepared), vec!["PRE013"]);
         let diagnostic = &prepared.preprocess_diagnostics()[0];
-        assert_eq!(text_slice(&prepared, diagnostic.primary), "#if 1\n");
+        assert_eq!(text_slice(&prepared, diagnostic.primary), "#if 1");
         assert_eq!(diagnostic.related.len(), 1);
         assert_eq!(diagnostic.related[0].span.start(), "#if 1\nx\n".len());
     }
@@ -1316,7 +1354,7 @@ mod phase2_tests {
         assert!(resolved
             .related()
             .iter()
-            .any(|span| text_slice(&prepared, *span) == "#define VALUE 42\n"));
+            .any(|span| text_slice(&prepared, *span) == "#define VALUE 42"));
     }
 
     #[test]
@@ -2113,6 +2151,7 @@ mod phase2_diagnostic_code_tests {
         assert!(codes("#\n").contains(&"PRE002"));
         assert!(codes("#define\n").contains(&"PRE003"));
         assert!(codes("#define F(...) x\n").contains(&"PRE003"));
+        assert!(codes("#define F(a,) x\n").contains(&"PRE003"));
         assert!(codes("#undef\n").contains(&"PRE004"));
         assert!(codes("#undef X Y\n").contains(&"PRE004"));
         assert!(codes("#ifdef\n#endif\n").contains(&"PRE007"));
@@ -2157,5 +2196,93 @@ mod phase2_conditional_extra_tests {
         assert_eq!(prepared.text(), "\r\n1\r1\r\n");
         let prepared = run("#define X 1\rX\r");
         assert_eq!(prepared.text(), "\r1\r");
+    }
+}
+
+#[cfg(test)]
+mod phase2_directive_comment_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(916), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    #[test]
+    fn multiline_comment_inside_define_is_whitespace() {
+        let source = "#define X 1 /* multi\nline */\n#define Y /* multi\nline */ 2\nX Y\n";
+        let prepared = run(source);
+        assert_eq!(prepared.text(), "\n\n1 2\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn directive_inside_define_comment_is_not_processed() {
+        let source = "#define X 1 /*\n#define Y 2\n*/\nY\n";
+        let prepared = run(source);
+        assert_eq!(prepared.text(), "\nY\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod phase2_diagnostic_span_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(917), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    #[test]
+    fn empty_if_points_at_directive_end_and_related_opening() {
+        let prepared = run("  #if\n#endif\n");
+        let diagnostic = prepared
+            .preprocess_diagnostics()
+            .iter()
+            .find(|item| item.code == "PRE030")
+            .unwrap();
+        assert_eq!(diagnostic.primary.start(), diagnostic.primary.end());
+        assert_eq!(diagnostic.primary.start(), 5);
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].span.start(), 2);
+    }
+
+    #[test]
+    fn unknown_directive_primary_is_the_directive_without_newline() {
+        let prepared = run("  #bogus\n");
+        let diagnostic = &prepared.preprocess_diagnostics()[0];
+        let file = prepared.map().file(diagnostic.primary.source()).unwrap();
+        assert_eq!(
+            &file.text()[diagnostic.primary.start()..diagnostic.primary.end()],
+            "#bogus"
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase2_rendered_diagnostic_tests {
+    use super::*;
+    use crate::diagnostic::resolve::RenderedDiagnostic;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    #[test]
+    fn preprocess_diagnostics_render_through_the_matching_map() {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(918), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", "#if 1\nx\n").unwrap();
+        let prepared =
+            crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap();
+        let diagnostic = prepared.preprocess_diagnostics()[0].clone();
+        let rendered = RenderedDiagnostic::from_preprocess(diagnostic, &prepared).unwrap();
+        assert_eq!(rendered.diagnostic().span.start, 0);
+        assert_eq!(rendered.diagnostic().span.end, 5);
+        assert_eq!(rendered.related().len(), 1);
     }
 }

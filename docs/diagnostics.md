@@ -84,7 +84,7 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | `PRE027` | Checked `i64` arithmetic, literal, negation, division, or shift overflow. | The expression evaluates as false. |
 | `PRE028` | Invalid shift count (negative or at least 64) in an evaluated expression. | The expression evaluates as false. |
 | `PRE029` | Malformed decimal/octal/hexadecimal integer literal. | The literal is treated as zero so parsing can continue. |
-| `PRE030` | Missing `#if`/`#elif` expression or `defined` operand. | Related is the conditional opening where applicable. |
+| `PRE030` | Missing `#if`/`#elif` expression. | Primary is a zero-length point at the directive end; related is the conditional opening. |
 
 `PRE016` is intentionally unused; Phase 2 has no separate malformed-invocation
 class beyond `PRE015` and `PRE014`.

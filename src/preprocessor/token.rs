@@ -79,9 +79,11 @@ impl MappedText {
         };
         let mut run_start = start;
         let mut index = start;
+        let mut in_block_comment = false;
+        let mut in_line_comment = false;
+        let mut in_string = false;
         while index < source_text.len() {
-            let ch = source_text[index..].chars().next().unwrap_or('\0');
-            if ch == '\\' {
+            if source_text[index..].starts_with('\\') {
                 let after_backslash = index + 1;
                 let newline_len = newline_len_at(source_text, after_backslash);
                 if newline_len > 0 {
@@ -91,18 +93,60 @@ impl MappedText {
                     continue;
                 }
             }
-            if ch == '\n' {
-                mapped.push_run(source_text, run_start, index);
-                return (mapped, index + 1);
+            let ch = source_text[index..].chars().next().unwrap_or('\0');
+            if ch == '\n' || ch == '\r' {
+                if !in_block_comment {
+                    mapped.push_run(source_text, run_start, index);
+                    let len = if source_text[index..].starts_with("\r\n") {
+                        2
+                    } else {
+                        1
+                    };
+                    return (mapped, index + len);
+                }
+                index += ch.len_utf8();
+                continue;
             }
-            if ch == '\r' {
-                mapped.push_run(source_text, run_start, index);
-                let len = if source_text[index + 1..].starts_with('\n') {
-                    2
+            if in_block_comment {
+                if source_text[index..].starts_with("*/") {
+                    in_block_comment = false;
+                    index += 2;
                 } else {
-                    1
-                };
-                return (mapped, index + len);
+                    index += ch.len_utf8();
+                }
+                continue;
+            }
+            if in_line_comment {
+                index += ch.len_utf8();
+                continue;
+            }
+            if in_string {
+                if ch == '\\' {
+                    index += 1;
+                    if index < source_text.len() {
+                        let escaped = source_text[index..].chars().next().unwrap_or('\0');
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                index += ch.len_utf8();
+                continue;
+            }
+            if source_text[index..].starts_with("//") {
+                in_line_comment = true;
+                index += 2;
+                continue;
+            }
+            if source_text[index..].starts_with("/*") {
+                in_block_comment = true;
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
             }
             index += ch.len_utf8();
         }
