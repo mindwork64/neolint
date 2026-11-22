@@ -456,3 +456,50 @@ fn missing_function_and_event_bodies_are_explicitly_absent() {
     assert!(default.events[0].body.is_none());
     assert!(default.events[1].body.is_some());
 }
+
+#[test]
+fn missing_state_name_and_body_are_explicit() {
+    let (ast, diagnostics) = parse("default state_entry() { }");
+    assert!(!diagnostics.is_empty());
+    let TopLevel::State(default) = &ast.items[0] else {
+        panic!("state")
+    };
+    assert!(!default.name_missing);
+    assert!(default.body_missing);
+    assert!(default.events.is_empty());
+
+    let (ast, diagnostics) = parse("state ;");
+    assert!(!diagnostics.is_empty());
+    let TopLevel::State(state) = &ast.items[0] else {
+        panic!("state")
+    };
+    assert!(state.name_missing);
+    assert_eq!(state.name, "");
+    assert!(state.body_missing);
+    assert!(state.events.is_empty());
+}
+
+#[test]
+fn malformed_global_initializers_preserve_error_declarators() {
+    let (ast, diagnostics) =
+        parse("integer value = ; integer first = 1, second = ; default { state_entry() { } }");
+    assert!(!diagnostics.is_empty());
+    let TopLevel::Global(first) = &ast.items[0] else {
+        panic!("global")
+    };
+    assert_eq!(first.declarators.len(), 1);
+    assert_eq!(first.declarators[0].name, "value");
+    assert!(first.declarators[0].initializer.is_none());
+    assert!(first.declarators[0].initializer_error.is_some());
+
+    let TopLevel::Global(second) = &ast.items[1] else {
+        panic!("global")
+    };
+    assert_eq!(second.declarators.len(), 2);
+    assert_eq!(second.declarators[0].name, "first");
+    assert!(second.declarators[0].initializer.is_some());
+    assert!(second.declarators[0].initializer_error.is_none());
+    assert_eq!(second.declarators[1].name, "second");
+    assert!(second.declarators[1].initializer.is_none());
+    assert!(second.declarators[1].initializer_error.is_some());
+}

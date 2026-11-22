@@ -152,8 +152,15 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::Equal) {
             pending_initializer = self.parse_expression(1);
             if pending_initializer.is_none() {
+                let error_span = self.here_span();
                 self.synchronize_statement();
-                declarators.push(self.declarator(name_index, None));
+                let mut declarator = self.declarator(name_index, None);
+                declarator.initializer_error = Some(ErrorNode {
+                    span: error_span,
+                    code: Some("PAR006"),
+                });
+                declarator.span = join_spans(declarator.span, error_span);
+                declarators.push(declarator);
                 return declarators;
             }
         }
@@ -167,7 +174,15 @@ impl<'a> Parser<'a> {
             if self.matches(TokenKind::Equal) {
                 initializer = self.parse_expression(1);
                 if initializer.is_none() {
+                    let error_span = self.here_span();
                     self.synchronize_statement();
+                    let mut declarator = self.declarator(name_index, None);
+                    declarator.initializer_error = Some(ErrorNode {
+                        span: error_span,
+                        code: Some("PAR006"),
+                    });
+                    declarator.span = join_spans(declarator.span, error_span);
+                    declarators.push(declarator);
                     return declarators;
                 }
             }
@@ -203,6 +218,7 @@ impl<'a> Parser<'a> {
             name: self.tokens[name_index].lexeme.clone(),
             name_span,
             initializer,
+            initializer_error: None,
         }
     }
 
@@ -262,7 +278,7 @@ impl<'a> Parser<'a> {
                 let index = self.current - 1;
                 (self.tokens[index].lexeme.clone(), self.tokens[index].span)
             } else {
-                ("<missing>".to_owned(), self.here_span())
+                (String::new(), self.here_span())
             }
         };
 
@@ -309,11 +325,14 @@ impl<'a> Parser<'a> {
         if has_body {
             self.expect(TokenKind::RBrace, "expected '}' after state body");
         }
+        let name_missing = name.is_empty();
         StateDeclaration {
             span: self.span_from(start, self.current),
             name,
             name_span,
+            name_missing,
             is_default,
+            body_missing: !has_body,
             events,
         }
     }
@@ -1257,7 +1276,10 @@ impl<'a> Parser<'a> {
         let mut brace_depth = 0usize;
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
+        let mut do_seen = false;
         while !self.at_end() {
+            let continuation = self.peek_kind_at(1) == TokenKind::KwElse
+                || (do_seen && self.peek_kind_at(1) == TokenKind::KwWhile);
             match self.peek_kind() {
                 TokenKind::RBrace if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
                     return;
@@ -1266,7 +1288,7 @@ impl<'a> Parser<'a> {
                 TokenKind::RBrace => {
                     brace_depth = brace_depth.saturating_sub(1);
                     self.advance();
-                    if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && !continuation {
                         return;
                     }
                     continue;
@@ -1275,11 +1297,15 @@ impl<'a> Parser<'a> {
                 TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
                 TokenKind::LBracket => bracket_depth += 1,
                 TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::KwDo => do_seen = true,
                 TokenKind::Semicolon
                     if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 =>
                 {
                     self.advance();
-                    return;
+                    if !continuation {
+                        return;
+                    }
+                    continue;
                 }
                 _ => {}
             }

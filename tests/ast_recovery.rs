@@ -302,15 +302,6 @@ fn non_block_recursion_overflow_skips_one_complete_control_statement() {
     );
     for source in [if_source, while_source, for_source] {
         let (ast, diagnostics) = parse(&source);
-        println!(
-            "DEBUG first={:?} count={}",
-            diagnostics
-                .iter()
-                .take(3)
-                .map(|d| (d.code, d.span.start))
-                .collect::<Vec<_>>(),
-            diagnostics.len()
-        );
         assert_eq!(
             diagnostics
                 .iter()
@@ -331,5 +322,60 @@ fn non_block_recursion_overflow_skips_one_complete_control_statement() {
             panic!("state")
         };
         assert!(local_names(default.events[0].body.as_ref().unwrap()).contains(&"later"));
+    }
+}
+
+#[test]
+fn recursion_skip_consumes_whole_if_else_and_do_while() {
+    let depth = MAX_AST_RECURSION_DEPTH + 20;
+    let mut if_else = String::new();
+    for _ in 0..depth {
+        if_else.push_str("if (1) { ");
+    }
+    if_else.push_str("; ");
+    for _ in 0..depth {
+        if_else.push_str("} else { ; } ");
+    }
+    let if_source = format!("default {{ state_entry() {{ {if_else} integer later = 1; }} }}");
+
+    let mut do_while = String::new();
+    for _ in 0..depth {
+        do_while.push_str("do { ");
+    }
+    do_while.push_str("; ");
+    for _ in 0..depth {
+        do_while.push_str("} while (1); ");
+    }
+    let do_source = format!("default {{ state_entry() {{ {do_while} integer later = 1; }} }}");
+
+    for source in [if_source, do_source] {
+        let (ast, diagnostics) = parse(&source);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == AST_RECURSION_LIMIT)
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code != AST_RECURSION_LIMIT)
+                .count(),
+            0,
+            "secondary diagnostics after control skip: {diagnostics:?}"
+        );
+        let TopLevel::State(default) = &ast.items[0] else {
+            panic!("state")
+        };
+        assert!(local_names(default.events[0].body.as_ref().unwrap()).contains(&"later"));
+        let body = default.events[0].body.as_ref().unwrap();
+        assert!(!body.statements.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                StatementKind::While(_) | StatementKind::If(_)
+            ) && statement.span.start > body.statements.last().unwrap().span.start
+        }));
     }
 }

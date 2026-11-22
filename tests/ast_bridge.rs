@@ -26,6 +26,9 @@ fn visit_declarator(declarator: &VariableDeclarator, visit: &mut impl FnMut(Span
     if let Some(initializer) = &declarator.initializer {
         visit_expression(initializer, visit);
     }
+    if let Some(error) = &declarator.initializer_error {
+        visit(error.span);
+    }
 }
 
 fn visit_block(block: &Block, visit: &mut impl FnMut(Span)) {

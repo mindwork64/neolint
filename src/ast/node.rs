@@ -48,6 +48,8 @@ pub struct VariableDeclarator {
     pub name_span: Span,
     /// Optional initializer.
     pub initializer: Option<Expression>,
+    /// Explicit malformed initializer, when `=` was present but parsing failed.
+    pub initializer_error: Option<ErrorNode>,
 }
 
 /// User-defined function declaration.
@@ -89,8 +91,12 @@ pub struct StateDeclaration {
     pub name: String,
     /// State name/token span.
     pub name_span: Span,
+    /// Whether the state name was missing.
+    pub name_missing: bool,
     /// Whether this is the default state.
     pub is_default: bool,
+    /// Whether the opening state-body brace was missing.
+    pub body_missing: bool,
     /// Event handlers in source order.
     pub events: Vec<EventHandler>,
 }
