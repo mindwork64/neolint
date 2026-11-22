@@ -55,5 +55,8 @@ AST engine yet.
   present, matching Legacy `collect_user_functions` requiring `{` after the
   parameter list.
 - Malformed event parameter lists preserve a recoverable `EventHandler` with its
-  brace-complete body for AST scopes/SEM020/SEM007. Syntax findings inside that
-  skipped body are suppressed so Legacy parser diagnostic parity is unchanged.
+  brace-complete body for AST scopes/SEM020/SEM007. Valid `type + identifier`
+  parameters across the full bounded parameter range are recovered, matching
+  Legacy `register_parameters`. Syntax findings inside the skipped body are
+  suppressed, and suppressed EOF errors do not set the parser's EOF latch, so
+  Legacy parser diagnostic parity remains unchanged.

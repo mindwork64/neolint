@@ -142,6 +142,7 @@ fn focused_structural_rule_parity() {
         "default state_entry() { }",
         "integer phantom()\ndefault { }\nstate phantom { }",
         "default { state_entry(integer) { integer local; integer local; } state_entry() { } }",
+        "default { state_entry(bad, integer value) { integer value; } state_entry() { } }",
     ] {
         assert_parity(source);
     }
@@ -481,4 +482,61 @@ fn malformed_event_parameters_keep_event_body_semantics() {
         "{diagnostics:?}"
     );
     assert_parity(source);
+}
+
+#[test]
+fn malformed_parameter_recovery_keeps_later_valid_parameters() {
+    let source = "default { state_entry(bad, integer value) { integer value; } state_entry() { } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    let state = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::State(state) = item {
+                Some(state)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(state.events.len(), 2);
+    assert_eq!(state.events[0].parameters.len(), 1);
+    assert_eq!(state.events[0].parameters[0].name, "value");
+    assert_eq!(
+        state.events[0].parameters[0].ty.kind,
+        neolint::ast::TypeKind::Integer
+    );
+    assert!(state.events[0].body.is_some());
+
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM007")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM020")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn suppressed_eof_does_not_hide_the_outer_state_error() {
+    let source = "default {\n    state_entry(integer) {\n";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let legacy = parse_legacy(&tokens);
+    let (_, ast) = parse_ast(&tokens);
+    assert_eq!(normalize(&legacy), normalize(&ast));
+    assert!(ast.iter().any(|diagnostic| diagnostic.code == "PAR007"));
 }

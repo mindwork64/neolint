@@ -326,6 +326,7 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokenKind::LParen, "expected '(' after event name") {
                         self.synchronize_event();
                     } else {
+                        let parameter_open = self.current - 1;
                         let (parameters, ok) = self.parse_parameters();
                         if ok {
                             let body = self.parse_block();
@@ -337,6 +338,7 @@ impl<'a> Parser<'a> {
                                 body,
                             });
                         } else if let Some(close) = self.event_parameter_close_before_body() {
+                            let parameters = self.recover_parameters(parameter_open, close);
                             while self.current <= close {
                                 self.advance();
                             }
@@ -1644,7 +1646,7 @@ impl<'a> Parser<'a> {
         }
         let span = self.here_span();
         self.push_error(code, message, span);
-        if self.at_end() {
+        if self.at_end() && self.suppress_diagnostics == 0 {
             self.eof_reported = true;
         }
     }
@@ -1747,6 +1749,36 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    fn recover_parameters(&self, open: usize, close: usize) -> Vec<Parameter> {
+        let mut parameters = Vec::new();
+        let mut index = open.saturating_add(1);
+        while index < close {
+            let Some(ty_kind) = type_kind(self.tokens[index].kind) else {
+                index += 1;
+                continue;
+            };
+            let Some(name) = self.tokens.get(index + 1) else {
+                break;
+            };
+            if name.kind != TokenKind::Identifier || index + 1 >= close {
+                index += 1;
+                continue;
+            }
+            let ty = Type {
+                kind: ty_kind,
+                span: self.tokens[index].span,
+            };
+            parameters.push(Parameter {
+                span: join_spans(ty.span, name.span),
+                ty,
+                name: name.lexeme.clone(),
+                name_span: name.span,
+            });
+            index += 2;
+        }
+        parameters
     }
 
     fn event_parameter_close_before_body(&self) -> Option<usize> {
