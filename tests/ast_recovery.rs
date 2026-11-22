@@ -72,7 +72,7 @@ fn malformed_statement_keeps_later_independent_statement() {
     let TopLevel::State(default) = &ast.items[0] else {
         panic!("state")
     };
-    let body = &default.events[0].body;
+    let body = default.events[0].body.as_ref().unwrap();
     assert!(body
         .statements
         .iter()
@@ -95,6 +95,8 @@ fn malformed_expression_keeps_later_events_and_statements() {
     assert_eq!(
         default.events[1]
             .body
+            .as_ref()
+            .unwrap()
             .statements
             .iter()
             .filter(|statement| matches!(statement.kind, StatementKind::Local(_)))
@@ -158,7 +160,7 @@ fn assert_depth_boundary(source: String, expect_limit: bool) {
     let TopLevel::State(default) = &ast.items[0] else {
         panic!("state")
     };
-    let body = &default.events[0].body;
+    let body = default.events[0].body.as_ref().unwrap();
     assert!(local_names(body).contains(&"later"));
 }
 
@@ -191,7 +193,7 @@ fn extreme_expression_depth_reports_once_and_continues() {
     let TopLevel::State(default) = &ast.items[0] else {
         panic!("state")
     };
-    assert!(local_names(&default.events[0].body).contains(&"later"));
+    assert!(local_names(default.events[0].body.as_ref().unwrap()).contains(&"later"));
 }
 
 #[test]
@@ -230,10 +232,104 @@ fn recovered_expression_nodes_are_explicit_errors() {
     let TopLevel::State(default) = &ast.items[0] else {
         panic!("state")
     };
-    let body = &default.events[0].body;
+    let body = default.events[0].body.as_ref().unwrap();
     assert!(body
         .statements
         .iter()
         .any(|statement| matches!(statement.kind, StatementKind::Error(_))));
     assert!(local_names(body).contains(&"later"));
+}
+
+#[test]
+fn missing_statement_identifiers_become_errors_not_punctuation() {
+    let (ast, diagnostics) = parse("default { state_entry() { jump ; state ; @; } }");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "PAR007")
+            .count(),
+        3
+    );
+    let TopLevel::State(default) = &ast.items[0] else {
+        panic!("state")
+    };
+    let statements = &default.events[0].body.as_ref().unwrap().statements;
+    assert_eq!(statements.len(), 3);
+    for statement in statements {
+        assert!(matches!(statement.kind, StatementKind::Error(_)));
+    }
+    assert!(!statements.iter().any(|statement| {
+        matches!(
+            &statement.kind,
+            StatementKind::Jump(jump) if jump.label == ";"
+        ) || matches!(
+            &statement.kind,
+            StatementKind::StateChange(change) if change.state == ";"
+        ) || matches!(
+            &statement.kind,
+            StatementKind::Label(label) if label.name == ";"
+        )
+    }));
+}
+
+#[test]
+fn missing_local_declarator_is_an_explicit_error() {
+    let (ast, diagnostics) = parse("default { state_entry() { integer ; integer later = 1; } }");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "PAR007"));
+    let TopLevel::State(default) = &ast.items[0] else {
+        panic!("state")
+    };
+    let body = default.events[0].body.as_ref().unwrap();
+    assert!(matches!(body.statements[0].kind, StatementKind::Error(_)));
+    assert!(local_names(body).contains(&"later"));
+}
+
+#[test]
+fn non_block_recursion_overflow_skips_one_complete_control_statement() {
+    let if_source = format!(
+        "default {{ state_entry() {{ {}; integer later = 1; }} }}",
+        "if (1) ".repeat(MAX_AST_RECURSION_DEPTH + 20)
+    );
+    let while_source = format!(
+        "default {{ state_entry() {{ {}; integer later = 1; }} }}",
+        "while (1) ".repeat(MAX_AST_RECURSION_DEPTH + 20)
+    );
+    let for_source = format!(
+        "default {{ state_entry() {{ {}; integer later = 1; }} }}",
+        "for (;1;) ".repeat(MAX_AST_RECURSION_DEPTH + 20)
+    );
+    for source in [if_source, while_source, for_source] {
+        let (ast, diagnostics) = parse(&source);
+        println!(
+            "DEBUG first={:?} count={}",
+            diagnostics
+                .iter()
+                .take(3)
+                .map(|d| (d.code, d.span.start))
+                .collect::<Vec<_>>(),
+            diagnostics.len()
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == AST_RECURSION_LIMIT)
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code != AST_RECURSION_LIMIT)
+                .count(),
+            0,
+            "secondary diagnostics after bounded skip: {diagnostics:?}"
+        );
+        let TopLevel::State(default) = &ast.items[0] else {
+            panic!("state")
+        };
+        assert!(local_names(default.events[0].body.as_ref().unwrap()).contains(&"later"));
+    }
 }

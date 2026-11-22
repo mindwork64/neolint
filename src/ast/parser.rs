@@ -14,6 +14,8 @@ pub const MAX_AST_RECURSION_DEPTH: usize = 256;
 
 /// Stable recursion-limit diagnostic code.
 pub const AST_RECURSION_LIMIT: &str = "AST001";
+/// Stable safe-failure diagnostic code when the parser worker cannot run.
+pub const AST_WORKER_UNAVAILABLE: &str = "AST002";
 
 struct Parser<'a> {
     tokens: &'a [Token],
@@ -316,13 +318,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_block(&mut self) -> Block {
+    fn parse_block(&mut self) -> Option<Block> {
         let start = self.current;
         if !self.expect(TokenKind::LBrace, "expected '{' to begin block") {
-            return Block {
-                span: self.span_from(start, self.current),
-                statements: Vec::new(),
-            };
+            return None;
         }
         let mut statements = Vec::new();
         while !self.at_end() && !self.check(TokenKind::RBrace) {
@@ -335,10 +334,10 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RBrace, "expected '}' after block");
-        Block {
+        Some(Block {
             span: self.span_from(start, self.current),
             statements,
-        }
+        })
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
@@ -366,8 +365,10 @@ impl<'a> Parser<'a> {
             return Some(self.statement(start, StatementKind::Empty));
         }
         if self.check(TokenKind::LBrace) {
-            let block = self.parse_block();
-            return Some(self.statement(start, StatementKind::Block(block)));
+            return match self.parse_block() {
+                Some(block) => Some(self.statement(start, StatementKind::Block(block))),
+                None => Some(self.error_statement_code(start, "PAR007")),
+            };
         }
         if self.matches(TokenKind::KwIf) {
             return Some(self.parse_if_statement(start));
@@ -404,11 +405,14 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::KwJump) {
             let label_index =
                 if self.expect(TokenKind::Identifier, "expected a label name after 'jump'") {
-                    self.current - 1
+                    Some(self.current - 1)
                 } else {
-                    self.current
+                    None
                 };
             self.expect(TokenKind::Semicolon, "expected ';' after jump statement");
+            let Some(label_index) = label_index else {
+                return Some(self.error_statement_code(start, "PAR007"));
+            };
             let label_span = self.token_span(label_index);
             return Some(self.statement(
                 start,
@@ -422,12 +426,15 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::KwState) {
             let name_index =
                 if self.matches(TokenKind::Identifier) || self.matches(TokenKind::KwDefault) {
-                    self.current - 1
+                    Some(self.current - 1)
                 } else {
                     self.error_here("PAR007", "expected a state name after 'state'");
-                    self.current
+                    None
                 };
             self.expect(TokenKind::Semicolon, "expected ';' after state change");
+            let Some(name_index) = name_index else {
+                return Some(self.error_statement_code(start, "PAR007"));
+            };
             let state_span = self.token_span(name_index);
             return Some(self.statement(
                 start,
@@ -441,11 +448,14 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::At) {
             let name_index =
                 if self.expect(TokenKind::Identifier, "expected a label name after '@'") {
-                    self.current - 1
+                    Some(self.current - 1)
                 } else {
-                    self.current
+                    None
                 };
             self.expect(TokenKind::Semicolon, "expected ';' after label");
+            let Some(name_index) = name_index else {
+                return Some(self.error_statement_code(start, "PAR007"));
+            };
             let name_span = self.token_span(name_index);
             return Some(self.statement(
                 start,
@@ -636,6 +646,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let missing_name = name_index.is_none();
         let mut initializer = None;
         if self.matches(TokenKind::Equal) {
             initializer = self.parse_expression(1);
@@ -663,6 +674,9 @@ impl<'a> Parser<'a> {
             declarators.push(self.declarator(index, initializer));
         }
         self.expect(TokenKind::Semicolon, "expected ';' after local declaration");
+        if missing_name {
+            return self.error_statement_code(start, "PAR007");
+        }
         self.statement(
             start,
             StatementKind::Local(LocalVariableDeclaration {
@@ -861,7 +875,8 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let component_index = self.current - 1;
-                let component = component.unwrap_or(Component::X);
+                let component = component.unwrap_or(Component::Unknown);
+                let component_name = self.tokens[component_index].lexeme.clone();
                 let span = join_spans(expression.span, self.tokens[component_index].span);
                 expression = Expression {
                     span,
@@ -869,6 +884,7 @@ impl<'a> Parser<'a> {
                         span,
                         base: Box::new(expression),
                         component,
+                        component_name,
                         component_span: self.tokens[component_index].span,
                     }),
                 };
@@ -1183,10 +1199,17 @@ impl<'a> Parser<'a> {
     }
 
     fn error_statement(&self, start: usize) -> Statement {
+        self.error_statement_code(start, "PAR007")
+    }
+
+    fn error_statement_code(&self, start: usize, code: &'static str) -> Statement {
         let span = self.span_from(start, self.current);
         Statement {
             span,
-            kind: StatementKind::Error(ErrorNode { span, code: None }),
+            kind: StatementKind::Error(ErrorNode {
+                span,
+                code: Some(code),
+            }),
         }
     }
 
@@ -1231,26 +1254,35 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_deep_statement(&mut self) {
-        if self.check(TokenKind::LBrace) {
-            let mut depth = 0usize;
-            while !self.at_end() {
-                match self.peek_kind() {
-                    TokenKind::LBrace => depth += 1,
-                    TokenKind::RBrace => {
-                        depth = depth.saturating_sub(1);
-                        self.advance();
-                        if depth == 0 {
-                            return;
-                        }
-                        continue;
-                    }
-                    _ => {}
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            match self.peek_kind() {
+                TokenKind::RBrace if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                    return;
                 }
-                self.advance();
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    self.advance();
+                    if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                        return;
+                    }
+                    continue;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::Semicolon
+                    if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 =>
+                {
+                    self.advance();
+                    return;
+                }
+                _ => {}
             }
-            return;
-        }
-        if !self.at_end() {
             self.advance();
         }
     }
@@ -1693,9 +1725,69 @@ pub fn parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>) {
         match worker {
             Ok(handle) => match handle.join() {
                 Ok(result) => result,
-                Err(payload) => std::panic::resume_unwind(payload),
+                Err(_) => {
+                    worker_failure_result(tokens, "AST parser worker terminated unexpectedly")
+                }
             },
-            Err(_) => Parser::new(tokens).run(),
+            Err(_) => worker_failure_result(tokens, "AST parser worker stack could not be created"),
         }
     })
+}
+
+fn worker_failure_result(tokens: &[Token], reason: &str) -> (Ast, Vec<Diagnostic>) {
+    let span = tokens
+        .iter()
+        .find(|token| token.kind != TokenKind::Eof)
+        .or_else(|| tokens.last())
+        .map_or(
+            Span {
+                start: 0,
+                end: 0,
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 1,
+            },
+            |token| token.span,
+        );
+    (
+        Ast {
+            items: Vec::new(),
+            span,
+        },
+        vec![Diagnostic {
+            code: AST_WORKER_UNAVAILABLE,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Syntax,
+            message: format!("{reason}; parsing was aborted safely"),
+            span,
+        }],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_failure_returns_empty_ast_and_one_safe_diagnostic() {
+        let tokens = vec![Token {
+            kind: TokenKind::Eof,
+            lexeme: String::new(),
+            span: Span {
+                start: 3,
+                end: 3,
+                line: 1,
+                column: 4,
+                end_line: 1,
+                end_column: 4,
+            },
+        }];
+        let (ast, diagnostics) = worker_failure_result(&tokens, "worker unavailable");
+        assert!(ast.items.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, AST_WORKER_UNAVAILABLE);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::Syntax);
+    }
 }

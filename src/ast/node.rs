@@ -63,8 +63,8 @@ pub struct FunctionDeclaration {
     pub name_span: Span,
     /// Formal parameters.
     pub parameters: Vec<Parameter>,
-    /// Function body.
-    pub body: Block,
+    /// Function body; `None` when the opening block delimiter is missing.
+    pub body: Option<Block>,
 }
 
 /// Function or event parameter.
@@ -106,8 +106,8 @@ pub struct EventHandler {
     pub name_span: Span,
     /// Event parameters.
     pub parameters: Vec<Parameter>,
-    /// Handler body.
-    pub body: Block,
+    /// Handler body; `None` when the opening block delimiter is missing.
+    pub body: Option<Block>,
 }
 
 /// Braced statement block.
@@ -402,6 +402,8 @@ pub enum Component {
     Z,
     /// `.s`
     S,
+    /// Unrecognized component spelling, preserved in `component_name`.
+    Unknown,
 }
 
 /// Component access.
@@ -411,8 +413,10 @@ pub struct ComponentAccessExpression {
     pub span: Span,
     /// Base expression.
     pub base: Box<Expression>,
-    /// Selected component.
+    /// Selected component, or `Unknown` for an invalid spelling.
     pub component: Component,
+    /// Original component spelling, including invalid names.
+    pub component_name: String,
     /// Component name span.
     pub component_span: Span,
 }

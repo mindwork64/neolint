@@ -17,7 +17,7 @@ fn clean(source: &str) -> Ast {
 }
 
 fn event_body(state: &neolint::ast::StateDeclaration, index: usize) -> &neolint::ast::Block {
-    &state.events[index].body
+    state.events[index].body.as_ref().unwrap()
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn declarations_parameters_states_and_events_have_typed_shape() {
     assert_eq!(function.parameters.len(), 2);
     assert_eq!(function.parameters[0].ty.kind, TypeKind::Float);
     assert_eq!(function.parameters[1].name, "right");
-    assert_eq!(function.body.statements.len(), 1);
+    assert_eq!(function.body.as_ref().unwrap().statements.len(), 1);
 
     let TopLevel::Function(function) = &ast.items[2] else {
         panic!("untyped")
@@ -284,7 +284,7 @@ fn expression_categories_and_operator_kinds_are_typed() {
     let TopLevel::Function(helper) = &ast.items[0] else {
         panic!("helper")
     };
-    let StatementKind::Return(ret) = &helper.body.statements[0].kind else {
+    let StatementKind::Return(ret) = &helper.body.as_ref().unwrap().statements[0].kind else {
         panic!("return")
     };
     let ret = ret.value.as_ref().unwrap();
@@ -407,4 +407,52 @@ fn multi_declarator_initializers_bind_to_the_right_names() {
     };
     assert_eq!(first.name, "other");
     assert_eq!(second.name, "first");
+}
+
+#[test]
+fn invalid_component_keeps_unknown_kind_and_spelling() {
+    let (ast, diagnostics) = parse("vector value; default { state_entry() { value.w = 1.0; } }");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "PAR012"));
+    let TopLevel::State(default) = &ast.items[1] else {
+        panic!("state")
+    };
+    let StatementKind::Expression(statement) =
+        &default.events[0].body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expression")
+    };
+    let ExpressionKind::Assignment(assignment) = &statement.expression.kind else {
+        panic!("assignment")
+    };
+    let ExpressionKind::Component(access) = &assignment.target.kind else {
+        panic!("component")
+    };
+    assert_eq!(access.component, Component::Unknown);
+    assert_eq!(access.component_name, "w");
+}
+
+#[test]
+fn missing_function_and_event_bodies_are_explicitly_absent() {
+    let (ast, diagnostics) = parse("integer broken() default { state_entry() { } }");
+    assert!(!diagnostics.is_empty());
+    let TopLevel::Function(function) = &ast.items[0] else {
+        panic!("function")
+    };
+    assert!(function.body.is_none());
+    assert!(ast
+        .items
+        .iter()
+        .any(|item| matches!(item, TopLevel::State(_))));
+
+    let (ast, diagnostics) =
+        parse("default { state_entry() touch_start(integer n) { integer later; } }");
+    assert!(!diagnostics.is_empty());
+    let TopLevel::State(default) = &ast.items[0] else {
+        panic!("state")
+    };
+    assert_eq!(default.events.len(), 2);
+    assert!(default.events[0].body.is_none());
+    assert!(default.events[1].body.is_some());
 }
