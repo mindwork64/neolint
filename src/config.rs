@@ -5,7 +5,9 @@
 //! are applied afterward by the binary. Parsing and validation return human
 //! readable errors so the CLI can exit with code 2 without panicking.
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::preprocessor::PreprocessDialect;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// Rule configuration for disabling rules and overriding their severity.
 
@@ -13,6 +15,9 @@ use std::collections::{HashMap, HashSet};
 pub struct LintConfig {
     disabled_rules: HashSet<String>,
     severity_overrides: HashMap<String, Severity>,
+    preprocess: bool,
+    dialect: PreprocessDialect,
+    include_dirs: Vec<PathBuf>,
 }
 
 impl LintConfig {
@@ -72,6 +77,43 @@ impl LintConfig {
                 continue;
             }
 
+            if key == "preprocess" {
+                config.preprocess = match value {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(format!(
+                            "line {line_number}: invalid preprocess value '{value}' (expected true or false)"
+                        ))
+                    }
+                };
+                continue;
+            }
+
+            if key == "dialect" {
+                config.dialect = match value {
+                    "lsl" => PreprocessDialect::Lsl,
+                    "firestorm" => {
+                        config.preprocess = true;
+                        PreprocessDialect::Firestorm
+                    }
+                    _ => {
+                        return Err(format!(
+                        "line {line_number}: invalid dialect '{value}' (expected lsl or firestorm)"
+                    ))
+                    }
+                };
+                continue;
+            }
+
+            if key == "include_dir" {
+                if value.is_empty() {
+                    return Err(format!("line {line_number}: include_dir requires a path"));
+                }
+                config.include_dirs.push(PathBuf::from(value));
+                continue;
+            }
+
             return Err(format!("line {line_number}: unknown setting '{key}'"));
         }
 
@@ -101,6 +143,39 @@ impl LintConfig {
         validate_rule_code(rule)?;
         self.severity_overrides.insert(rule.to_owned(), severity);
         Ok(())
+    }
+
+    /// Whether preprocessing was requested by the configuration file.
+    pub fn preprocess_enabled(&self) -> bool {
+        self.preprocess
+    }
+
+    /// Configured preprocessing dialect.
+    pub fn dialect(&self) -> PreprocessDialect {
+        self.dialect
+    }
+
+    /// Configured include directories, in file order.
+    pub fn include_dirs(&self) -> &[PathBuf] {
+        &self.include_dirs
+    }
+
+    /// Enable or disable preprocessing (CLI override).
+    pub fn set_preprocess(&mut self, enabled: bool) {
+        self.preprocess = enabled;
+    }
+
+    /// Override the dialect (CLI override).
+    pub fn set_dialect(&mut self, dialect: PreprocessDialect) {
+        self.dialect = dialect;
+        if dialect == PreprocessDialect::Firestorm {
+            self.preprocess = true;
+        }
+    }
+
+    /// Replace the include-directory list (CLI override).
+    pub fn set_include_dirs(&mut self, dirs: Vec<PathBuf>) {
+        self.include_dirs = dirs;
     }
 
     /// Apply disabled-rule filtering and severity overrides in place.
@@ -212,5 +287,38 @@ mod tests {
     #[test]
     fn accepts_empty_configuration() {
         assert!(LintConfig::parse("# no local overrides\n\n").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod preprocess_config_tests {
+    use super::*;
+
+    #[test]
+    fn parses_preprocess_dialect_and_repeated_include_dirs() {
+        let config = LintConfig::parse(
+            "preprocess = true\ndialect = firestorm\ninclude_dir = ./a\ninclude_dir = ./b\n",
+        )
+        .unwrap();
+        assert!(config.preprocess_enabled());
+        assert_eq!(config.dialect(), PreprocessDialect::Firestorm);
+        assert_eq!(
+            config.include_dirs(),
+            &[PathBuf::from("./a"), PathBuf::from("./b")]
+        );
+    }
+
+    #[test]
+    fn firestorm_dialect_enables_preprocessing() {
+        let config = LintConfig::parse("dialect = firestorm").unwrap();
+        assert!(config.preprocess_enabled());
+        assert_eq!(config.dialect(), PreprocessDialect::Firestorm);
+    }
+
+    #[test]
+    fn rejects_invalid_preprocess_settings() {
+        assert!(LintConfig::parse("preprocess = maybe").is_err());
+        assert!(LintConfig::parse("dialect = lua").is_err());
+        assert!(LintConfig::parse("include_dir =").is_err());
     }
 }

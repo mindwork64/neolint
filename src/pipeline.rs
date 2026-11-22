@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::diagnostic::resolve::RenderedDiagnostic;
+use crate::preprocessor::config::PreprocessOptions;
 use crate::preprocessor::identity::preprocess_identity;
+use crate::preprocessor::preprocess_with_includes;
 use crate::source::file::{AnalysisUnitId, RunId};
 use crate::source::manager::{SourceLoadError, SourceManager, MAX_ANALYSIS_UNITS_PER_INVOCATION};
 use crate::source::map::SpanError;
@@ -217,6 +219,50 @@ impl AnalysisRun {
         let (index, unit_id, mut manager) = self.begin_unit()?;
         let root = manager.load_root_reader(display_name, reader)?;
         let prepared = preprocess_identity(&manager, root)?;
+        self.units
+            .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
+        Ok(index)
+    }
+
+    /// Add a fully preprocessed unit from a regular local file.
+    pub fn add_preprocessed_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        options: PreprocessOptions,
+    ) -> Result<usize, SetupError> {
+        let (index, unit_id, mut manager) = self.begin_unit()?;
+        let root = manager.load_root_file(path)?;
+        let prepared = preprocess_with_includes(&mut manager, root, options)?;
+        self.units
+            .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
+        Ok(index)
+    }
+
+    /// Add a fully preprocessed unit from supplied text (for example stdin).
+    pub fn add_preprocessed_text(
+        &mut self,
+        display_name: &str,
+        text: &str,
+        options: PreprocessOptions,
+    ) -> Result<usize, SetupError> {
+        let (index, unit_id, mut manager) = self.begin_unit()?;
+        let root = manager.load_root_text(display_name, text)?;
+        let prepared = preprocess_with_includes(&mut manager, root, options)?;
+        self.units
+            .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
+        Ok(index)
+    }
+
+    /// Add a fully preprocessed unit from a supplied reader.
+    pub fn add_preprocessed_reader(
+        &mut self,
+        display_name: &str,
+        reader: impl Read,
+        options: PreprocessOptions,
+    ) -> Result<usize, SetupError> {
+        let (index, unit_id, mut manager) = self.begin_unit()?;
+        let root = manager.load_root_reader(display_name, reader)?;
+        let prepared = preprocess_with_includes(&mut manager, root, options)?;
         self.units
             .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
         Ok(index)
@@ -435,5 +481,27 @@ mod tests {
         // The process-wide allocator is independent and still usable.
         assert!(allocate_run_id().is_ok());
         assert!(allocator.allocate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod phase3_total_diagnostic_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+
+    #[test]
+    fn total_rendered_diagnostics_are_capped_with_one_terminal_diagnostic() {
+        let mut source = String::new();
+        for _ in 0..MAX_TOTAL_DIAGNOSTICS + 100 {
+            source.push_str("integer duplicate;\n");
+        }
+        let mut run = AnalysisRun::new().unwrap();
+        let index = run
+            .add_preprocessed_text("root.lsl", &source, PreprocessOptions::full())
+            .unwrap();
+        let rendered = run.unit(index).unwrap().analyze().unwrap();
+        assert_eq!(rendered.len(), MAX_TOTAL_DIAGNOSTICS);
+        assert_eq!(rendered.last().unwrap().diagnostic().code, "PRE039");
     }
 }
