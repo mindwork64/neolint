@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - exp/preprocessor-ast
+      - exp-preprocessor-ast-phase-*
 
 permissions:
   contents: read
