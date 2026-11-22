@@ -639,7 +639,7 @@ unit.
    Firestorm extensions without a Firestorm dialect).
 3. **Input collection.** Expand directories deterministically (sorted, symlinks
    skipped), de-duplicate displayed paths, enforce one stdin. The invocation
-   allocates a process-local `RunId` (checked monotonic counter). The result is
+   allocates a process-local `RunId` (synchronized checked monotonic counter). The result is
    an ordered list of root inputs; each receives an `AnalysisUnitId` whose index
    is `0..N-1` and whose run is this `RunId`. Neither value is user-facing.
 4. **Unit loop.** For each root input, in order, run the per-unit lifecycle
@@ -651,8 +651,9 @@ unit.
    merged set.
 7. **Rendering.** Human output or JSON; exit code 0/1. Input/config failures
    return 2 as today.
-8. **Teardown.** Drop all units; no global mutable state survives. Built-in
-   metadata stays cached in its existing `OnceLock`.
+8. **Teardown.** Drop all units; no per-analysis mutable state survives.
+   The process-wide synchronized `RunId` allocator and built-in metadata cache
+   remain for the lifetime of the process; neither contributes to user output.
 
 **Per AnalysisUnit:**
 
@@ -763,6 +764,15 @@ EOF anchor from one unit is rejected by another unit's map with
   process gets a different `RunId`; its maps reject the first invocation's
   coordinates instead of matching index 0. This is enforced by the runtime
   checks above, not by Rust lifetimes.
+- `RunId` allocation is process-wide and concurrency-safe. A single
+  `std::sync::Mutex<u64>` serializes allocation across threads. The allocator
+  reads the current value, computes the successor with `checked_add(1)`, stores
+  the successor, and returns the previous value. A poisoned mutex returns
+  `RunIdAllocationError::AllocatorPoisoned`; counter exhaustion returns
+  `RunIdAllocationError::CounterExhausted`. Neither condition panics, wraps, or
+  reuses an earlier ID. The failure is reported as an input/setup error (CLI
+  exit code 2) before any AnalysisUnit is created. The mutex is not held while
+  files are read or analysis runs.
 - Units may be analyzed sequentially or in parallel. If parallel, merging is
   still performed in input order, so the observable result is deterministic.
 
@@ -833,8 +843,45 @@ The source map is a **range map with origin chains**, not a line-to-line table.
 ### 7.1 Conceptual types
 
 ```rust
+use std::sync::Mutex;
+
 /// Process-local identity of one analysis invocation.
 pub struct RunId(u64);
+
+/// Explicit failure to allocate a process-unique RunId.
+pub enum RunIdAllocationError {
+    CounterExhausted,
+    AllocatorPoisoned,
+}
+
+/// Process-wide allocator. The mutex serializes concurrent callers; checked
+/// increment prevents wraparound or identifier reuse. No unwrap/expect is used.
+struct RunIdAllocator {
+    next: Mutex<u64>,
+}
+
+impl RunIdAllocator {
+    fn allocate(&self) -> Result<RunId, RunIdAllocationError> {
+        let mut next = self
+            .next
+            .lock()
+            .map_err(|_| RunIdAllocationError::AllocatorPoisoned)?;
+        let allocated = *next;
+        let successor = allocated
+            .checked_add(1)
+            .ok_or(RunIdAllocationError::CounterExhausted)?;
+        *next = successor;
+        Ok(RunId(allocated))
+    }
+}
+
+static RUN_ID_ALLOCATOR: RunIdAllocator = RunIdAllocator {
+    next: Mutex::new(0),
+};
+
+fn allocate_run_id() -> Result<RunId, RunIdAllocationError> {
+    RUN_ID_ALLOCATOR.allocate()
+}
 
 /// Identity of one AnalysisUnit: run identity plus a deterministic unit index.
 /// The index is assigned 0..N-1 in collected-input order. The whole id is
@@ -1256,10 +1303,11 @@ Rules for the bridge:
 8. AST nodes store prepared coordinates (`Span` or `PreparedSpan`), never a
    `SourceSpan` for generated text. They are resolved through the same
    `SourceMap` at rendering time.
-9. In plain-LSL compatibility mode there is no map: `UnifiedDiagnosticInput::
-   Legacy` passes `Diagnostic.span` through unchanged, preserving baseline
-   output. The unit still has a root `SourceId` for grouping, but no prepared
-   span conversion occurs.
+9. In plain-LSL compatibility mode there is no map:
+   `UnifiedDiagnosticInput::Legacy(LegacyDiagnostic)` verifies its producing
+   unit and passes the enclosed `Diagnostic.span` through unchanged, preserving
+   baseline output. The source is obtained from that unit's `legacy_root()`;
+   no caller-supplied `SourceId` or prepared-span conversion is involved.
 
 These are conceptual definitions. Phase 1 fixes the exact visibility, derives,
 constructors, and capacities; the semantics below are binding.
@@ -1281,7 +1329,7 @@ constructors, and capacities; the semantics below are binding.
   invocation 2's map even when both use unit index 0 and identical offsets; the
   check fails with `ForeignAnalysisUnit`/`ForeignPreparedSource`. This is a
   runtime ownership check, not a compile-time guarantee. `RunId` is allocated
-  process-locally (checked monotonic counter) and never affects output.
+  process-locally (mutex-protected checked monotonic counter) and never affects output.
 - Every offset is a zero-based UTF-8 byte offset. Spans are half-open
   (`start..end`) and must lie on UTF-8 character boundaries.
 - `PreparedSpan` addresses bytes **only** in the prepared buffer of a specific
@@ -1892,7 +1940,10 @@ classifications.
   excluded: it is process-local and must never affect output or ordering.
 - `AnalysisUnitId.index` assignment uses collected-input order only. It never
   depends on map iteration, filesystem enumeration, or parallelism. `RunId` is
-  allocated per invocation by a checked counter and is not emitted.
+  allocated per invocation by a process-wide `Mutex<u64>` allocator with a
+  checked increment. The mutex serializes concurrent invocations; poisoned
+  allocator state and counter exhaustion are explicit setup errors, never
+  wraparound or reuse. The allocator lock is not held during analysis.
 - New tests must avoid time, randomness, and network; temporary directories
   follow the existing `temporary_directory()` pattern in the integration tests.
 
@@ -1906,7 +1957,7 @@ provisional; Phase 1/2 must fix them as constants and add tests.
 | Limit | Provisional value | Enforcement point |
 | --- | --- | --- |
 | Root file size | existing practical limits; explicit cap in Phase 1 | Source Manager |
-| Root AnalysisUnits per CLI invocation | 65,536 (`AnalysisUnitId` is `u32`) | CLI/pipeline |
+| Root AnalysisUnits per CLI invocation | 65,536 (independent resource cap; `AnalysisUnitId.index` is `u32`) | CLI/pipeline |
 | Included file size | 4 MiB | Source Manager |
 | Source files per AnalysisUnit | 256 | Source Manager |
 | Include depth | 64 | Preprocessor include stack |
@@ -1960,7 +2011,7 @@ Requirements:
    corrupted segment tables. Every case returns the expected `SpanError`, never
    panics, and never returns the EOF anchor. Valid EOF, zero-length, and
    empty-buffer cases return `Ok`.
-2c. **Unit-identity isolation suite (Phase 1, mandatory; TEST A–O)**:
+2c. **Unit-identity isolation suite (Phase 1, mandatory; TEST A–Q)**:
    - **TEST A:** two AnalysisUnits whose roots both have local file index 0.
      Passing a `SourceSpan` from A to B's `SourceMap::location`/`render_span`
      returns `ForeignAnalysisUnit`; no B coordinate is produced.
@@ -2005,6 +2056,21 @@ Requirements:
      both with unit index 0. A coordinate from invocation 1 passed to
      invocation 2's map returns `ForeignAnalysisUnit`/`ForeignPreparedSource`
      because `RunId` differs; equal offsets and indexes are not accepted.
+   - **TEST P:** start two analysis invocations on separate threads and release
+     them from a shared `Barrier` (no sleeps or timing assumptions). Each
+     concurrently allocates its `RunId`, creates a unit with index 0 and
+     same-length source/prepared buffers, and returns its map and coordinates.
+     Assert that the `RunId`s differ and that each map rejects the other run's
+     `SourceSpan` and `PreparedSpan` with the corresponding foreign-identity
+     errors. Repeat enough concurrent allocations to exercise the allocator
+     under contention; all IDs must be unique. No wrap, reuse, panic, or
+     allocator failure may be hidden by the test.
+   - **TEST Q:** use isolated `RunIdAllocator` instances so global test state is
+     not corrupted. Set one counter to `u64::MAX` and verify `allocate()` returns
+     `CounterExhausted` repeatedly without wrapping or issuing an ID. Poison a
+     separate test allocator's mutex from a worker thread, join that worker,
+     and verify the next allocation returns `AllocatorPoisoned` without panic.
+     These failures must not modify or poison the process-wide allocator.
    These tests run as `cargo test` **and** `cargo test --release` in Phase 1 CI;
    assertions must hold identically in both profiles.
 3. **AnalysisUnit isolation tests**: two roots in one CLI invocation must not
@@ -2045,7 +2111,7 @@ Requirements:
 
 - Every new diagnostic code has at least one positive and one boundary test.
 - Every phase adds tests for its resource limits and malformed-input behavior.
-- Phase 1 runs the TEST A–O identity suite under both `cargo test` and
+- Phase 1 runs the TEST A–Q identity suite under both `cargo test` and
   `cargo test --release`; results must be identical, with no panic in either
   profile.
 - No test uses the network, sleeps, or depends on host locale/time zone.
@@ -2190,6 +2256,9 @@ implementations, not stages of the same code.
   - remove `debug_assert!` from the malformed-coordinate path; behavior is
     identical in debug and release and always `Result::Err`.
 - **Review follow-up (same phase):**
+  - make `RunId` allocation process-wide and concurrency-safe with a mutex,
+    checked increment, and explicit poisoned/exhausted errors; add barrier-based
+    concurrent allocation coverage and isolated failure-path tests (TEST P/Q);
   - make the Legacy path unit-tagged: `LegacyDiagnostic` is created only by the
     producing unit, and `from_legacy` takes an `AnalysisUnit` handle, obtains the
     root through `legacy_root()`, and never accepts a caller-supplied
@@ -2200,7 +2269,7 @@ implementations, not stages of the same code.
   - add `RunId` to `AnalysisUnitId` so independently active invocations in one
     process cannot exchange coordinates that happen to share unit index and
     offsets.
-- **Acceptance criteria:** all criteria in the Phase 0.3 task statement, TEST A–O
+- **Acceptance criteria:** all criteria in the Phase 0.3 task statement, TEST A–Q
   recorded in the Phase 1 plan, no runtime code changes, full CI gate passes.
 
 ### Phase 1 — Source Manager, Source Map, Identity Preprocessor
@@ -2251,7 +2320,7 @@ implementations, not stages of the same code.
   - the single `PreparedSource::prepared_span` bridge rejects inverted,
     out-of-bounds, and non-UTF-8-boundary spans, stamps the unit, and is the
     only public constructor path for `PreparedSpan`;
-  - the full TEST A–O suite from §13 passes identically under `cargo test` and
+  - the full TEST A–Q suite from §13 passes identically under `cargo test` and
     `cargo test --release`; no resolution-path assertion or panic exists in
     either profile;
   - `UnifiedDiagnosticInput` accepts a synthetic `PreprocessDiagnostic` with an
@@ -2276,14 +2345,17 @@ implementations, not stages of the same code.
     diagnostics isolated, and rejects every cross-unit coordinate;
   - two independent runs in one process get different `RunId`s, so a coordinate
     from one run is rejected by the other's map even at equal unit index and
-    offsets;
+    offsets; concurrent allocation is serialized and verified with a barrier;
+  - `RunId` counter exhaustion and mutex poisoning return explicit setup errors,
+    never panic, wrap, or reuse an identifier;
   - no public legacy API change; `parse_legacy` exists as a thin explicit
     wrapper while `parse` keeps its exact behavior;
   - no new dependencies; MSRV 1.75.
 - **Tests:** unit tests for map construction/lookup, identity round-trip,
   UTF-8/CRLF columns, empty source, empty buffer, EOF/PAR013, zero-length and
   cross-segment spans, boundary points, multi-unit/multi-run isolation,
-  origin-arena corruption, Legacy tag/root ownership, TEST A–O, the full
+  origin-arena corruption, Legacy tag/root ownership, concurrent RunId
+  allocation, TEST A–Q, the full
   malformed-coordinate matrix from §7.3.1, the single `Span` adapter, and mixed
   `UnifiedDiagnosticInput` handling. Run in both debug and release profiles;
   must not panic in either.
@@ -2643,8 +2715,10 @@ document):
   original `SourceId`, and related locations.
 - **SpanError:** explicit error for malformed/invalid coordinates; never a
   silent fallback.
-- **RunId:** process-local identity of one invocation, allocated by a checked
-  monotonic counter; not user-facing and not part of output/order.
+- **RunId:** process-local identity of one invocation, allocated by a
+  process-wide mutex-protected checked monotonic counter; concurrent callers
+  receive unique IDs. Poisoning or exhaustion is an explicit setup error; the
+  ID is not user-facing and is not part of output/order.
 - **AnalysisUnitId:** `{ RunId, index }`; the index is assigned deterministically
   in input order within one run. Coordinates from different runs never compare
   equal.
