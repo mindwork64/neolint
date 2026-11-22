@@ -9,6 +9,7 @@ use crate::preprocessor::token::{Piece, PieceKind, RawSpan};
 pub(crate) struct MacroDefinition {
     pub(crate) name: String,
     pub(crate) params: Option<Vec<String>>,
+    pub(crate) variadic: bool,
     pub(crate) replacement: Vec<Piece>,
     pub(crate) definition_span: RawSpan,
 }
@@ -19,7 +20,7 @@ impl MacroDefinition {
     }
 
     fn same_signature(&self, other: &Self) -> bool {
-        if self.params != other.params {
+        if self.params != other.params || self.variadic != other.variadic {
             return false;
         }
         token_signature(&self.replacement) == token_signature(&other.replacement)

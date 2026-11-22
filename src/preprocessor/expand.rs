@@ -1,14 +1,19 @@
 //! Macro expansion with recursion guards and provenance construction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
+use crate::preprocessor::builtins;
 use crate::preprocessor::diagnostics::{
     DiagSink, RawRelated, PRE_DIRECT_RECURSION, PRE_EXPANDED_BYTES_LIMIT,
     PRE_EXPANDED_TOKENS_LIMIT, PRE_EXPANSION_DEPTH, PRE_INDIRECT_RECURSION,
-    PRE_MACRO_ARGUMENT_COUNT, PRE_UNTERMINATED_MACRO_CALL,
+    PRE_INVALID_MACRO_OPERATOR, PRE_MACRO_ARGUMENT_COUNT, PRE_UNTERMINATED_MACRO_CALL,
 };
 use crate::preprocessor::macros::{MacroDefinition, MacroTable};
-use crate::preprocessor::token::{Piece, PieceKind, ProvId, RawSpan, WorkItem, WorkOrigin};
+use crate::preprocessor::token::{
+    tokenize_generated, Piece, PieceKind, ProvId, RawSpan, WorkItem, WorkOrigin,
+};
+use crate::source::file::SourceFile;
 use crate::source::{OriginKind, SourceId};
 
 pub(crate) const MAX_EXPANSION_DEPTH: usize = 64;
@@ -128,6 +133,73 @@ impl Context {
     }
 }
 
+#[derive(Debug)]
+enum Unit {
+    Literal(Piece),
+    Whitespace(Piece),
+    Param(usize),
+    VarArgs,
+    Stringify(String),
+    Paste(String),
+}
+
+fn stringify_items(items: &[WorkItem]) -> String {
+    let mut output = String::new();
+    let mut pending_space = false;
+    for item in items {
+        if matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment) {
+            pending_space = !output.is_empty();
+            continue;
+        }
+        if pending_space && !output.is_empty() {
+            output.push(' ');
+        }
+        pending_space = false;
+        output.push_str(&item.text);
+    }
+    output.trim().to_owned()
+}
+
+fn stringify_varargs(args: &[Vec<WorkItem>]) -> String {
+    args.iter()
+        .map(|arg| stringify_items(arg))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn escape_string(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn paste_text(
+    unit: &Unit,
+    _definition: &MacroDefinition,
+    raw_args: &[Vec<WorkItem>],
+    fixed: usize,
+) -> String {
+    match unit {
+        Unit::Literal(piece) => piece.text.clone(),
+        Unit::Whitespace(_) => String::new(),
+        Unit::Param(position) => raw_args
+            .get(*position)
+            .map(|arg| arg.iter().map(|item| item.text.as_str()).collect())
+            .unwrap_or_default(),
+        Unit::VarArgs => raw_args
+            .get(fixed..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| {
+                arg.iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Unit::Stringify(text) => format!("\"{}\"", escape_string(text)),
+        Unit::Paste(text) => text.clone(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ActiveMacro {
     name: String,
@@ -142,6 +214,9 @@ pub(crate) struct Expander<'a> {
     active: Vec<ActiveMacro>,
     recursion_reported: BTreeSet<(String, usize, usize)>,
     source: SourceId,
+    base_parent: Option<ProvId>,
+    builtin_span: Option<RawSpan>,
+    files: &'a HashMap<SourceId, Arc<SourceFile>>,
 }
 
 impl<'a> Expander<'a> {
@@ -151,6 +226,8 @@ impl<'a> Expander<'a> {
         diags: &'a mut DiagSink,
         limits: &'a mut ExpansionLimits,
         source: SourceId,
+        base_parent: Option<ProvId>,
+        files: &'a HashMap<SourceId, Arc<SourceFile>>,
     ) -> Self {
         Self {
             macros,
@@ -160,6 +237,9 @@ impl<'a> Expander<'a> {
             active: Vec::new(),
             recursion_reported: BTreeSet::new(),
             source,
+            base_parent,
+            builtin_span: None,
+            files,
         }
     }
 
@@ -178,6 +258,28 @@ impl<'a> Expander<'a> {
         while index < items.len() {
             let item = &items[index];
             if item.kind == PieceKind::Identifier {
+                if self.macros.get(&item.text).is_none() {
+                    let builtin_span = self.builtin_span.unwrap_or(item.span);
+                    if let Some(expansion) = builtins::expand(&item.text, builtin_span, self.files)
+                    {
+                        let node = self.prov.add(ProvNode {
+                            kind: OriginKind::Generated,
+                            span: RawSpan::point(builtin_span.source, builtin_span.start),
+                            invocation: None,
+                            definition: None,
+                            parent: self.base_parent,
+                            label: Some("predefined macro"),
+                        });
+                        output.push(WorkItem {
+                            text: expansion.text,
+                            kind: expansion.kind,
+                            span: builtin_span,
+                            origin: WorkOrigin::Node(node),
+                        });
+                        index += 1;
+                        continue;
+                    }
+                }
                 if let Some(definition) = self.macros.get(&item.text).cloned() {
                     if let Some((args, end)) = self.invocation_arguments(&items, index, &definition)
                     {
@@ -202,11 +304,16 @@ impl<'a> Expander<'a> {
                             continue;
                         }
                         let mut args = args;
-                        if definition.params.as_ref().map_or(0, Vec::len) == 1 && args.is_empty() {
+                        let expected = definition.params.as_ref().map_or(0, Vec::len);
+                        if expected == 1 && args.is_empty() {
                             args.push(Vec::new());
                         }
-                        let expected = definition.params.as_ref().map_or(0, Vec::len);
-                        if args.len() != expected {
+                        let count_ok = if definition.variadic {
+                            args.len() >= expected
+                        } else {
+                            args.len() == expected
+                        };
+                        if !count_ok {
                             self.diags.push_with_related(
                                 PRE_MACRO_ARGUMENT_COUNT,
                                 format!(
@@ -357,28 +464,38 @@ impl<'a> Expander<'a> {
         output: &mut Vec<WorkItem>,
     ) -> bool {
         let mut expanded_args = Vec::with_capacity(args.len());
+        let saved_builtin_span = self.builtin_span;
+        self.builtin_span = Some(call_span);
         self.active.push(ActiveMacro {
             name: definition.name.clone(),
             invocation: call_span,
         });
-        for arg in args {
+        let raw_args = args;
+        for arg in &raw_args {
             let arg_context = Context {
                 parent: invocation_parent,
                 invocation: Some(call_span),
                 definition: Some(definition.definition_span),
             };
-            let expanded = self.expand_items(arg, arg_context, depth + 1);
+            let expanded = self.expand_items(arg.clone(), arg_context, depth + 1);
             expanded_args.push(expanded);
         }
 
-        let replacement =
-            self.build_replacement(definition, &expanded_args, call_span, invocation_parent);
+        let replacement = self.build_replacement(
+            definition,
+            &raw_args,
+            &expanded_args,
+            call_span,
+            invocation_parent,
+        );
         let Some(replacement) = replacement else {
             self.active.pop();
+            self.builtin_span = saved_builtin_span;
             return false;
         };
         let expanded = self.expand_items(replacement, Context::top(), depth + 1);
         self.active.pop();
+        self.builtin_span = saved_builtin_span;
         output.extend(expanded);
         true
     }
@@ -386,26 +503,23 @@ impl<'a> Expander<'a> {
     fn build_replacement(
         &mut self,
         definition: &MacroDefinition,
-        args: &[Vec<WorkItem>],
+        raw_args: &[Vec<WorkItem>],
+        expanded_args: &[Vec<WorkItem>],
         call_span: RawSpan,
         invocation_parent: Option<ProvId>,
     ) -> Option<Vec<WorkItem>> {
+        let fixed = definition.params.as_ref().map_or(0, Vec::len);
         let mut estimated_bytes = 0usize;
         let mut estimated_tokens = 0usize;
         for piece in &definition.replacement {
-            if let Some(params) = &definition.params {
-                if piece.kind == PieceKind::Identifier {
-                    if let Some(index) = params.iter().position(|param| param == &piece.text) {
-                        for item in &args[index] {
-                            estimated_bytes = estimated_bytes.saturating_add(item.text.len());
-                            estimated_tokens += 1;
-                        }
-                        continue;
-                    }
-                }
-            }
             estimated_bytes = estimated_bytes.saturating_add(piece.text.len());
             estimated_tokens += 1;
+        }
+        for arg in raw_args {
+            for item in arg {
+                estimated_bytes = estimated_bytes.saturating_add(item.text.len());
+                estimated_tokens += 1;
+            }
         }
         if !self
             .limits
@@ -414,32 +528,292 @@ impl<'a> Expander<'a> {
             return None;
         }
 
-        let mut replacement = Vec::new();
-        for piece in &definition.replacement {
+        let mut units = Vec::new();
+        let pieces = &definition.replacement;
+        let mut index = 0usize;
+        while index < pieces.len() {
+            let piece = &pieces[index];
+            if piece.text == "#" && definition.params.is_some() {
+                index += 1;
+                while index < pieces.len()
+                    && matches!(
+                        pieces[index].kind,
+                        PieceKind::Whitespace | PieceKind::Comment
+                    )
+                {
+                    index += 1;
+                }
+                if index >= pieces.len() {
+                    self.diags.push(
+                        PRE_INVALID_MACRO_OPERATOR,
+                        "stringification requires a macro parameter",
+                        call_span,
+                    );
+                    return None;
+                }
+                let operand = &pieces[index];
+                let text = if let Some(params) = &definition.params {
+                    if operand.kind == PieceKind::Identifier {
+                        if let Some(position) =
+                            params.iter().position(|param| param == &operand.text)
+                        {
+                            stringify_items(&raw_args[position])
+                        } else if operand.text == "__VA_ARGS__" && definition.variadic {
+                            stringify_varargs(&raw_args[fixed..])
+                        } else {
+                            self.diags.push(
+                                PRE_INVALID_MACRO_OPERATOR,
+                                "stringification requires a macro parameter",
+                                operand.span,
+                            );
+                            return None;
+                        }
+                    } else {
+                        self.diags.push(
+                            PRE_INVALID_MACRO_OPERATOR,
+                            "stringification requires a macro parameter",
+                            operand.span,
+                        );
+                        return None;
+                    }
+                } else {
+                    return None;
+                };
+                units.push(Unit::Stringify(text));
+                index += 1;
+                continue;
+            }
+            if piece.text == "##" {
+                while matches!(units.last(), Some(Unit::Whitespace(_))) {
+                    units.pop();
+                }
+                let Some(left) = units.pop() else {
+                    self.diags.push(
+                        PRE_INVALID_MACRO_OPERATOR,
+                        "token pasting requires a left operand",
+                        call_span,
+                    );
+                    return None;
+                };
+                index += 1;
+                while index < pieces.len()
+                    && matches!(
+                        pieces[index].kind,
+                        PieceKind::Whitespace | PieceKind::Comment
+                    )
+                {
+                    index += 1;
+                }
+                if index >= pieces.len() {
+                    self.diags.push(
+                        PRE_INVALID_MACRO_OPERATOR,
+                        "token pasting requires a right operand",
+                        call_span,
+                    );
+                    return None;
+                }
+                let right =
+                    self.paste_operand(&pieces[index], definition, raw_args, fixed, call_span)?;
+                let left_text = paste_text(&left, definition, raw_args, fixed);
+                let right_text = paste_text(&right, definition, raw_args, fixed);
+                let pasted = format!("{left_text}{right_text}");
+                if !pasted.is_empty() {
+                    let tokens = tokenize_generated(&pasted, call_span);
+                    let significant: Vec<&Piece> = tokens
+                        .iter()
+                        .filter(|item| {
+                            !matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment)
+                        })
+                        .collect();
+                    if significant.len() != 1
+                        || significant[0].text != pasted
+                        || matches!(significant[0].kind, PieceKind::Other)
+                    {
+                        self.diags.push(
+                            PRE_INVALID_MACRO_OPERATOR,
+                            format!("token pasting produced an invalid token: '{pasted}'"),
+                            call_span,
+                        );
+                        return None;
+                    }
+                }
+                units.push(Unit::Paste(pasted));
+                index += 1;
+                continue;
+            }
+            if definition.params.is_some()
+                && piece.kind == PieceKind::Identifier
+                && piece.text == "__VA_ARGS__"
+                && definition.variadic
+            {
+                units.push(Unit::VarArgs);
+                index += 1;
+                continue;
+            }
             if let Some(params) = &definition.params {
                 if piece.kind == PieceKind::Identifier {
-                    if let Some(index) = params.iter().position(|param| param == &piece.text) {
-                        replacement.extend(args[index].iter().cloned());
+                    if let Some(position) = params.iter().position(|param| param == &piece.text) {
+                        units.push(Unit::Param(position));
+                        index += 1;
                         continue;
                     }
                 }
             }
-            let node = self.prov.add(ProvNode {
-                kind: OriginKind::MacroDefinition,
-                span: piece.span,
-                invocation: Some(call_span),
-                definition: Some(definition.definition_span),
-                parent: invocation_parent,
-                label: Some("macro definition"),
-            });
-            replacement.push(WorkItem {
-                text: piece.text.clone(),
-                kind: piece.kind,
-                span: piece.span,
-                origin: WorkOrigin::Node(node),
-            });
+            if matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment) {
+                units.push(Unit::Whitespace(piece.clone()));
+            } else {
+                units.push(Unit::Literal(piece.clone()));
+            }
+            index += 1;
+        }
+
+        let mut replacement = Vec::new();
+        for unit in units {
+            match unit {
+                Unit::Whitespace(piece) | Unit::Literal(piece) => {
+                    replacement.push(self.definition_item(
+                        definition,
+                        &piece,
+                        call_span,
+                        invocation_parent,
+                    ));
+                }
+                Unit::Param(position) => {
+                    replacement.extend(expanded_args[position].iter().cloned());
+                }
+                Unit::VarArgs => {
+                    replacement.extend(self.varargs_items(
+                        &expanded_args[fixed..],
+                        call_span,
+                        invocation_parent,
+                    ));
+                }
+                Unit::Stringify(text) => {
+                    let node = self.prov.add(ProvNode {
+                        kind: OriginKind::Stringify,
+                        span: call_span,
+                        invocation: Some(call_span),
+                        definition: Some(definition.definition_span),
+                        parent: invocation_parent.or(self.base_parent),
+                        label: Some("stringified argument"),
+                    });
+                    replacement.push(WorkItem {
+                        text: format!("\"{}\"", escape_string(&text)),
+                        kind: PieceKind::String,
+                        span: call_span,
+                        origin: WorkOrigin::Node(node),
+                    });
+                }
+                Unit::Paste(text) => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let kind = tokenize_generated(&text, call_span)
+                        .into_iter()
+                        .find(|item| {
+                            !matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment)
+                        })
+                        .map_or(PieceKind::Other, |item| item.kind);
+                    let node = self.prov.add(ProvNode {
+                        kind: OriginKind::TokenPaste,
+                        span: call_span,
+                        invocation: Some(call_span),
+                        definition: Some(definition.definition_span),
+                        parent: invocation_parent.or(self.base_parent),
+                        label: Some("pasted token"),
+                    });
+                    replacement.push(WorkItem {
+                        text,
+                        kind,
+                        span: call_span,
+                        origin: WorkOrigin::Node(node),
+                    });
+                }
+            }
         }
         Some(replacement)
+    }
+
+    fn definition_item(
+        &mut self,
+        definition: &MacroDefinition,
+        piece: &Piece,
+        call_span: RawSpan,
+        invocation_parent: Option<ProvId>,
+    ) -> WorkItem {
+        let node = self.prov.add(ProvNode {
+            kind: OriginKind::MacroDefinition,
+            span: piece.span,
+            invocation: Some(call_span),
+            definition: Some(definition.definition_span),
+            parent: invocation_parent.or(self.base_parent),
+            label: Some("macro definition"),
+        });
+        WorkItem {
+            text: piece.text.clone(),
+            kind: piece.kind,
+            span: piece.span,
+            origin: WorkOrigin::Node(node),
+        }
+    }
+
+    fn paste_operand(
+        &mut self,
+        piece: &Piece,
+        definition: &MacroDefinition,
+        raw_args: &[Vec<WorkItem>],
+        fixed: usize,
+        call_span: RawSpan,
+    ) -> Option<Unit> {
+        if piece.kind == PieceKind::Identifier {
+            if let Some(params) = &definition.params {
+                if let Some(position) = params.iter().position(|param| param == &piece.text) {
+                    return Some(Unit::Param(position));
+                }
+                if piece.text == "__VA_ARGS__" && definition.variadic {
+                    return Some(Unit::VarArgs);
+                }
+            }
+        }
+        if matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment) {
+            self.diags.push(
+                PRE_INVALID_MACRO_OPERATOR,
+                "token pasting requires a token operand",
+                call_span,
+            );
+            return None;
+        }
+        let _ = (fixed, raw_args);
+        Some(Unit::Literal(piece.clone()))
+    }
+
+    fn varargs_items(
+        &mut self,
+        args: &[Vec<WorkItem>],
+        call_span: RawSpan,
+        invocation_parent: Option<ProvId>,
+    ) -> Vec<WorkItem> {
+        let mut items = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            if index > 0 {
+                let node = self.prov.add(ProvNode {
+                    kind: OriginKind::Generated,
+                    span: call_span,
+                    invocation: Some(call_span),
+                    definition: None,
+                    parent: invocation_parent.or(self.base_parent),
+                    label: Some("variadic comma"),
+                });
+                items.push(WorkItem {
+                    text: ", ".to_owned(),
+                    kind: PieceKind::Punct,
+                    span: call_span,
+                    origin: WorkOrigin::Node(node),
+                });
+            }
+            items.extend(arg.iter().cloned());
+        }
+        items
     }
 
     fn invocation_origin(&mut self, item: &WorkItem, context: Context) -> Option<ProvId> {
@@ -452,11 +826,11 @@ impl<'a> Expander<'a> {
                         span: item.span,
                         invocation: context.invocation,
                         definition: context.definition,
-                        parent: context.parent,
+                        parent: context.parent.or(self.base_parent),
                         label: Some("macro argument"),
                     }))
                 } else {
-                    None
+                    self.base_parent
                 }
             }
         }
@@ -472,7 +846,7 @@ impl<'a> Expander<'a> {
                 span: item.span,
                 invocation: context.invocation,
                 definition: context.definition,
-                parent: context.parent,
+                parent: context.parent.or(self.base_parent),
                 label: Some("macro argument"),
             });
             WorkItem {
@@ -615,6 +989,7 @@ fn call_span(items: &[WorkItem], fallback_source: SourceId) -> RawSpan {
 }
 
 /// Resolve `defined` before macro expansion and expand the remaining expression.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn expand_condition(
     pieces: Vec<Piece>,
     macros: &MacroTable,
@@ -622,10 +997,12 @@ pub(crate) fn expand_condition(
     diags: &mut DiagSink,
     limits: &mut ExpansionLimits,
     source: SourceId,
+    base_parent: Option<ProvId>,
+    files: &HashMap<SourceId, Arc<SourceFile>>,
 ) -> Vec<WorkItem> {
     let pieces = resolve_defined(pieces, macros, diags);
     let items: Vec<WorkItem> = pieces.into_iter().map(WorkItem::from_piece).collect();
-    let mut expander = Expander::new(macros, prov, diags, limits, source);
+    let mut expander = Expander::new(macros, prov, diags, limits, source, base_parent, files);
     expander.expand_top(items)
 }
 
@@ -775,6 +1152,7 @@ mod provenance_tests {
         let definition = MacroDefinition {
             name: "ID".to_owned(),
             params: Some(vec!["x".to_owned()]),
+            variadic: false,
             replacement,
             definition_span,
         };
@@ -789,7 +1167,16 @@ mod provenance_tests {
         let mut prov = ProvArena::new();
         let mut diags = DiagSink::new();
         let mut limits = ExpansionLimits::new();
-        let mut expander = Expander::new(&table, &mut prov, &mut diags, &mut limits, source);
+        let files = HashMap::new();
+        let mut expander = Expander::new(
+            &table,
+            &mut prov,
+            &mut diags,
+            &mut limits,
+            source,
+            None,
+            &files,
+        );
         let output = expander.expand_top(items);
         assert!(output.iter().any(|item| item.text == "7"));
         assert!(diags.items().is_empty());

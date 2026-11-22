@@ -31,8 +31,8 @@ pub use lexer::{lex, Token, TokenKind};
 pub use parser::{parse, parse_legacy};
 pub use pipeline::{allocate_run_id, AnalysisRun, RunIdAllocationError, SetupError};
 pub use preprocessor::{
-    preprocess, preprocess_identity, PreparedSource, PreprocessConfig, PreprocessDiagnostic,
-    PreprocessMode, PreprocessOptions, RelatedLocation,
+    preprocess, preprocess_identity, preprocess_with_includes, PreparedSource, PreprocessConfig,
+    PreprocessDiagnostic, PreprocessDialect, PreprocessMode, PreprocessOptions, RelatedLocation,
 };
 pub use semantic::analyze;
 pub use source::{

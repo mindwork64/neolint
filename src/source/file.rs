@@ -87,7 +87,7 @@ pub enum SourceFileKind {
     Root,
     /// Root source supplied through a reader or text input.
     Stdin,
-    /// Included file. Reserved for the include phase; Phase 1 never loads one.
+    /// Included file loaded through a preprocessor include.
     Included,
 }
 

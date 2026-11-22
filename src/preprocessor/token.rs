@@ -311,6 +311,11 @@ impl WorkItem {
     }
 }
 
+/// Tokenize generated text and assign every piece the same origin span.
+pub(crate) fn tokenize_generated(text: &str, span: RawSpan) -> Vec<Piece> {
+    tokenize_with(text, 0, text.len(), |_, _| span)
+}
+
 /// Tokenize original source text in `[start, end)`. Test helper.
 #[cfg(test)]
 pub(crate) fn tokenize_source(

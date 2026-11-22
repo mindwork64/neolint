@@ -1,27 +1,34 @@
 //! Directive scanning, conditional compilation, and the full preprocessing run.
 
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::diagnostic::DiagnosticKind;
+use crate::diagnostic::{DiagnosticKind, Severity};
+use crate::preprocessor::config::{PreprocessDialect, PreprocessOptions};
 use crate::preprocessor::diagnostics::{
     DiagSink, RawDiagnostic, RawRelated, PRE_CONDITIONAL_DEPTH, PRE_CONFLICTING_REDEFINITION,
     PRE_DUPLICATE_ELSE, PRE_ELIF_AFTER_ELSE, PRE_ELIF_WITHOUT_IF, PRE_ELSE_WITHOUT_IF,
     PRE_ENDIF_WITHOUT_IF, PRE_INVALID_DEFINE, PRE_INVALID_IFDEF, PRE_INVALID_UNDEF,
-    PRE_MALFORMED_DIRECTIVE, PRE_MISSING_OPERAND, PRE_UNKNOWN_DIRECTIVE, PRE_UNSUPPORTED_DIRECTIVE,
-    PRE_UNSUPPORTED_MACRO_OPERATOR, PRE_UNTERMINATED_CONDITIONAL,
+    PRE_MALFORMED_DIRECTIVE, PRE_MISSING_OPERAND, PRE_UNKNOWN_DIRECTIVE,
+    PRE_UNTERMINATED_CONDITIONAL,
 };
 use crate::preprocessor::expand::{
     expand_condition, Expander, ExpansionLimits, ProvArena, ProvNode, MAX_EXPANDED_BYTES,
     MAX_EXPANDED_TOKENS,
 };
 use crate::preprocessor::expr;
+use crate::preprocessor::identity;
+use crate::preprocessor::include::{
+    display_include_path, is_remote_spelling, parse_include, resolve_include, IncludeEdge,
+    IncludeGraph, IncludeNode,
+};
 use crate::preprocessor::macros::{DefineOutcome, MacroDefinition, MacroTable};
 use crate::preprocessor::token::{
-    is_identifier_continue, needs_separator, tokenize_mapped, MappedText, PieceKind, RawSpan,
-    WorkItem, WorkOrigin,
+    is_identifier_continue, needs_separator, tokenize_mapped, MappedText, PieceKind, ProvId,
+    RawSpan, WorkItem, WorkOrigin,
 };
 use crate::preprocessor::{PreparedSource, PreprocessDiagnostic, RelatedLocation};
-use crate::source::file::SourceFile;
 use crate::source::manager::SourceManager;
 use crate::source::map::{PreparedSpan, SourceMapBuilder, SpanError};
 use crate::source::{AnalysisUnitId, OriginKind, SourceId};
@@ -37,19 +44,44 @@ struct CondFrame {
     opening: RawSpan,
 }
 
+#[derive(Debug, Clone)]
+struct IncludeFrame {
+    source: SourceId,
+    canonical: Option<PathBuf>,
+    entry_span: Option<RawSpan>,
+    directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct RawIncludeEdge {
+    from: SourceId,
+    to: SourceId,
+    path: RawSpan,
+    directive: RawSpan,
+    angle: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct Preprocessor<'a> {
     unit: AnalysisUnitId,
+    manager: &'a mut SourceManager,
     source: SourceId,
-    text: &'a str,
-    files: Vec<Arc<SourceFile>>,
+    text: Arc<str>,
+    root_source: SourceId,
+    root_len: usize,
+    include_dirs: Vec<PathBuf>,
+    source_files: HashMap<SourceId, Arc<crate::source::file::SourceFile>>,
+    frames: Vec<IncludeFrame>,
+    include_context: Option<ProvId>,
+    graph_edges: Vec<RawIncludeEdge>,
+    pragma_once: BTreeSet<PathBuf>,
     macros: MacroTable,
     conditions: Vec<CondFrame>,
     output: Vec<WorkItem>,
     prov: ProvArena,
     diags: DiagSink,
     limits: ExpansionLimits,
-    last_directive_end: Option<usize>,
+    last_directive_end: Option<RawSpan>,
     pending_start: Option<usize>,
     pending_end: usize,
     stopped: bool,
@@ -57,16 +89,44 @@ pub(crate) struct Preprocessor<'a> {
 
 impl<'a> Preprocessor<'a> {
     pub(crate) fn new(
-        unit: AnalysisUnitId,
-        source: SourceId,
-        text: &'a str,
-        files: Vec<Arc<SourceFile>>,
-    ) -> Self {
-        Self {
+        manager: &'a mut SourceManager,
+        root: SourceId,
+        options: &PreprocessOptions,
+    ) -> Result<Self, SpanError> {
+        let unit = manager.unit();
+        if root.unit() != unit {
+            return Err(SpanError::ForeignAnalysisUnit);
+        }
+        let file_arc = manager
+            .files()
+            .get(root.file() as usize)
+            .cloned()
+            .ok_or(SpanError::UnknownSourceId)?;
+        let text = Arc::clone(file_arc.shared_text());
+        let root_len = text.len();
+        let canonical = file_arc.canonical_path().cloned();
+        let directory = include_directory(file_arc.display_name(), file_arc.canonical_path());
+        let mut source_files = HashMap::new();
+        source_files.insert(root, Arc::clone(&file_arc));
+        let frame = IncludeFrame {
+            source: root,
+            canonical: canonical.clone(),
+            entry_span: None,
+            directory,
+        };
+        Ok(Self {
             unit,
-            source,
+            manager,
+            source: root,
             text,
-            files,
+            root_source: root,
+            root_len,
+            include_dirs: options.include_dirs().to_vec(),
+            source_files,
+            frames: vec![frame],
+            include_context: None,
+            graph_edges: Vec::new(),
+            pragma_once: BTreeSet::new(),
             macros: MacroTable::new(),
             conditions: Vec::new(),
             output: Vec::new(),
@@ -77,54 +137,11 @@ impl<'a> Preprocessor<'a> {
             pending_start: None,
             pending_end: 0,
             stopped: false,
-        }
+        })
     }
 
     pub(crate) fn run(mut self) -> Result<PreparedSource, SpanError> {
-        let mut position = 0usize;
-        let mut in_block_comment = false;
-        while position < self.text.len() {
-            let line_start = position;
-            let continued = continued_line(self.text, position);
-            if !in_block_comment && !continued {
-                if let Some(hash) = directive_hash(self.text, position) {
-                    self.flush_pending();
-                    let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
-                    let directive_span = directive_span(self.source, self.text, hash, end);
-                    self.process_directive(line_start, hash, &mapped, directive_span);
-                    self.last_directive_end = Some(end);
-                    self.emit_last_newline(line_start, end);
-                    position = end;
-                    continue;
-                }
-            } else if !continued {
-                if let Some((hash, comment_end)) = closing_comment_directive(self.text, position) {
-                    if self.is_active() {
-                        self.push_pending(position, comment_end);
-                    }
-                    self.flush_pending();
-                    let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
-                    let directive_span = directive_span(self.source, self.text, hash, end);
-                    self.process_directive(comment_end, hash, &mapped, directive_span);
-                    self.last_directive_end = Some(end);
-                    self.emit_last_newline(comment_end, end);
-                    position = end;
-                    in_block_comment = false;
-                    continue;
-                }
-            }
-            let (end, new_block) = scan_line(self.text, position, in_block_comment);
-            if self.is_active() {
-                self.push_pending(position, end);
-            } else {
-                self.flush_pending();
-                self.emit_newlines(position, end);
-            }
-            position = end;
-            in_block_comment = new_block;
-        }
-        self.flush_pending();
-
+        self.process_current_source();
         let eof = RawSpan::point(self.source, self.text.len());
         while let Some(frame) = self.conditions.pop() {
             self.diags.push_with_related(
@@ -138,6 +155,52 @@ impl<'a> Preprocessor<'a> {
             );
         }
         self.finalize()
+    }
+
+    fn process_current_source(&mut self) {
+        let mut position = 0usize;
+        let mut in_block_comment = false;
+        while position < self.text.len() {
+            let line_start = position;
+            let continued = continued_line(&self.text, position);
+            if !in_block_comment && !continued {
+                if let Some(hash) = directive_hash(&self.text, position) {
+                    self.flush_pending();
+                    let (mapped, end) = MappedText::logical_line(&self.text, self.source, hash + 1);
+                    let directive_span = directive_span(self.source, &self.text, hash, end);
+                    self.process_directive(line_start, hash, &mapped, directive_span);
+                    self.last_directive_end = Some(RawSpan::point(self.source, end));
+                    self.emit_last_newline(line_start, end);
+                    position = end;
+                    continue;
+                }
+            } else if !continued {
+                if let Some((hash, comment_end)) = closing_comment_directive(&self.text, position) {
+                    if self.is_active() {
+                        self.push_pending(position, comment_end);
+                    }
+                    self.flush_pending();
+                    let (mapped, end) = MappedText::logical_line(&self.text, self.source, hash + 1);
+                    let directive_span = directive_span(self.source, &self.text, hash, end);
+                    self.process_directive(comment_end, hash, &mapped, directive_span);
+                    self.last_directive_end = Some(RawSpan::point(self.source, end));
+                    self.emit_last_newline(comment_end, end);
+                    position = end;
+                    in_block_comment = false;
+                    continue;
+                }
+            }
+            let (end, new_block) = scan_line(&self.text, position, in_block_comment);
+            if self.is_active() {
+                self.push_pending(position, end);
+            } else {
+                self.flush_pending();
+                self.emit_newlines(position, end);
+            }
+            position = end;
+            in_block_comment = new_block;
+        }
+        self.flush_pending();
     }
 
     fn is_active(&self) -> bool {
@@ -165,7 +228,7 @@ impl<'a> Preprocessor<'a> {
         if self.stopped || end <= start {
             return;
         }
-        let mapped = MappedText::spliced_range(self.text, self.source, start, end);
+        let mapped = MappedText::spliced_range(&self.text, self.source, start, end);
         let pieces = tokenize_mapped(&mapped);
         self.expand_and_append(pieces);
     }
@@ -174,11 +237,26 @@ impl<'a> Preprocessor<'a> {
         if self.stopped {
             return;
         }
-        for item in items {
+        for mut item in items {
             if item.text.is_empty() {
                 continue;
             }
-            if matches!(item.origin, WorkOrigin::Direct) {
+            let direct = matches!(item.origin, WorkOrigin::Direct);
+            if direct {
+                if let Some(context) = self.include_context {
+                    let invocation = self.prov.nodes[context.0].invocation;
+                    let node = self.prov.add(ProvNode {
+                        kind: OriginKind::Include,
+                        span: item.span,
+                        invocation,
+                        definition: None,
+                        parent: self.prov.nodes[context.0].parent,
+                        label: Some("included code"),
+                    });
+                    item.origin = WorkOrigin::Node(node);
+                }
+            }
+            if direct {
                 let accepted = {
                     let limits = &mut self.limits;
                     let diags = &mut self.diags;
@@ -205,6 +283,8 @@ impl<'a> Preprocessor<'a> {
                 &mut self.diags,
                 &mut self.limits,
                 self.source,
+                self.include_context,
+                &self.source_files,
             );
             expander.expand_top(items)
         };
@@ -228,7 +308,7 @@ impl<'a> Preprocessor<'a> {
                 continue;
             };
             let span = RawSpan::new(self.source, index, index + len);
-            if !is_spliced_newline(self.text, index) {
+            if !is_spliced_newline(&self.text, index) {
                 self.append(vec![WorkItem {
                     text: self.text[index..index + len].to_owned(),
                     kind: PieceKind::Whitespace,
@@ -241,7 +321,7 @@ impl<'a> Preprocessor<'a> {
     }
 
     fn emit_last_newline(&mut self, start: usize, end: usize) {
-        let span = last_newline(self.text, start, end);
+        let span = last_newline(&self.text, start, end);
         if let Some((from, to)) = span {
             self.append(vec![WorkItem {
                 text: self.text[from..to].to_owned(),
@@ -307,15 +387,8 @@ impl<'a> Preprocessor<'a> {
             "elif" => self.elif(&rest, name_span, directive_span),
             "else" => self.else_directive(&rest, name_span, directive_span),
             "endif" => self.endif(&rest, name_span, directive_span),
-            "include" | "pragma" => {
-                if self.is_active() {
-                    self.diags.push(
-                        PRE_UNSUPPORTED_DIRECTIVE,
-                        format!("#{name} is not supported in Phase 2"),
-                        directive_span,
-                    );
-                }
-            }
+            "include" => self.include_directive(&rest, directive_span),
+            "pragma" => self.pragma_directive(&rest, directive_span),
             _ => {
                 if self.is_active() {
                     self.diags.push(
@@ -327,6 +400,214 @@ impl<'a> Preprocessor<'a> {
             }
         }
         let _ = line_start;
+    }
+
+    fn include_directive(&mut self, rest: &MappedText, directive_span: RawSpan) {
+        if !self.is_active() {
+            return;
+        }
+        let Some(parsed) = parse_include(rest, &mut self.diags) else {
+            return;
+        };
+        if is_remote_spelling(&parsed.spelling) {
+            self.diags.push_with_related(
+                crate::preprocessor::diagnostics::PRE_INVALID_INCLUDE,
+                "remote or network include paths are not supported",
+                parsed.path_span,
+                vec![RawRelated {
+                    span: directive_span,
+                    label: "include directive",
+                }],
+            );
+            return;
+        }
+        let current_directory = self
+            .frames
+            .last()
+            .and_then(|frame| frame.directory.clone())
+            .filter(|_| !parsed.angle);
+        let resolved = resolve_include(
+            &parsed.spelling,
+            parsed.angle,
+            current_directory.as_deref(),
+            &self.include_dirs,
+        );
+        let Some(resolved) = resolved else {
+            self.diags.push_with_related(
+                crate::preprocessor::diagnostics::PRE_INCLUDE_NOT_FOUND,
+                format!("include file not found: {}", parsed.spelling),
+                parsed.path_span,
+                vec![RawRelated {
+                    span: directive_span,
+                    label: "include directive",
+                }],
+            );
+            return;
+        };
+        let canonical = std::fs::canonicalize(&resolved).ok();
+        if let Some(canonical) = &canonical {
+            if self.pragma_once.contains(canonical) {
+                return;
+            }
+            if let Some(index) = self
+                .frames
+                .iter()
+                .position(|frame| frame.canonical.as_ref() == Some(canonical))
+            {
+                let previous = self.frames[index]
+                    .entry_span
+                    .unwrap_or_else(|| RawSpan::point(self.frames[index].source, 0));
+                self.diags.push_with_related(
+                    crate::preprocessor::diagnostics::PRE_INCLUDE_CYCLE,
+                    format!("include cycle detected: {}", parsed.spelling),
+                    parsed.path_span,
+                    vec![
+                        RawRelated {
+                            span: previous,
+                            label: "previous include entry",
+                        },
+                        RawRelated {
+                            span: directive_span,
+                            label: "include directive",
+                        },
+                    ],
+                );
+                return;
+            }
+        }
+        if self.frames.len() > 64 {
+            let mut related = Vec::new();
+            if let Some(frame) = self.frames.last() {
+                if let Some(span) = frame.entry_span {
+                    related.push(RawRelated {
+                        span,
+                        label: "include stack",
+                    });
+                }
+            }
+            self.diags.push_with_related(
+                crate::preprocessor::diagnostics::PRE_INCLUDE_DEPTH,
+                "include depth exceeds 64",
+                parsed.path_span,
+                related,
+            );
+            return;
+        }
+        let display = display_include_path(&resolved);
+        let source = match self.manager.load_included_file(&resolved, &display) {
+            Ok(source) => source,
+            Err(error) => {
+                let code = match error {
+                    crate::source::SourceLoadError::TooLarge { .. }
+                    | crate::source::SourceLoadError::TooManyFiles { .. } => {
+                        crate::preprocessor::diagnostics::PRE_INCLUDE_LIMIT
+                    }
+                    crate::source::SourceLoadError::RemotePath { .. } => {
+                        crate::preprocessor::diagnostics::PRE_INVALID_INCLUDE
+                    }
+                    _ => crate::preprocessor::diagnostics::PRE_INCLUDE_NOT_FOUND,
+                };
+                self.diags.push_with_related(
+                    code,
+                    format!("cannot include {}: {error}", parsed.spelling),
+                    parsed.path_span,
+                    vec![RawRelated {
+                        span: directive_span,
+                        label: "include directive",
+                    }],
+                );
+                return;
+            }
+        };
+        let file_arc = match self.manager.files().get(source.file() as usize) {
+            Some(file) => Arc::clone(file),
+            None => return,
+        };
+        let file_len = file_arc.len();
+        let canonical = file_arc.canonical_path().cloned();
+        let directory = include_directory(file_arc.display_name(), file_arc.canonical_path());
+        let display_name = file_arc.display_name().to_owned();
+        let text = Arc::clone(file_arc.shared_text());
+        self.source_files.insert(source, Arc::clone(&file_arc));
+        let context = self.prov.add(ProvNode {
+            kind: OriginKind::Include,
+            span: RawSpan::new(source, 0, file_len),
+            invocation: Some(directive_span),
+            definition: None,
+            parent: self.include_context,
+            label: Some("included file"),
+        });
+        self.graph_edges.push(RawIncludeEdge {
+            from: self.source,
+            to: source,
+            path: parsed.path_span,
+            directive: directive_span,
+            angle: parsed.angle,
+        });
+        self.flush_pending();
+        let saved_source = self.source;
+        let saved_text = Arc::clone(&self.text);
+        let saved_context = self.include_context;
+        self.frames.push(IncludeFrame {
+            source,
+            canonical,
+            entry_span: Some(directive_span),
+            directory,
+        });
+        self.source = source;
+        self.text = text;
+        self.include_context = Some(context);
+        let condition_depth = self.conditions.len();
+        self.process_current_source();
+        self.flush_pending();
+        let eof = RawSpan::point(source, self.text.len());
+        while self.conditions.len() > condition_depth {
+            if let Some(frame) = self.conditions.pop() {
+                self.diags.push_with_related(
+                    PRE_UNTERMINATED_CONDITIONAL,
+                    "unterminated conditional directive in included file",
+                    frame.opening,
+                    vec![RawRelated {
+                        span: eof,
+                        label: "end of included file",
+                    }],
+                );
+            }
+        }
+        self.frames.pop();
+        self.source = saved_source;
+        self.text = saved_text;
+        self.include_context = saved_context;
+        let _ = display_name;
+    }
+
+    fn pragma_directive(&mut self, rest: &MappedText, directive_span: RawSpan) {
+        if !self.is_active() {
+            return;
+        }
+        let pieces: Vec<_> = tokenize_mapped(rest)
+            .into_iter()
+            .filter(|piece| !matches!(piece.kind, PieceKind::Whitespace | PieceKind::Comment))
+            .collect();
+        if pieces.len() == 1 && pieces[0].text == "once" {
+            if let Some(canonical) = self.frames.last().and_then(|frame| frame.canonical.clone()) {
+                self.pragma_once.insert(canonical);
+            }
+        } else {
+            let primary = pieces
+                .first()
+                .map(|piece| piece.span)
+                .unwrap_or(directive_span);
+            let word = pieces
+                .first()
+                .map(|piece| piece.text.as_str())
+                .unwrap_or("");
+            self.diags.push(
+                crate::preprocessor::diagnostics::PRE_UNKNOWN_PRAGMA,
+                format!("unknown pragma '{word}'"),
+                primary,
+            );
+        }
     }
 
     fn define(&mut self, directive_span: RawSpan, rest: &MappedText) {
@@ -361,12 +642,12 @@ impl<'a> Preprocessor<'a> {
         let name = text[name_start..position].to_owned();
         let name_span = rest.raw_span(name_start, position);
         let function_like = text[position..].starts_with('(');
-        let params = if function_like {
+        let (params, variadic) = if function_like {
             let parameter_text = rest.slice(position, text.len());
             match parse_parameters(&parameter_text) {
-                Some((params, consumed)) => {
+                Some((params, variadic, consumed)) => {
                     position += consumed;
-                    Some(params)
+                    (Some(params), variadic)
                 }
                 None => {
                     self.diags.push(
@@ -378,7 +659,7 @@ impl<'a> Preprocessor<'a> {
                 }
             }
         } else {
-            None
+            (None, false)
         };
         let replacement_text = rest.slice(position, text.len());
         let leading = replacement_text.text().len()
@@ -403,10 +684,10 @@ impl<'a> Preprocessor<'a> {
             pieces.clear();
         }
         for piece in &pieces {
-            if piece.text == "#" || piece.text == "##" {
+            if (piece.text == "#" || piece.text == "##") && params.is_none() {
                 self.diags.push(
-                    PRE_UNSUPPORTED_MACRO_OPERATOR,
-                    "stringification and token pasting are not supported in Phase 2",
+                    crate::preprocessor::diagnostics::PRE_INVALID_MACRO_OPERATOR,
+                    "macro operators # and ## require a function-like macro",
                     piece.span,
                 );
                 return;
@@ -415,6 +696,7 @@ impl<'a> Preprocessor<'a> {
         let definition = MacroDefinition {
             name,
             params,
+            variadic,
             replacement: pieces,
             definition_span: directive_span,
         };
@@ -645,6 +927,8 @@ impl<'a> Preprocessor<'a> {
             &mut self.diags,
             &mut self.limits,
             self.source,
+            self.include_context,
+            &self.source_files,
         );
         let tokens = expr::tokenize(&items, &mut self.diags);
         let result = expr::evaluate(&tokens, expression_span, &mut self.diags);
@@ -755,7 +1039,7 @@ impl<'a> Preprocessor<'a> {
             text.push_str(&item.text);
         }
         let text: Arc<str> = Arc::from(text);
-        let files = std::mem::take(&mut self.files);
+        let files = self.manager.files().to_vec();
         let mut builder = SourceMapBuilder::new(self.unit, Arc::clone(&text), files)?;
         let mut origin_ids: Vec<crate::source::OriginId> =
             Vec::with_capacity(self.prov.nodes.len());
@@ -802,15 +1086,55 @@ impl<'a> Preprocessor<'a> {
         }
 
         let diagnostics = self.materialize_diagnostics(&mut builder)?;
-        let anchor_offset = if text.is_empty() {
-            self.last_directive_end.unwrap_or(0).min(self.text.len())
+        let anchor_point = if text.is_empty() {
+            self.last_directive_end
+                .unwrap_or_else(|| RawSpan::point(self.root_source, 0))
         } else {
-            self.text.len()
+            RawSpan::point(self.root_source, self.root_len)
         };
-        let anchor = builder.source_span(self.source, anchor_offset, anchor_offset)?;
+        let anchor =
+            builder.source_span(anchor_point.source, anchor_point.start, anchor_point.end)?;
         builder.set_eof_anchor(anchor)?;
+        let graph = self.materialize_include_graph(&mut builder)?;
         let map = Arc::new(builder.build()?);
-        Ok(PreparedSource::new(self.unit, text, map, diagnostics))
+        Ok(PreparedSource::new(
+            self.unit,
+            text,
+            map,
+            diagnostics,
+            Arc::new(graph),
+        ))
+    }
+
+    fn materialize_include_graph(
+        &self,
+        builder: &mut SourceMapBuilder,
+    ) -> Result<IncludeGraph, SpanError> {
+        let nodes = self
+            .manager
+            .files()
+            .iter()
+            .map(|file| {
+                IncludeNode::new(
+                    file.id(),
+                    file.display_name().to_owned(),
+                    file.canonical_path().cloned(),
+                )
+            })
+            .collect();
+        let mut edges = Vec::with_capacity(self.graph_edges.len());
+        for edge in &self.graph_edges {
+            let path = builder.source_span(edge.path.source, edge.path.start, edge.path.end)?;
+            let directive = builder.source_span(
+                edge.directive.source,
+                edge.directive.start,
+                edge.directive.end,
+            )?;
+            edges.push(IncludeEdge::new(
+                edge.from, edge.to, path, directive, edge.angle,
+            ));
+        }
+        Ok(IncludeGraph::new(nodes, edges))
     }
 
     fn materialize_diagnostics(
@@ -867,17 +1191,30 @@ impl ConditionalKind {
 }
 
 pub(crate) fn preprocess_full(
-    manager: &SourceManager,
+    manager: &mut SourceManager,
     root: SourceId,
+    options: &PreprocessOptions,
 ) -> Result<PreparedSource, SpanError> {
-    let unit = manager.unit();
-    if root.unit() != unit {
-        return Err(SpanError::ForeignAnalysisUnit);
+    if options.dialect() == PreprocessDialect::Firestorm {
+        const MARKER: &str = "//fspreprocessor off";
+        let file = manager.file(root).ok_or(SpanError::UnknownSourceId)?;
+        if let Some(offset) = file.text().find(MARKER) {
+            let prepared = identity::preprocess_identity(manager, root)?;
+            let primary = prepared
+                .map()
+                .source_span(root, offset, offset + MARKER.len())?;
+            let diagnostic = PreprocessDiagnostic {
+                code: crate::preprocessor::diagnostics::PRE_FIRESTORM_DISABLED,
+                severity: Severity::Info,
+                kind: DiagnosticKind::Syntax,
+                message: "preprocessing disabled by //fspreprocessor off".to_owned(),
+                primary,
+                related: Vec::new(),
+            };
+            return Ok(prepared.with_preprocess_diagnostics(vec![diagnostic]));
+        }
     }
-    let file = manager.file(root).ok_or(SpanError::UnknownSourceId)?;
-    let text = file.text();
-    let processor = Preprocessor::new(unit, root, text, manager.files().to_vec());
-    processor.run()
+    Preprocessor::new(manager, root, options)?.run()
 }
 
 /// Recognize `#` after a block comment that began on an earlier physical line
@@ -902,6 +1239,20 @@ fn closing_comment_directive(text: &str, start: usize) -> Option<(usize, usize)>
     } else {
         None
     }
+}
+
+fn include_directory(display_name: &str, canonical: Option<&PathBuf>) -> Option<PathBuf> {
+    if !display_name.starts_with('<') {
+        if let Some(parent) = Path::new(display_name)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    canonical
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
 }
 
 fn continued_line(text: &str, start: usize) -> bool {
@@ -1064,7 +1415,7 @@ fn last_newline(text: &str, start: usize, end: usize) -> Option<(usize, usize)> 
     }
 }
 
-fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
+fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, bool, usize)> {
     let text = rest.text();
     let mut position = 0usize;
     skip_directive_space(text, &mut position);
@@ -1073,22 +1424,32 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
     }
     position += 1;
     let mut params = Vec::new();
-    let mut first_parameter = true;
+    let mut variadic = false;
     loop {
         skip_directive_space(text, &mut position);
         if position >= text.len() {
             return None;
         }
         if text[position..].starts_with(')') {
-            if !first_parameter {
+            if variadic {
+                position += 1;
+                break;
+            }
+            if !params.is_empty() {
                 return None;
             }
             position += 1;
             break;
         }
-        first_parameter = false;
         if text[position..].starts_with("...") {
-            return None;
+            variadic = true;
+            position += 3;
+            skip_directive_space(text, &mut position);
+            if position >= text.len() || !text[position..].starts_with(')') {
+                return None;
+            }
+            position += 1;
+            break;
         }
         let start = position;
         let first = text[position..].chars().next()?;
@@ -1104,7 +1465,7 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
             position += ch.len_utf8();
         }
         let param = text[start..position].to_owned();
-        if params.contains(&param) {
+        if params.contains(&param) || param == "__VA_ARGS__" {
             return None;
         }
         params.push(param);
@@ -1115,7 +1476,20 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
         if text[position..].starts_with(',') {
             position += 1;
             skip_directive_space(text, &mut position);
-            if position >= text.len() || text[position..].starts_with(')') {
+            if position >= text.len() {
+                return None;
+            }
+            if text[position..].starts_with("...") {
+                variadic = true;
+                position += 3;
+                skip_directive_space(text, &mut position);
+                if position >= text.len() || !text[position..].starts_with(')') {
+                    return None;
+                }
+                position += 1;
+                break;
+            }
+            if text[position..].starts_with(')') {
                 return None;
             }
             continue;
@@ -1126,7 +1500,7 @@ fn parse_parameters(rest: &MappedText) -> Option<(Vec<String>, usize)> {
         }
         return None;
     }
-    Some((params, position))
+    Some((params, variadic, position))
 }
 
 fn skip_directive_space(text: &str, position: &mut usize) {
@@ -1488,13 +1862,10 @@ mod phase2_extra_tests {
     }
 
     #[test]
-    fn unsupported_directives_and_operators_are_diagnosed() {
-        let source = "#include \"x\"\n#pragma once\n#define BAD(a) #a\n#define PASTE(a) a ## a\n";
+    fn missing_include_is_diagnosed_and_advanced_macros_are_accepted() {
+        let source = "#include \"x\"\n#pragma once\n#define STR(a) #a\n#define PASTE(a) a ## a\n";
         let prepared = run(source);
-        assert_eq!(
-            codes(&prepared),
-            vec!["PRE024", "PRE024", "PRE023", "PRE023"]
-        );
+        assert_eq!(codes(&prepared), vec!["PRE032"]);
     }
 
     #[test]
@@ -2217,7 +2588,6 @@ mod phase2_diagnostic_code_tests {
         assert!(codes("#bogus\n").contains(&"PRE001"));
         assert!(codes("#\n").contains(&"PRE002"));
         assert!(codes("#define\n").contains(&"PRE003"));
-        assert!(codes("#define F(...) x\n").contains(&"PRE003"));
         assert!(codes("#define F(a,) x\n").contains(&"PRE003"));
         assert!(codes("#undef\n").contains(&"PRE004"));
         assert!(codes("#undef X Y\n").contains(&"PRE004"));
@@ -2598,5 +2968,857 @@ mod phase2_multiline_provenance_tests {
             .related()
             .iter()
             .any(|span| text_of(&prepared, *span).contains("#define ID")));
+    }
+}
+
+#[cfg(test)]
+mod phase3_include_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-include-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn run_file(root: &Path, include_dirs: Vec<PathBuf>) -> (SourceManager, PreparedSource) {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(930), 0);
+        let mut manager = SourceManager::new(unit);
+        let root_id = manager.load_root_file(root).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root_id,
+            PreprocessOptions::full().with_include_dirs(include_dirs),
+        )
+        .unwrap();
+        (manager, prepared)
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|item| item.code)
+            .collect()
+    }
+
+    #[test]
+    fn quoted_and_nested_include_expand_textually() {
+        let dir = temp_dir();
+        fs::write(dir.join("b.lsl"), "integer b = B;\n").unwrap();
+        fs::write(
+            dir.join("a.lsl"),
+            "#define B 2\n#include \"b.lsl\"\ninteger a = 1;\n",
+        )
+        .unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"a.lsl\"\n").unwrap();
+        let (_manager, prepared) = run_file(&dir.join("root.lsl"), Vec::new());
+        assert!(
+            prepared.text().contains("integer b = 2;"),
+            "{}",
+            prepared.text()
+        );
+        assert!(prepared.text().contains("integer a = 1;"));
+        assert!(
+            prepared.preprocess_diagnostics().is_empty(),
+            "{:?}",
+            prepared.preprocess_diagnostics()
+        );
+        assert_eq!(prepared.include_graph().nodes().len(), 3);
+        assert_eq!(prepared.include_graph().edges().len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn angle_include_uses_include_directories() {
+        let dir = temp_dir();
+        let includes = dir.join("inc");
+        fs::create_dir_all(&includes).unwrap();
+        fs::write(includes.join("x.lsl"), "integer x = 1;\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include <x.lsl>\n").unwrap();
+        let (manager, prepared) = run_file(&dir.join("root.lsl"), vec![includes.clone()]);
+        assert!(prepared.text().contains("integer x = 1;"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert_eq!(manager.files().len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_include_is_a_preprocessor_diagnostic() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"missing.lsl\"\ninteger x = 1;\n",
+        )
+        .unwrap();
+        let (_manager, prepared) = run_file(&dir.join("root.lsl"), Vec::new());
+        assert_eq!(codes(&prepared), vec!["PRE032"]);
+        let diagnostic = &prepared.preprocess_diagnostics()[0];
+        let file = prepared.map().file(diagnostic.primary.source()).unwrap();
+        assert_eq!(
+            &file.text()[diagnostic.primary.start()..diagnostic.primary.end()],
+            "missing.lsl"
+        );
+        assert!(diagnostic.related[0].span.end() > diagnostic.related[0].span.start());
+        assert!(prepared.text().contains("integer x = 1;"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_advanced_macro_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(931), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|item| item.code)
+            .collect()
+    }
+
+    #[test]
+    fn stringifies_parameters_without_expanding_them() {
+        let prepared = run(
+            "#define X 1\n#define STR(x) #x\nSTR(hello) STR(  a   b  ) STR(\"q\\\\z\") STR(X)\n",
+        );
+        assert!(prepared.text().contains("\"hello\""), "{}", prepared.text());
+        assert!(prepared.text().contains("\"a b\""), "{}", prepared.text());
+        assert!(
+            prepared.text().contains("\"\\\"q\\\\\\\\z\\\"\""),
+            "{}",
+            prepared.text()
+        );
+        assert!(prepared.text().contains("\"X\""), "{}", prepared.text());
+    }
+
+    #[test]
+    fn empty_stringification_is_an_empty_string() {
+        let prepared = run("#define STR(x) #x\nSTR()\n");
+        assert!(prepared.text().contains("\"\""), "{}", prepared.text());
+    }
+
+    #[test]
+    fn token_pasting_identifiers_numbers_and_compound_tokens() {
+        let prepared = run("#define JOIN(a,b) a ## b\nJOIN(foo,bar) JOIN(1,2) JOIN(<,<)\n");
+        assert!(prepared.text().contains("foobar"), "{}", prepared.text());
+        assert!(prepared.text().contains("12"), "{}", prepared.text());
+        assert!(prepared.text().contains("<<"), "{}", prepared.text());
+    }
+
+    #[test]
+    fn invalid_token_paste_is_diagnosed() {
+        let prepared = run("#define BAD(a,b) a ## b\nBAD(1, +)\n");
+        assert!(
+            codes(&prepared).contains(&"PRE038"),
+            "{:?}",
+            codes(&prepared)
+        );
+        assert!(prepared.text().contains("BAD(1, +)"), "{}", prepared.text());
+    }
+
+    #[test]
+    fn token_paste_with_empty_operand_and_chain() {
+        let prepared = run("#define P(a,b,c) a ## b ## c\nP(x,,y) P(,,z)\n");
+        assert!(prepared.text().contains("xy"), "{}", prepared.text());
+        assert!(prepared.text().contains('z'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn variadic_macros_expand_fixed_and_va_args() {
+        let prepared =
+            run("#define LOG(fmt, ...) fmt __VA_ARGS__\nLOG(1) LOG(1, 2, 3) LOG(1, (2, 3))\n");
+        assert!(prepared.text().contains("1 "), "{}", prepared.text());
+        assert!(prepared.text().contains("1 2, 3"), "{}", prepared.text());
+        assert!(prepared.text().contains("1 (2, 3)"), "{}", prepared.text());
+        assert!(
+            prepared.preprocess_diagnostics().is_empty(),
+            "{:?}",
+            prepared.preprocess_diagnostics()
+        );
+    }
+
+    #[test]
+    fn variadic_argument_count_is_validated() {
+        let prepared = run("#define V(a, b, ...) a b __VA_ARGS__\nV(1)\n");
+        assert!(
+            codes(&prepared).contains(&"PRE014"),
+            "{:?}",
+            codes(&prepared)
+        );
+    }
+
+    #[test]
+    fn stringify_and_paste_origins_use_the_invocation() {
+        let source = "#define S(x) #x\n#define J(a,b) a ## b\nS(hello) J(foo,bar)\n";
+        let prepared = run(source);
+        let hello = prepared.text().find("\"hello\"").unwrap();
+        let resolved = prepared
+            .map()
+            .resolve_span(PreparedSpan::new(prepared.unit(), hello, hello + 7))
+            .unwrap();
+        let file = prepared.map().file(resolved.primary().source()).unwrap();
+        assert_eq!(
+            &file.text()[resolved.primary().start()..resolved.primary().end()],
+            "S(hello)"
+        );
+        let foo = prepared.text().find("foobar").unwrap();
+        let resolved = prepared
+            .map()
+            .resolve_span(PreparedSpan::new(prepared.unit(), foo, foo + 6))
+            .unwrap();
+        let file = prepared.map().file(resolved.primary().source()).unwrap();
+        assert_eq!(
+            &file.text()[resolved.primary().start()..resolved.primary().end()],
+            "J(foo,bar)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase3_firestorm_kill_switch_tests {
+    use super::*;
+    use crate::diagnostic::Severity;
+    use crate::preprocessor::config::{PreprocessConfig, PreprocessOptions};
+
+    fn run(source: &str, options: PreprocessOptions) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(932), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", source).unwrap();
+        crate::preprocessor::preprocess(&manager, root, options).unwrap()
+    }
+
+    fn assert_disabled(source: &str, marker_offset: usize) {
+        let prepared = run(source, PreprocessOptions::firestorm());
+        assert_eq!(prepared.text(), source);
+        assert_eq!(prepared.preprocess_diagnostics().len(), 1);
+        let diagnostic = &prepared.preprocess_diagnostics()[0];
+        assert_eq!(diagnostic.code, "PRE037");
+        assert_eq!(diagnostic.severity, Severity::Info);
+        assert_eq!(diagnostic.primary.start(), marker_offset);
+        assert_eq!(
+            diagnostic.primary.end(),
+            marker_offset + "//fspreprocessor off".len()
+        );
+        assert!(prepared.text().contains("X") || !source.contains("X"));
+    }
+
+    #[test]
+    fn marker_absent_processes_normally() {
+        let source = "#define X 1\nX\n";
+        let prepared = run(source, PreprocessOptions::firestorm());
+        assert!(prepared.text().contains('1'));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn marker_at_start_middle_end_string_and_comment_disable_everything() {
+        let marker = "//fspreprocessor off";
+        let cases = [
+            format!("{marker}\n#define X 1\nX\n"),
+            format!("#define X 1\n{marker}\nX\n"),
+            format!("#define X 1\nX\n{marker}"),
+            format!("string s = \"{marker}\";\n#define X 1\nX\n"),
+            format!("/* {marker} */\n#define X 1\nX\n"),
+        ];
+        for source in cases {
+            let offset = source.find(marker).unwrap();
+            assert_disabled(&source, offset);
+        }
+    }
+
+    #[test]
+    fn standard_lsl_mode_does_not_apply_the_firestorm_marker() {
+        let source = "//fspreprocessor off\n#define X 1\nX\n";
+        let prepared = run(source, PreprocessConfig::full());
+        assert!(prepared.text().contains('1'));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod phase3_builtin_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn run_text(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(933), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessOptions::firestorm()).unwrap()
+    }
+
+    #[test]
+    fn file_and_line_are_static_and_deterministic() {
+        let prepared = run_text("__FILE__ __LINE__\n__LINE__\n");
+        assert!(
+            prepared.text().contains("\"root.lsl\""),
+            "{}",
+            prepared.text()
+        );
+        assert!(
+            prepared.text().starts_with("\"root.lsl\" 1"),
+            "{}",
+            prepared.text()
+        );
+        assert!(prepared.text().contains("\n2"), "{}", prepared.text());
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn builtins_in_macro_bodies_use_the_invocation_line() {
+        let prepared = run_text("#define LINE __LINE__\n#define ID(x) x\n\nLINE ID(__LINE__)\n");
+        assert!(prepared.text().contains("4 4"), "{}", prepared.text());
+    }
+
+    #[test]
+    fn dynamic_or_unconfirmed_builtins_are_not_fabricated() {
+        let prepared = run_text("__DATE__ __TIME__ __TIMESTAMP__ __COUNTER__\n");
+        assert!(prepared.text().contains("__DATE__"));
+        assert!(prepared.text().contains("__COUNTER__"));
+        assert!(!prepared.text().contains("202"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn builtins_use_the_included_file_and_its_lines() {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neolint-phase3-builtins-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inc.lsl"), "__FILE__ __LINE__\r\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"inc.lsl\"\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(934), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::firestorm(),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("inc.lsl\""), "{}", prepared.text());
+        assert!(
+            prepared.text().contains("inc.lsl\" 1"),
+            "{}",
+            prepared.text()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_include_advanced_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-include-adv-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn run_path(root: &Path, dirs: Vec<PathBuf>) -> (SourceManager, PreparedSource) {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(935), 0);
+        let mut manager = SourceManager::new(unit);
+        let root_id = manager.load_root_file(root).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root_id,
+            PreprocessOptions::full().with_include_dirs(dirs),
+        )
+        .unwrap();
+        (manager, prepared)
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|item| item.code)
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_include_expands_twice_without_reloading_the_file() {
+        let dir = temp_dir();
+        fs::write(dir.join("inc.lsl"), "TEXT\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"inc.lsl\"\n#include \"inc.lsl\"\n",
+        )
+        .unwrap();
+        let (manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        assert_eq!(prepared.text().matches("TEXT").count(), 2);
+        assert_eq!(manager.files().len(), 2);
+        assert_eq!(prepared.include_graph().edges().len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn classic_guards_and_pragma_once_suppress_second_body() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("guard.lsl"),
+            "#ifndef GUARD\n#define GUARD\nGUARDED\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("once.lsl"), "#pragma once\nONCE\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"guard.lsl\"\n#include \"guard.lsl\"\n#include \"once.lsl\"\n#include \"once.lsl\"\n",
+        )
+        .unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        assert_eq!(prepared.text().matches("GUARDED").count(), 1);
+        assert_eq!(prepared.text().matches("ONCE").count(), 1);
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn include_cycles_are_diagnosed_without_reentry() {
+        let dir = temp_dir();
+        fs::write(dir.join("a.lsl"), "#include \"b.lsl\"\nA\n").unwrap();
+        fs::write(dir.join("b.lsl"), "#include \"a.lsl\"\nB\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"a.lsl\"\n").unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        assert_eq!(codes(&prepared), vec!["PRE033"]);
+        assert!(prepared.text().contains('A'));
+        assert!(prepared.text().contains('B'));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_missing_remote_and_unknown_pragma_are_diagnostics() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include\n#include \"//host/share/x\"\n#pragma unknown\nINTEGER\n",
+        )
+        .unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        let codes = codes(&prepared);
+        assert!(codes.contains(&"PRE031"), "{codes:?}");
+        assert!(codes.contains(&"PRE036"), "{codes:?}");
+        assert!(prepared.text().contains("INTEGER"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unicode_and_spaces_in_paths_work() {
+        let dir = temp_dir();
+        fs::write(dir.join("файл с пробелом.lsl"), "UNICODE\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"файл с пробелом.lsl\"\n").unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        assert!(prepared.text().contains("UNICODE"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stdin_relative_include_requires_an_include_directory() {
+        let dir = temp_dir();
+        fs::write(dir.join("x.lsl"), "STDIN_INCLUDE\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(936), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager
+            .load_root_text("<stdin>", "#include \"x.lsl\"\n")
+            .unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full(),
+        )
+        .unwrap();
+        assert_eq!(codes(&prepared), vec!["PRE032"]);
+
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(937), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager
+            .load_root_text("<stdin>", "#include \"x.lsl\"\n")
+            .unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full().with_include_dirs(vec![dir.clone()]),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("STDIN_INCLUDE"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn include_depth_64_is_allowed_and_65_is_diagnosed() {
+        let dir = temp_dir();
+        for index in 0..64 {
+            let body = if index == 63 {
+                "DEPTH_END\n".to_owned()
+            } else {
+                format!("#include \"f{}.lsl\"\n", index + 1)
+            };
+            fs::write(dir.join(format!("f{index}.lsl")), body).unwrap();
+        }
+        fs::write(dir.join("root.lsl"), "#include \"f0.lsl\"\n").unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        assert!(prepared.text().contains("DEPTH_END"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+
+        for index in 0..66 {
+            let body = if index == 65 {
+                "TOO_DEEP\n".to_owned()
+            } else {
+                format!("#include \"g{}.lsl\"\n", index + 1)
+            };
+            fs::write(dir.join(format!("g{index}.lsl")), body).unwrap();
+        }
+        fs::write(dir.join("deep.lsl"), "#include \"g0.lsl\"\n").unwrap();
+        let (_manager, prepared) = run_path(&dir.join("deep.lsl"), Vec::new());
+        assert!(!prepared.text().contains("TOO_DEEP"));
+        assert!(
+            codes(&prepared).contains(&"PRE034"),
+            "{:?}",
+            codes(&prepared)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn included_code_resolves_to_its_file_and_include_site() {
+        let dir = temp_dir();
+        fs::write(dir.join("inc.lsl"), "integer inc = 1;\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"inc.lsl\"\ninteger root = 2;\n",
+        )
+        .unwrap();
+        let (_manager, prepared) = run_path(&dir.join("root.lsl"), Vec::new());
+        let start = prepared.text().find("inc = 1").unwrap();
+        let resolved = prepared
+            .map()
+            .resolve_span(PreparedSpan::new(prepared.unit(), start, start + 3))
+            .unwrap();
+        let file = prepared.map().file(resolved.primary().source()).unwrap();
+        assert!(file.display_name().ends_with("inc.lsl"));
+        let related: Vec<&str> = resolved
+            .related()
+            .iter()
+            .map(|span| {
+                let file = prepared.map().file(span.source()).unwrap();
+                &file.text()[span.start()..span.end()]
+            })
+            .collect();
+        assert!(
+            related.iter().any(|text| text.contains("#include")),
+            "{related:?}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_include_limit_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-include-limit-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn oversized_included_file_is_diagnosed_without_loading() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("big.lsl"),
+            vec![b'a'; crate::source::manager::MAX_INCLUDED_SOURCE_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"big.lsl\"\nOK\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(938), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full(),
+        )
+        .unwrap();
+        assert!(prepared
+            .preprocess_diagnostics()
+            .iter()
+            .any(|item| item.code == "PRE035"));
+        assert!(prepared.text().contains("OK"));
+        assert_eq!(manager.files().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_file_count_limit_is_diagnosed() {
+        let dir = temp_dir();
+        let mut root = String::new();
+        for index in 0..crate::source::manager::MAX_SOURCE_FILES_PER_UNIT {
+            fs::write(dir.join(format!("f{index}.lsl")), "X\n").unwrap();
+            root.push_str(&format!("#include \"f{index}.lsl\"\n"));
+        }
+        fs::write(dir.join("root.lsl"), root).unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(939), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full(),
+        )
+        .unwrap();
+        assert!(prepared
+            .preprocess_diagnostics()
+            .iter()
+            .any(|item| item.code == "PRE035"));
+        assert_eq!(
+            manager.files().len(),
+            crate::source::manager::MAX_SOURCE_FILES_PER_UNIT
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_include_map_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-include-map-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn included_macro_stringify_and_paste_every_byte_resolves() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("inc.lsl"),
+            "#define STR(x) #x\n#define J(a,b) a ## b\n#define ID(x) x\ninteger v = J(foo,bar) + ID(1);\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"inc.lsl\"\nstring s = STR(hello world);\n",
+        )
+        .unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(940), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full(),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("foobar"), "{}", prepared.text());
+        assert!(
+            prepared.text().contains("\"hello world\""),
+            "{}",
+            prepared.text()
+        );
+        for start in 0..prepared.text().len() {
+            if !prepared.text().is_char_boundary(start) {
+                continue;
+            }
+            for end in start + 1..=prepared.text().len() {
+                if !prepared.text().is_char_boundary(end) {
+                    continue;
+                }
+                assert!(
+                    prepared
+                        .map()
+                        .resolve_span(PreparedSpan::new(prepared.unit(), start, end))
+                        .is_ok(),
+                    "unresolved {start}..{end}"
+                );
+            }
+        }
+        let foo = prepared.text().find("foobar").unwrap();
+        let resolved = prepared
+            .map()
+            .resolve_span(PreparedSpan::new(prepared.unit(), foo, foo + 6))
+            .unwrap();
+        let file = prepared.map().file(resolved.primary().source()).unwrap();
+        assert!(file.display_name().ends_with("inc.lsl"));
+        assert!(resolved.related().iter().any(|span| {
+            let file = prepared.map().file(span.source()).unwrap();
+            file.text()[span.start()..span.end()].contains("#include")
+        }));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_include_policy_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessOptions;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-include-policy-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn include_directories_are_searched_in_order() {
+        let dir = temp_dir();
+        let first = dir.join("first");
+        let second = dir.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("x.lsl"), "FIRST\n").unwrap();
+        fs::write(second.join("x.lsl"), "SECOND\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include <x.lsl>\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(941), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full().with_include_dirs(vec![first, second]),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("FIRST"));
+        assert!(!prepared.text().contains("SECOND"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn graph_nodes_follow_depth_first_first_entry_order() {
+        let dir = temp_dir();
+        fs::write(dir.join("a.lsl"), "#include \"c.lsl\"\nA\n").unwrap();
+        fs::write(dir.join("b.lsl"), "B\n").unwrap();
+        fs::write(dir.join("c.lsl"), "C\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"a.lsl\"\n#include \"b.lsl\"\n#include \"c.lsl\"\n",
+        )
+        .unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(942), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessOptions::full(),
+        )
+        .unwrap();
+        let names: Vec<&str> = prepared
+            .include_graph()
+            .nodes()
+            .iter()
+            .map(|node| {
+                Path::new(node.display_name())
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(names, vec!["root.lsl", "a.lsl", "c.lsl", "b.lsl"]);
+        assert_eq!(prepared.include_graph().edges().len(), 4);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_advanced_macro_extra_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(943), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    #[test]
+    fn paste_result_is_rescanned_as_a_macro_name() {
+        let prepared = run("#define FOO 7\n#define JOIN(a,b) a ## b\nJOIN(F,OO)\n");
+        assert!(prepared.text().contains('7'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn stringification_normalizes_comments_and_whitespace() {
+        let prepared = run("#define STR(x) #x\nSTR(a  /* c */   b)\n");
+        assert!(prepared.text().contains("\"a b\""), "{}", prepared.text());
+    }
+
+    #[test]
+    fn empty_variadic_argument_list_is_allowed() {
+        let prepared = run("#define V(...) __VA_ARGS__\nV()\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        let prepared = run("#define V(a, ...) a __VA_ARGS__\nV(1)\n");
+        assert!(prepared.text().contains('1'));
+        assert!(prepared.preprocess_diagnostics().is_empty());
     }
 }

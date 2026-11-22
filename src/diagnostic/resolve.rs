@@ -363,7 +363,13 @@ mod tests {
             .set_eof_anchor(builder.source_span(root, 10, 10).unwrap())
             .unwrap();
         let map = builder.build().unwrap();
-        let prepared = PreparedSource::new(unit, Arc::from("abc"), Arc::new(map), Vec::new());
+        let prepared = PreparedSource::new(
+            unit,
+            Arc::from("abc"),
+            Arc::new(map),
+            Vec::new(),
+            Arc::new(crate::preprocessor::IncludeGraph::default()),
+        );
 
         let mut diagnostic = PreparedDiagnostic::new(
             "PAR999",
@@ -418,6 +424,7 @@ mod tests {
             Arc::from("abc"),
             Arc::new(builder.build().unwrap()),
             Vec::new(),
+            Arc::new(crate::preprocessor::IncludeGraph::default()),
         );
         let diagnostic = PreparedDiagnostic::new(
             "PAR999",
@@ -460,6 +467,7 @@ mod tests {
             Arc::from("abd"),
             Arc::new(builder.build().unwrap()),
             Vec::new(),
+            Arc::new(crate::preprocessor::IncludeGraph::default()),
         );
         let diagnostic = PreparedDiagnostic::new(
             "PAR999",

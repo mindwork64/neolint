@@ -64,6 +64,8 @@ impl PreprocessDiagnostic {
 
 /// Maximum number of PRE diagnostics per preprocessing run.
 pub(crate) const MAX_PREPROCESS_DIAGNOSTICS: usize = 1_000;
+/// Total rendered diagnostics retained per AnalysisUnit.
+pub const MAX_TOTAL_DIAGNOSTICS: usize = 10_000;
 
 pub(crate) const PRE_UNKNOWN_DIRECTIVE: &str = "PRE001";
 pub(crate) const PRE_MALFORMED_DIRECTIVE: &str = "PRE002";
@@ -86,14 +88,21 @@ pub(crate) const PRE_EXPANSION_DEPTH: &str = "PRE019";
 pub(crate) const PRE_EXPANDED_BYTES_LIMIT: &str = "PRE020";
 pub(crate) const PRE_EXPANDED_TOKENS_LIMIT: &str = "PRE021";
 pub(crate) const PRE_DIAGNOSTIC_LIMIT: &str = "PRE022";
-pub(crate) const PRE_UNSUPPORTED_MACRO_OPERATOR: &str = "PRE023";
-pub(crate) const PRE_UNSUPPORTED_DIRECTIVE: &str = "PRE024";
 pub(crate) const PRE_CONDITIONAL_DEPTH: &str = "PRE025";
 pub(crate) const PRE_DIVISION_BY_ZERO: &str = "PRE026";
 pub(crate) const PRE_EXPRESSION_OVERFLOW: &str = "PRE027";
 pub(crate) const PRE_INVALID_SHIFT: &str = "PRE028";
 pub(crate) const PRE_MALFORMED_LITERAL: &str = "PRE029";
 pub(crate) const PRE_MISSING_OPERAND: &str = "PRE030";
+pub(crate) const PRE_INVALID_INCLUDE: &str = "PRE031";
+pub(crate) const PRE_INCLUDE_NOT_FOUND: &str = "PRE032";
+pub(crate) const PRE_INCLUDE_CYCLE: &str = "PRE033";
+pub(crate) const PRE_INCLUDE_DEPTH: &str = "PRE034";
+pub(crate) const PRE_INCLUDE_LIMIT: &str = "PRE035";
+pub(crate) const PRE_UNKNOWN_PRAGMA: &str = "PRE036";
+pub(crate) const PRE_FIRESTORM_DISABLED: &str = "PRE037";
+pub(crate) const PRE_INVALID_MACRO_OPERATOR: &str = "PRE038";
+pub(crate) const PRE_DIAGNOSTIC_OVERFLOW: &str = "PRE039";
 
 #[derive(Debug, Clone)]
 pub(crate) struct RawRelated {
@@ -176,4 +185,25 @@ impl DiagSink {
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
+}
+
+pub(crate) fn cap_rendered(
+    prepared: &crate::preprocessor::PreparedSource,
+    rendered: &mut Vec<crate::diagnostic::resolve::RenderedDiagnostic>,
+) -> Result<(), crate::source::map::SpanError> {
+    use crate::diagnostic::resolve::RenderedDiagnostic;
+    if rendered.len() <= MAX_TOTAL_DIAGNOSTICS {
+        return Ok(());
+    }
+    rendered.truncate(MAX_TOTAL_DIAGNOSTICS - 1);
+    let diagnostic = PreprocessDiagnostic {
+        code: PRE_DIAGNOSTIC_OVERFLOW,
+        severity: Severity::Error,
+        kind: DiagnosticKind::Syntax,
+        message: format!("total diagnostic limit ({MAX_TOTAL_DIAGNOSTICS}) reached"),
+        primary: prepared.map().eof_anchor(),
+        related: Vec::new(),
+    };
+    rendered.push(RenderedDiagnostic::from_preprocess(diagnostic, prepared)?);
+    Ok(())
 }

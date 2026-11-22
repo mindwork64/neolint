@@ -9,9 +9,11 @@ pub mod config;
 pub mod diagnostics;
 pub mod identity;
 
+pub(crate) mod builtins;
 pub(crate) mod directive;
 pub(crate) mod expand;
 pub(crate) mod expr;
+pub(crate) mod include;
 pub(crate) mod macros;
 pub(crate) mod token;
 
@@ -21,9 +23,10 @@ use crate::diagnostic::Span;
 use crate::source::file::AnalysisUnitId;
 use crate::source::map::{PreparedSpan, SourceMap, SpanError};
 
-pub use config::{PreprocessConfig, PreprocessMode, PreprocessOptions};
+pub use config::{PreprocessConfig, PreprocessDialect, PreprocessMode, PreprocessOptions};
 pub use diagnostics::{PreprocessDiagnostic, RelatedLocation};
 pub use identity::preprocess_identity;
+pub use include::{IncludeEdge, IncludeGraph, IncludeNode};
 
 /// Preprocess a loaded root into a prepared source.
 ///
@@ -36,9 +39,35 @@ pub fn preprocess(
     root: crate::source::SourceId,
     config: impl Into<PreprocessOptions>,
 ) -> Result<PreparedSource, SpanError> {
-    match config.into().mode() {
+    let options = config.into();
+    match options.mode() {
         PreprocessMode::Identity => identity::preprocess_identity(manager, root),
-        PreprocessMode::Full => directive::preprocess_full(manager, root),
+        PreprocessMode::Full => {
+            // Preserve the Phase 2 read-only entry point. Included files are
+            // loaded into a snapshot; callers that need the unit's SourceManager
+            // updated use `preprocess_with_includes`.
+            let mut snapshot = manager.clone();
+            directive::preprocess_full(&mut snapshot, root, &options)
+        }
+    }
+}
+
+/// Run full preprocessing, loading included sources into `manager`.
+///
+/// This is the Phase 3 entry point for CLI/pipeline integration. Unlike the
+/// compatibility [`preprocess`] entry point, the caller's [`SourceManager`]
+/// receives every included `SourceFile` in deterministic load order.
+///
+/// [`SourceManager`]: crate::source::manager::SourceManager
+pub fn preprocess_with_includes(
+    manager: &mut crate::source::manager::SourceManager,
+    root: crate::source::SourceId,
+    config: impl Into<PreprocessOptions>,
+) -> Result<PreparedSource, SpanError> {
+    let options = config.into();
+    match options.mode() {
+        PreprocessMode::Identity => identity::preprocess_identity(manager, root),
+        PreprocessMode::Full => directive::preprocess_full(manager, root, &options),
     }
 }
 
@@ -49,6 +78,7 @@ pub struct PreparedSource {
     text: Arc<str>,
     map: Arc<SourceMap>,
     preprocess_diagnostics: Vec<PreprocessDiagnostic>,
+    include_graph: Arc<IncludeGraph>,
 }
 
 impl PreparedSource {
@@ -57,13 +87,23 @@ impl PreparedSource {
         text: Arc<str>,
         map: Arc<SourceMap>,
         preprocess_diagnostics: Vec<PreprocessDiagnostic>,
+        include_graph: Arc<IncludeGraph>,
     ) -> Self {
         Self {
             unit,
             text,
             map,
             preprocess_diagnostics,
+            include_graph,
         }
+    }
+
+    pub(crate) fn with_preprocess_diagnostics(
+        mut self,
+        diagnostics: Vec<PreprocessDiagnostic>,
+    ) -> Self {
+        self.preprocess_diagnostics = diagnostics;
+        self
     }
 
     /// Unit that owns this prepared buffer.
@@ -99,6 +139,11 @@ impl PreparedSource {
     /// Preprocessor findings (empty in identity mode).
     pub fn preprocess_diagnostics(&self) -> &[PreprocessDiagnostic] {
         &self.preprocess_diagnostics
+    }
+
+    /// Deterministic include graph for this unit.
+    pub fn include_graph(&self) -> &IncludeGraph {
+        &self.include_graph
     }
 
     /// The only public `Span -> PreparedSpan` adapter.
