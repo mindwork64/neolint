@@ -504,7 +504,6 @@ fn malformed_global_initializers_preserve_error_declarators() {
     assert!(second.declarators[1].initializer_error.is_some());
 }
 
-
 #[test]
 fn missing_global_declarator_after_comma_is_preserved() {
     let source = "integer first = 1, ; default { state_entry() { } }";
