@@ -78,6 +78,8 @@ pub struct PreprocessSettings {
     options: PreprocessOptions,
     dialect: PreprocessDialect,
     include_dirs: Vec<PathBuf>,
+    switches_enabled: bool,
+    lazy_lists_enabled: bool,
 }
 
 impl PreprocessSettings {
@@ -87,6 +89,8 @@ impl PreprocessSettings {
             options: PreprocessOptions::identity(),
             dialect: PreprocessDialect::Lsl,
             include_dirs: Vec::new(),
+            switches_enabled: false,
+            lazy_lists_enabled: false,
         }
     }
 
@@ -96,6 +100,8 @@ impl PreprocessSettings {
             options: PreprocessOptions::full(),
             dialect: PreprocessDialect::Lsl,
             include_dirs: Vec::new(),
+            switches_enabled: false,
+            lazy_lists_enabled: false,
         }
     }
 
@@ -105,6 +111,8 @@ impl PreprocessSettings {
             options: PreprocessOptions::full(),
             dialect: PreprocessDialect::Firestorm,
             include_dirs: Vec::new(),
+            switches_enabled: false,
+            lazy_lists_enabled: false,
         }
     }
 
@@ -140,6 +148,28 @@ impl PreprocessSettings {
         self
     }
 
+    /// Whether Firestorm switch parsing was requested.
+    pub fn switches_enabled(&self) -> bool {
+        self.switches_enabled
+    }
+
+    /// Whether Firestorm lazy-list parsing was requested.
+    pub fn lazy_lists_enabled(&self) -> bool {
+        self.lazy_lists_enabled
+    }
+
+    /// Enable or disable Firestorm switches.
+    pub fn with_switches_enabled(mut self, enabled: bool) -> Self {
+        self.switches_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable Firestorm lazy lists.
+    pub fn with_lazy_lists_enabled(mut self, enabled: bool) -> Self {
+        self.lazy_lists_enabled = enabled;
+        self
+    }
+
     /// Enable full preprocessing while retaining the selected dialect.
     pub fn with_full(mut self) -> Self {
         self.options = PreprocessOptions::full();
@@ -153,6 +183,8 @@ impl From<PreprocessOptions> for PreprocessSettings {
             options,
             dialect: PreprocessDialect::Lsl,
             include_dirs: Vec::new(),
+            switches_enabled: false,
+            lazy_lists_enabled: false,
         }
     }
 }
@@ -252,5 +284,31 @@ mod phase2_api_compatibility_tests {
         let lsl: PreprocessSettings = PreprocessDialect::Lsl.into();
         assert_eq!(lsl.mode(), PreprocessMode::Full);
         assert_eq!(lsl.dialect(), PreprocessDialect::Lsl);
+    }
+}
+
+#[cfg(test)]
+mod phase5_feature_gate_tests {
+    use super::*;
+
+    #[test]
+    fn switches_and_lazy_lists_are_independent_and_default_off() {
+        let defaults = PreprocessSettings::firestorm();
+        assert!(!defaults.switches_enabled());
+        assert!(!defaults.lazy_lists_enabled());
+
+        let switches = defaults.clone().with_switches_enabled(true);
+        assert!(switches.switches_enabled());
+        assert!(!switches.lazy_lists_enabled());
+
+        let lazy_lists = defaults.clone().with_lazy_lists_enabled(true);
+        assert!(!lazy_lists.switches_enabled());
+        assert!(lazy_lists.lazy_lists_enabled());
+
+        let both = defaults
+            .with_switches_enabled(true)
+            .with_lazy_lists_enabled(true);
+        assert!(both.switches_enabled());
+        assert!(both.lazy_lists_enabled());
     }
 }

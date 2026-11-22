@@ -25,7 +25,7 @@ pub mod preprocessor;
 pub mod semantic;
 pub mod source;
 
-pub use ast::{parse_ast, Ast};
+pub use ast::{parse_ast, parse_ast_with_options, Ast, AstParseOptions};
 pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };

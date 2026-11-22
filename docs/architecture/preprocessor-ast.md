@@ -1,13 +1,13 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–4 implemented on the experimental branch**; this document
-remains the normative contract for Phases 5–6.
+Status: **Phases 1–5 implemented on the experimental branch**; this document
+remains the normative contract for Phase 6.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
-independent typed AST parser are implemented; AST semantics and switch/lazy-list
-syntax remain future work.
-Audience: maintainers and contributors working on Phases 5–6.
+independent typed AST parser and Firestorm switch/lazy-list AST parsing are
+implemented; AST semantics and engine migration remain future work.
+Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
 work. It records the current pipeline, the target pipeline, the contracts between
@@ -550,9 +550,19 @@ The two parsers are explicitly independent and independently runnable:
 pub fn parse_legacy(tokens: &[Token]) -> Vec<Diagnostic>;
 
 // AST parser: builds a typed tree and returns its own diagnostics.
-// The exact Ast type is defined in Phase 4; this signature is normative.
 pub fn parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>);
+
+// Phase 5: independent Firestorm switch/lazy-list gates.
+pub fn parse_ast_with_options(
+    tokens: &[Token],
+    options: AstParseOptions,
+) -> (Ast, Vec<Diagnostic>);
 ```
+
+`parse_ast` is exactly `parse_ast_with_options(tokens, AstParseOptions::lsl())`.
+The effective gates are read from `PreparedSource::switches_enabled()` and
+`PreparedSource::lazy_lists_enabled()` and passed as plain booleans; the AST
+module does not import preprocessor internals.
 
 Contract:
 
@@ -2784,7 +2794,7 @@ full-corpus differential parity, recovery after each malformed construct group,
 deterministic prefix/token-soup robustness, empty/non-Eof token streams, depth
 boundaries 255/256/257, extreme expression nesting, and deeply nested blocks.
 
-### Phase 5 — Firestorm extensions
+### Phase 5 — Firestorm extensions (implemented)
 
 - **Goal:** add Firestorm-only syntax behind explicit flags.
 - **Functionality:** `switch`/`case`/`default`/`break`, lazy lists,
@@ -2805,6 +2815,73 @@ boundaries 255/256/257, extreme expression nesting, and deeply nested blocks.
   the Phase 3 `//fspreprocessor off` marker.
 - **Done when:** the dialect matrix is fully covered and the standard mode
   remains unchanged.
+
+#### Phase 5 implementation record
+
+**Status:** implemented in `src/ast/ext.rs`, `src/ast/parser.rs`,
+`src/preprocessor/config.rs`, `src/preprocessor/directive.rs`, and
+`PreparedSource`. `main` and the CLI remain on the Legacy engine.
+
+**Independent gates.** `PreprocessSettings` carries `switches_enabled` and
+`lazy_lists_enabled`, both false by default, with independent builders. The
+effective gates are:
+
+```text
+switches  = Firestorm dialect && (setting || USE_SWITCHES latched)
+lazy list = Firestorm dialect && (setting || USE_LAZY_LISTS latched)
+```
+
+LSL mode forces both off. After each emitted preprocessing token, the
+preprocessor checks whether the corresponding `USE_*` macro is currently
+defined. The first such observation latches that feature, including definitions
+from includes; inactive conditional branches, comments and strings do not
+trigger it. A later `#undef` does not clear an already latched discovery.
+`//fspreprocessor off` returns identity text with both gates
+off, overriding settings and macros.
+
+**AST API.** `PreparedSource::switches_enabled()`/`lazy_lists_enabled()` expose
+effective gates. `AstParseOptions` and
+`parse_ast_with_options(tokens, options)` consume them without importing the
+preprocessor. `parse_ast(tokens)` remains the compatibility API and is exactly
+`AstParseOptions::lsl()` (both extensions disabled).
+
+**Switch.** Firestorm `switch`/`case`/`default`/`break` are contextual,
+not new lexer keywords. `SwitchStatement` preserves the condition and ordered
+`SwitchArm`s; `SwitchLabel` distinguishes case expressions, default and explicit
+error labels. Duplicate cases/defaults remain distinct arms, missing default is
+not fabricated, and fallthrough is represented by statement order. `break;` is a
+`StatementKind::Break` only inside an enclosing switch, including nested blocks;
+outside a switch it remains ordinary LSL identifier syntax. Case bodies support
+both `case x:` and `case x { ... }` forms. Malformed labels, missing
+conditions/brackets/blocks and unexpected tokens recover into Error nodes while
+later statements remain parseable.
+
+**Lazy lists.** `LazyIndexExpression` stores the base and one or more index
+expressions with exact spans. Firestorm-confirmed forms are represented without
+rewriting source:
+
+- single-index assignment: `identifier[index] = rhs`;
+- typed extraction: `(integer|float|string|key|vector|rotation)identifier[index]`;
+- list extraction: `(list)identifier[index]` and `(list)identifier[first,last]`;
+- the optional fully parenthesized typed-reference form.
+
+Firestorm does not confirm bare reads, compound indexed assignment, deletion,
+more than two indices, or non-identifier bases; the parser diagnoses the
+unsupported structural forms it can prove locally. `quaternion` is not added as
+a type: the frozen lexer/type model has no quaternion token, and Phase 5 does not
+invent one. No source-to-source replacement with `lazy_list_set`/`llList2*` is
+performed.
+
+**Spans and safety.** All extension nodes carry prepared `Span`s and pass the
+same worker-stack, AST001/AST002, recovery and SourceMap bridge contracts as
+Phase 4. Nested switches and nested lazy indices are depth-guarded at 256.
+
+**Tests.** `tests/ast_firestorm.rs` covers the gate matrix, USE_* latch, includes,
+inactive branches/comments/strings, kill switch, switch ordering/fallthrough/
+default/break/nesting/case blocks/spans/duplicates/malformed recovery, lazy
+access/assignment/casts/indices/spans/malformed recovery and deep nesting.
+`tests/ast_bridge.rs` resolves every new node span through identity, macro and
+include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
 ### Phase 6 — AST semantic analyzer and migration
 
@@ -2875,7 +2952,7 @@ src/
     mod.rs                AST root and re-exports
     node.rs               node types with spans
     parser.rs             AST parser and recovery: independent parse_ast
-    ext.rs (Phase 5)      Firestorm-only nodes
+    ext.rs                Firestorm-only AST nodes/options
 
   ast_semantic/
     mod.rs                Phase 6 analyzer entry point

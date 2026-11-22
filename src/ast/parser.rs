@@ -6,6 +6,9 @@
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::lexer::{Token, TokenKind};
 
+use super::ext::{
+    AstParseOptions, BreakStatement, LazyIndexExpression, SwitchArm, SwitchLabel, SwitchStatement,
+};
 use super::node::*;
 use super::types::*;
 
@@ -27,10 +30,12 @@ struct Parser<'a> {
     eof_reported: bool,
     statement_depth: usize,
     recursion_reported: bool,
+    options: AstParseOptions,
+    switch_depth: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
+    fn new(tokens: &'a [Token], options: AstParseOptions) -> Self {
         Self {
             tokens,
             current: 0,
@@ -41,6 +46,8 @@ impl<'a> Parser<'a> {
             eof_reported: false,
             statement_depth: 0,
             recursion_reported: false,
+            options,
+            switch_depth: 0,
         }
     }
 
@@ -398,6 +405,26 @@ impl<'a> Parser<'a> {
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
         let start = self.current;
+        if self.options.switches_enabled()
+            && self.check_identifier("switch")
+            && self.peek_kind_at(1) == TokenKind::LParen
+        {
+            return Some(self.parse_switch_statement(start));
+        }
+        if self.options.switches_enabled()
+            && self.switch_depth > 0
+            && self.check_identifier("break")
+            && self.peek_kind_at(1) == TokenKind::Semicolon
+        {
+            self.advance();
+            self.advance();
+            return Some(self.statement(
+                start,
+                StatementKind::Break(BreakStatement {
+                    span: self.span_from(start, self.current),
+                }),
+            ));
+        }
         if self.matches(TokenKind::Semicolon) {
             return Some(self.statement(start, StatementKind::Empty));
         }
@@ -524,6 +551,147 @@ impl<'a> Parser<'a> {
                 expression,
             }),
         ))
+    }
+
+    fn check_identifier(&self, name: &str) -> bool {
+        self.tokens
+            .get(self.current)
+            .is_some_and(|token| token.kind == TokenKind::Identifier && token.lexeme == name)
+    }
+
+    fn check_case_label(&self) -> bool {
+        self.options.switches_enabled() && self.check_identifier("case")
+    }
+
+    fn check_default_label(&self) -> bool {
+        self.options.switches_enabled() && self.check(TokenKind::KwDefault)
+    }
+
+    fn parse_switch_statement(&mut self, start: usize) -> Statement {
+        self.advance(); // switch
+        self.expect(TokenKind::LParen, "expected '(' after 'switch'");
+        let condition = if let Some(expression) = self.parse_expression(1) {
+            self.expect(TokenKind::RParen, "expected ')' after switch condition");
+            expression
+        } else {
+            self.synchronize_condition();
+            self.error_expression(self.here_span())
+        };
+        if !self.expect(TokenKind::LBrace, "expected '{' to begin switch body") {
+            self.synchronize_statement();
+            return self.error_statement_code(start, "PAR007");
+        }
+        self.switch_depth += 1;
+        let mut arms = Vec::new();
+        while !self.at_end() && !self.check(TokenKind::RBrace) {
+            let before = self.current;
+            if self.check_case_label() || self.check_default_label() {
+                arms.push(self.parse_switch_arm());
+            } else {
+                let arm_start = self.current;
+                let label_span = self.here_span();
+                self.error_here("PAR007", "expected 'case' or 'default' inside switch");
+                let mut statements = Vec::new();
+                if let Some(statement) = self.parse_statement() {
+                    statements.push(statement);
+                }
+                arms.push(SwitchArm {
+                    span: self.span_from(arm_start, self.current),
+                    label: SwitchLabel::Error(ErrorNode {
+                        span: label_span,
+                        code: Some("PAR007"),
+                    }),
+                    statements,
+                });
+            }
+            if self.current == before {
+                self.advance();
+            }
+        }
+        self.switch_depth = self.switch_depth.saturating_sub(1);
+        self.expect(TokenKind::RBrace, "expected '}' after switch body");
+        self.statement(
+            start,
+            StatementKind::Switch(SwitchStatement {
+                span: self.span_from(start, self.current),
+                condition,
+                arms,
+            }),
+        )
+    }
+
+    fn parse_switch_arm(&mut self) -> SwitchArm {
+        let start = self.current;
+        let label = if self.check_case_label() {
+            self.advance();
+            match self.parse_expression(1) {
+                Some(expression) => SwitchLabel::Case(expression),
+                None => SwitchLabel::Error(ErrorNode {
+                    span: self.here_span(),
+                    code: Some("PAR006"),
+                }),
+            }
+        } else {
+            self.advance(); // default
+            SwitchLabel::Default
+        };
+        let mut statements = Vec::new();
+        if self.matches(TokenKind::Colon) {
+            // Colon form: collect fallthrough statements below.
+        } else if self.check(TokenKind::LBrace) {
+            let block_start = self.current;
+            if let Some(block) = self.parse_block() {
+                statements.push(self.statement(block_start, StatementKind::Block(block)));
+            }
+        } else {
+            self.error_here("PAR007", "expected ':' or '{' after switch case label");
+            self.synchronize_switch_arm();
+        }
+        while !self.at_end()
+            && !self.check(TokenKind::RBrace)
+            && !self.check_case_label()
+            && !self.check_default_label()
+        {
+            let before = self.current;
+            if let Some(statement) = self.parse_statement() {
+                statements.push(statement);
+            }
+            if self.current == before {
+                self.advance();
+            }
+        }
+        SwitchArm {
+            span: self.span_from(start, self.current),
+            label,
+            statements,
+        }
+    }
+
+    fn synchronize_switch_arm(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RBrace)
+                    || self.check_case_label()
+                    || self.check_default_label()
+                {
+                    return;
+                }
+                if self.check(TokenKind::Semicolon) {
+                    self.advance();
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
     }
 
     fn parse_if_statement(&mut self, start: usize) -> Statement {
@@ -725,7 +893,118 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self, min_precedence: u8) -> Option<Expression> {
-        self.parse_expression_at(min_precedence, 0)
+        let expression = self.parse_expression_at(min_precedence, 0)?;
+        if self.options.lazy_lists_enabled() {
+            self.validate_lazy_expression(&expression);
+        }
+        Some(expression)
+    }
+
+    /// Validate lazy-list nodes against the forms actually transformed by
+    /// Firestorm: typed extraction (with an optional single parenthesis pair)
+    /// and single-index assignment. A bare indexed read is not a valid form.
+    fn validate_lazy_expression(&mut self, expression: &Expression) {
+        match &expression.kind {
+            ExpressionKind::LazyIndex(lazy) => {
+                self.push_error(
+                    "PAR007",
+                    "lazy-list indexing requires a supported typed cast or simple indexed assignment",
+                    lazy.span,
+                );
+                self.validate_lazy_index_children(lazy);
+            }
+            ExpressionKind::Assignment(assignment) => {
+                if let ExpressionKind::LazyIndex(lazy) = &assignment.target.kind {
+                    if lazy.indices.len() != 1 {
+                        self.push_error(
+                            "PAR007",
+                            "lazy-list indexed assignment requires exactly one index",
+                            lazy.span,
+                        );
+                    }
+                    if assignment.operator != AssignmentOperator::Assign {
+                        self.push_error(
+                            "PAR010",
+                            "compound assignment is not supported for lazy-list indexing",
+                            assignment.operator_span,
+                        );
+                    }
+                    self.validate_lazy_index_children(lazy);
+                } else {
+                    self.validate_lazy_expression(&assignment.target);
+                }
+                self.validate_lazy_expression(&assignment.value);
+            }
+            ExpressionKind::Cast(cast) => {
+                // Firestorm's typed-reference regex allows one optional pair of
+                // parentheses around the identifier/index expression.
+                let operand = match &cast.operand.kind {
+                    ExpressionKind::Parenthesized(inner) => inner.as_ref(),
+                    _ => cast.operand.as_ref(),
+                };
+                if let ExpressionKind::LazyIndex(lazy) = &operand.kind {
+                    let valid_count = if cast.ty.kind == TypeKind::List {
+                        (1..=2).contains(&lazy.indices.len())
+                    } else {
+                        lazy.indices.len() == 1
+                    };
+                    if !valid_count {
+                        self.push_error(
+                            "PAR007",
+                            "lazy-list cast requires one index, or two for a list range",
+                            lazy.span,
+                        );
+                    }
+                    self.validate_lazy_index_children(lazy);
+                } else {
+                    self.validate_lazy_expression(&cast.operand);
+                }
+            }
+            ExpressionKind::Parenthesized(inner) => self.validate_lazy_expression(inner),
+            ExpressionKind::List(list) => {
+                for element in &list.elements {
+                    self.validate_lazy_expression(element);
+                }
+            }
+            ExpressionKind::Vector(vector) => {
+                for component in &vector.components {
+                    self.validate_lazy_expression(component);
+                }
+            }
+            ExpressionKind::Rotation(rotation) => {
+                for component in &rotation.components {
+                    self.validate_lazy_expression(component);
+                }
+            }
+            ExpressionKind::Call(call) => {
+                self.validate_lazy_expression(&call.callee);
+                for argument in &call.arguments {
+                    self.validate_lazy_expression(argument);
+                }
+            }
+            ExpressionKind::Component(component) => {
+                self.validate_lazy_expression(&component.base);
+            }
+            ExpressionKind::Unary(unary) => self.validate_lazy_expression(&unary.operand),
+            ExpressionKind::Binary(binary) => {
+                self.validate_lazy_expression(&binary.left);
+                self.validate_lazy_expression(&binary.right);
+            }
+            ExpressionKind::Increment(increment) => {
+                self.validate_lazy_expression(&increment.operand);
+            }
+            ExpressionKind::Identifier(_)
+            | ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::String(_)
+            | ExpressionKind::Error(_) => {}
+        }
+    }
+
+    fn validate_lazy_index_children(&mut self, lazy: &LazyIndexExpression) {
+        for index in &lazy.indices {
+            self.validate_lazy_expression(index);
+        }
     }
 
     fn parse_expression_at(&mut self, min_precedence: u8, depth: usize) -> Option<Expression> {
@@ -741,7 +1020,10 @@ impl<'a> Parser<'a> {
                 break;
             }
             let operator_kind = self.peek_kind();
+            let lazy_lvalue = self.options.lazy_lists_enabled()
+                && matches!(left.kind, ExpressionKind::LazyIndex(_));
             if is_assignment(operator_kind)
+                && !lazy_lvalue
                 && !is_assignment_lvalue(self.tokens, expression_start, self.current)
             {
                 self.error_here(
@@ -926,6 +1208,9 @@ impl<'a> Parser<'a> {
                     }),
                 };
                 call_suffix_allowed = false;
+            } else if self.options.lazy_lists_enabled() && self.check(TokenKind::LBracket) {
+                expression = self.parse_lazy_index(expression, depth)?;
+                call_suffix_allowed = false;
             } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
                 if !is_variable_lvalue(self.tokens, primary_start, self.current) {
                     self.error_here("PAR011", "increment/decrement operand must be a variable");
@@ -951,6 +1236,78 @@ impl<'a> Parser<'a> {
         }
         let _ = start;
         Some(expression)
+    }
+
+    fn parse_lazy_index(&mut self, base: Expression, depth: usize) -> Option<Expression> {
+        let bracket_start = self.current;
+        let base_is_identifier = matches!(base.kind, ExpressionKind::Identifier(_));
+        self.advance();
+        let mut indices = Vec::new();
+        if self.check(TokenKind::RBracket) {
+            self.error_here("PAR006", "lazy-list index requires an expression");
+            self.advance();
+            return Some(self.error_expression(self.span_from(bracket_start, self.current)));
+        }
+        loop {
+            let Some(index) = self.parse_expression_at(1, depth + 1) else {
+                self.synchronize_lazy_index();
+                return None;
+            };
+            indices.push(index);
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        if !self.expect(TokenKind::RBracket, "expected ']' after lazy-list index") {
+            return None;
+        }
+        if indices.len() > 2 {
+            self.push_error(
+                "PAR007",
+                "lazy-list index accepts at most two expressions",
+                self.span_from(bracket_start, self.current),
+            );
+        }
+        if !base_is_identifier {
+            self.push_error(
+                "PAR012",
+                "lazy-list indexing requires an identifier base",
+                self.span_from(bracket_start, self.current),
+            );
+        }
+        let span = join_spans(base.span, self.previous_span());
+        Some(Expression {
+            span,
+            kind: ExpressionKind::LazyIndex(LazyIndexExpression {
+                span,
+                base: Box::new(base),
+                indices,
+            }),
+        })
+    }
+
+    fn synchronize_lazy_index(&mut self) {
+        let mut bracket_depth = 0usize;
+        let mut paren_depth = 0usize;
+        while !self.at_end() {
+            if bracket_depth == 0 && paren_depth == 0 {
+                if self.check(TokenKind::RBracket) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::RBrace) || self.check(TokenKind::Semicolon) {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
     }
 
     fn parse_primary(&mut self, depth: usize) -> Option<Expression> {
@@ -1760,12 +2117,20 @@ fn is_assignment_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> b
 /// the guard itself is reached safely even in unoptimized debug builds; the
 /// thread is scoped to this call and no state is shared between invocations.
 pub fn parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>) {
+    parse_ast_with_options(tokens, AstParseOptions::lsl())
+}
+
+/// Parse with independent Firestorm extension gates.
+pub fn parse_ast_with_options(
+    tokens: &[Token],
+    options: AstParseOptions,
+) -> (Ast, Vec<Diagnostic>) {
     const PARSER_STACK_BYTES: usize = 16 * 1024 * 1024;
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .name("neolint-ast-parser".to_owned())
             .stack_size(PARSER_STACK_BYTES)
-            .spawn_scoped(scope, || Parser::new(tokens).run());
+            .spawn_scoped(scope, || Parser::new(tokens, options).run());
         match worker {
             Ok(handle) => match handle.join() {
                 Ok(result) => result,

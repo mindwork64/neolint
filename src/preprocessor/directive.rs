@@ -86,6 +86,11 @@ pub(crate) struct Preprocessor<'a> {
     pending_start: Option<usize>,
     pending_end: usize,
     stopped: bool,
+    dialect: PreprocessDialect,
+    switches_requested: bool,
+    lazy_lists_requested: bool,
+    switches_latched: bool,
+    lazy_lists_latched: bool,
 }
 
 impl<'a> Preprocessor<'a> {
@@ -139,6 +144,11 @@ impl<'a> Preprocessor<'a> {
             pending_start: None,
             pending_end: 0,
             stopped: false,
+            dialect: options.dialect(),
+            switches_requested: options.switches_enabled(),
+            lazy_lists_requested: options.lazy_lists_enabled(),
+            switches_latched: false,
+            lazy_lists_latched: false,
         })
     }
 
@@ -246,6 +256,15 @@ impl<'a> Preprocessor<'a> {
         for mut item in items {
             if item.text.is_empty() {
                 continue;
+            }
+            // Firestorm checks USE_* after each emitted preprocessing token,
+            // not when the macro is defined. This matters when a script defines
+            // and undefines a feature macro before emitting any source token.
+            if self.macros.get("USE_SWITCHES").is_some() {
+                self.switches_latched = true;
+            }
+            if self.macros.get("USE_LAZY_LISTS").is_some() {
+                self.lazy_lists_latched = true;
             }
             let direct = matches!(item.origin, WorkOrigin::Direct);
             if direct {
@@ -1128,13 +1147,13 @@ impl<'a> Preprocessor<'a> {
         builder.set_eof_anchor(anchor)?;
         let graph = self.materialize_include_graph(&mut builder)?;
         let map = Arc::new(builder.build()?);
-        Ok(PreparedSource::new(
-            self.unit,
-            text,
-            map,
-            diagnostics,
-            Arc::new(graph),
-        ))
+        let firestorm = self.dialect == PreprocessDialect::Firestorm;
+        let switches = firestorm && (self.switches_requested || self.switches_latched);
+        let lazy_lists = firestorm && (self.lazy_lists_requested || self.lazy_lists_latched);
+        Ok(
+            PreparedSource::new(self.unit, text, map, diagnostics, Arc::new(graph))
+                .with_extensions(switches, lazy_lists),
+        )
     }
 
     fn materialize_include_graph(
