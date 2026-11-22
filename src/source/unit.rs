@@ -133,7 +133,10 @@ impl AnalysisUnit {
     ///
     /// The returned value always carries this unit's id; callers cannot attach
     /// it to another unit. Prepared units return `NotLegacyUnit`.
-    pub fn legacy_diagnostic(&self, diagnostic: Diagnostic) -> Result<LegacyDiagnostic, SpanError> {
+    pub(crate) fn legacy_diagnostic(
+        &self,
+        diagnostic: Diagnostic,
+    ) -> Result<LegacyDiagnostic, SpanError> {
         if self.legacy_root().is_none() {
             return Err(SpanError::NotLegacyUnit);
         }
