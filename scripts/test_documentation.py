@@ -10,7 +10,8 @@ DIAGNOSTIC_SOURCES = (
     "src/semantic.rs",
 ) + tuple(
     str(path.relative_to(ROOT))
-    for path in sorted((ROOT / "src/preprocessor").rglob("*.rs"))
+    for directory in ("src/preprocessor", "src/ast")
+    for path in sorted((ROOT / directory).rglob("*.rs"))
 )
 
 
@@ -20,7 +21,7 @@ class DocumentationTests(unittest.TestCase):
         for relative in DIAGNOSTIC_SOURCES:
             source_codes.update(
                 re.findall(
-                    r'"(?:LEX|PAR|SEM|PRE)\d{3}"',
+                    r'"(?:LEX|PAR|SEM|PRE|AST)\d{3}"',
                     (ROOT / relative).read_text(),
                 )
             )
