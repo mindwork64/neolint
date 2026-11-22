@@ -515,22 +515,49 @@ impl<'a> Parser<'a> {
             return Some(self.parse_do_while_statement(start));
         }
         if self.matches(TokenKind::KwReturn) {
+            let keyword_span = self.token_span(start);
+            let mut semicolon_consumed = false;
+            let mut recovered_labels = Vec::new();
+            let mut recovered_jumps = Vec::new();
             let value = if !self.check(TokenKind::Semicolon) {
+                let value_start = self.current;
                 let expression = self.parse_expression(1);
                 if expression.is_none() {
                     self.synchronize_statement();
-                    return Some(self.error_statement(start));
+                    if self.current == 0
+                        || self.tokens[self.current - 1].kind != TokenKind::Semicolon
+                    {
+                        return Some(self.error_statement(start));
+                    }
+                    semicolon_consumed = true;
+                    let semicolon = self.current - 1;
+                    (recovered_labels, recovered_jumps) =
+                        self.recover_return_flow_nodes(value_start, semicolon);
+                    let first_span = self.tokens[value_start].span;
+                    Some(Expression {
+                        span: first_span,
+                        kind: ExpressionKind::Error(ErrorNode {
+                            span: first_span,
+                            code: None,
+                        }),
+                    })
+                } else {
+                    expression
                 }
-                expression
             } else {
                 None
             };
-            self.expect(TokenKind::Semicolon, "expected ';' after return statement");
+            if !semicolon_consumed {
+                self.expect(TokenKind::Semicolon, "expected ';' after return statement");
+            }
             return Some(self.statement(
                 start,
                 StatementKind::Return(ReturnStatement {
                     span: self.span_from(start, self.current),
+                    keyword_span,
                     value,
+                    recovered_labels,
+                    recovered_jumps,
                 }),
             ));
         }
@@ -816,12 +843,14 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let condition = if let Some(expression) = self.parse_expression(1) {
+        let condition_missing = self.check(TokenKind::Semicolon);
+        let (condition, condition_malformed) = if let Some(expression) = self.parse_expression(1) {
             self.expect(TokenKind::Semicolon, "expected ';' after for condition");
-            expression
+            (expression, false)
         } else {
             self.synchronize_for_condition();
-            self.error_expression(self.here_span())
+            let malformed = !condition_missing;
+            (self.error_expression(self.here_span()), malformed)
         };
 
         let (increment, ok) = self.parse_for_expression_list(TokenKind::RParen);
@@ -837,6 +866,8 @@ impl<'a> Parser<'a> {
                 span: self.span_from(start, self.current),
                 initializer,
                 condition,
+                condition_missing,
+                condition_malformed,
                 increment,
                 body: Box::new(body),
             }),
@@ -2218,6 +2249,60 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    fn recover_return_flow_nodes(
+        &self,
+        start: usize,
+        semicolon: usize,
+    ) -> (Vec<RecoveredLabelStatement>, Vec<RecoveredJumpStatement>) {
+        let mut labels = Vec::new();
+        let mut jumps = Vec::new();
+        let mut scope_path = Vec::new();
+        let mut index = start;
+        while index <= semicolon {
+            match self.tokens[index].kind {
+                TokenKind::LBrace => {
+                    scope_path.push(self.token_span(index));
+                    index += 1;
+                }
+                TokenKind::RBrace => {
+                    scope_path.pop();
+                    index += 1;
+                }
+                TokenKind::At
+                    if index + 2 <= semicolon
+                        && self.tokens[index + 1].kind == TokenKind::Identifier
+                        && self.tokens[index + 2].kind == TokenKind::Semicolon =>
+                {
+                    labels.push(RecoveredLabelStatement {
+                        label: LabelStatement {
+                            span: join_spans(self.tokens[index].span, self.tokens[index + 2].span),
+                            name: self.token_text(index + 1),
+                            name_span: self.token_span(index + 1),
+                        },
+                        scope_path: scope_path.clone(),
+                    });
+                    index += 3;
+                }
+                TokenKind::KwJump
+                    if index < semicolon
+                        && self.tokens[index + 1].kind == TokenKind::Identifier =>
+                {
+                    jumps.push(RecoveredJumpStatement {
+                        jump: JumpStatement {
+                            span: join_spans(self.tokens[index].span, self.tokens[index + 1].span),
+                            label: self.token_text(index + 1),
+                            label_span: self.token_span(index + 1),
+                        },
+                        scope_path: scope_path.clone(),
+                    });
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+        }
+        (labels, jumps)
     }
 
     fn synchronize_statement(&mut self) {

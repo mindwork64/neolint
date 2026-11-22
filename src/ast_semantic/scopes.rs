@@ -161,6 +161,19 @@ impl ScopeTree {
             .copied()
     }
 
+    /// Whether `ancestor` is the same scope as `descendant` or encloses it.
+    pub fn is_ancestor(&self, ancestor: ScopeId, mut descendant: ScopeId) -> bool {
+        loop {
+            if descendant == ancestor {
+                return true;
+            }
+            let Some(parent) = self.scope(descendant).and_then(|scope| scope.parent) else {
+                return false;
+            };
+            descendant = parent;
+        }
+    }
+
     /// Resolve a visible value binding at a source byte position.
     ///
     /// Function declarations are excluded: they are not LSL values unless

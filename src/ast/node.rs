@@ -228,8 +228,12 @@ pub struct ForStatement {
     pub span: Span,
     /// Initializer expressions.
     pub initializer: Vec<Expression>,
-    /// Required condition.
+    /// Required condition; see `condition_missing` for `for (;;)`.
     pub condition: Expression,
+    /// Whether the source condition was empty (always true).
+    pub condition_missing: bool,
+    /// Whether a non-empty condition failed to parse (unknown outcome).
+    pub condition_malformed: bool,
     /// Increment expressions.
     pub increment: Vec<Expression>,
     /// Loop body.
@@ -263,8 +267,32 @@ pub struct DoWhileStatement {
 pub struct ReturnStatement {
     /// Statement span.
     pub span: Span,
+    /// `return` keyword span.
+    pub keyword_span: Span,
     /// Optional returned expression.
     pub value: Option<Expression>,
+    /// Labels recovered from a malformed non-empty return expression.
+    pub recovered_labels: Vec<RecoveredLabelStatement>,
+    /// Jumps recovered from a malformed non-empty return expression.
+    pub recovered_jumps: Vec<RecoveredJumpStatement>,
+}
+
+/// Recovered label and its lexical brace path within a malformed return expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredLabelStatement {
+    /// Recovered label node.
+    pub label: LabelStatement,
+    /// Opening-brace spans from the return's containing scope to this label's scope.
+    pub scope_path: Vec<Span>,
+}
+
+/// Recovered jump and its lexical brace path within a malformed return expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredJumpStatement {
+    /// Recovered jump node.
+    pub jump: JumpStatement,
+    /// Opening-brace spans from the return's containing scope to this jump's scope.
+    pub scope_path: Vec<Span>,
 }
 
 /// `jump label;` statement.

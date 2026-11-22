@@ -6,7 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MIGRATED: &[&str] = &[
-    "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM020", "SEM021",
+    "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM008", "SEM009",
+    "SEM010", "SEM011", "SEM020", "SEM021",
 ];
 
 type Normalized = (
@@ -97,7 +98,7 @@ fn visit_lsl(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn corpus_nine_migrated_rules_match_legacy_exactly() {
+fn corpus_thirteen_migrated_rules_match_legacy_exactly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut files = Vec::new();
     visit_lsl(&root, &mut files);
@@ -1019,4 +1020,498 @@ fn sem021_recovered_function_preserves_first_definition_span() {
             && diagnostic.message == "state 'phantom' conflicts with a function declared at 1:9"
     }));
     assert_parity(source);
+}
+
+#[test]
+fn focused_flow_rule_parity() {
+    for source in [
+        "integer get_value() { return; } default { state_entry() { } }",
+        "integer get_value() { return \"wrong\"; } default { }",
+        "do_work() { return 1; } default { state_entry() { } }",
+        "integer get_count() { return 1; } float get_float() { return 2; } do_work() { return; } default { state_entry() { } }",
+        "integer get_count() { string name; return name; } default { state_entry() { } }",
+        "integer get_float() { return 1; } integer get_key() { return \"key\"; } default { }",
+        "integer get_value() { return missing; } default { }",
+        "integer first() { return 1; } integer first() { return \"wrong\"; } default { }",
+        "integer first() { return \"wrong\"; } integer first() { return 1; } default { }",
+        "integer get_value() { jump done; @done; return 1; } default { state_entry() { } }",
+        "integer get_value() { @done; { jump done; } return 1; } default { state_entry() { } }",
+        "integer get_value() { jump missing; return 1; } default { }",
+        "integer get_value() { jump inside; { @inside; } return 1; } default { }",
+        "integer get_value() { @same; { @same; } } default { }",
+        "integer first() { @done; return 1; } integer second() { @done; return 2; } default { }",
+        "default { state_entry() { jump done; @done; } }",
+        "default { state_entry() { jump missing; } }",
+        "default { state_entry() { @done; } touch_end() { @done; } }",
+        "integer get_value() { llOwnerSay(\"missing\"); } default { state_entry() { } }",
+        "integer choose(integer flag) { if (flag) return 1; } default { }",
+        "integer choose(integer flag) { if (flag) return 1; else return 2; } default { }",
+        "integer choose(integer flag) { if (flag == 1) return 1; if (flag == 2) return 2; return 0; } default { }",
+        "integer choose(integer flag) { while (flag) { return 1; } } default { }",
+        "integer choose() { do { return 1; } while (1); } default { }",
+        "integer choose(integer flag) { if (flag) jump done; return 1; @done; } default { }",
+        "integer choose(integer flag) { if (flag) jump done; return 1; @done; return 2; } default { }",
+        "integer spin() { @again; jump again; } default { }",
+        "integer spin() { while (TRUE) { } } integer spin_forever() { for (;;) { } } default { }",
+        "integer choose() { while (FALSE) return 1; } default { }",
+        "integer yes() { if (1 + 2) return 1; } integer no() { if (1 > 2) return 1; } default { }",
+        "integer yes() { while (TRUE + FALSE) { } } integer no() { while (ALL_SIDES + 1) { } } default { }",
+        "integer choose_param(integer TRUE) { if (TRUE) return 1; } integer TRUE = 0; default { }",
+        "integer deep() { { { if (1) return 1; } return 2; } } default { }",
+        "integer nested(integer n) { for (; n; ) { for (; n; ) { return 1; } } } default { }",
+        "integer broken() { if (1 { return 1; } default { }",
+        "integer broken() { jump; } default { }",
+        "integer broken() { @; } default { }",
+        "integer choose() { jump missing; return 1; } default { }",
+        "do_work() { llOwnerSay(\"done\"); } default { }",
+        "default { custom_event() { @same; @same; jump missing; } }",
+        "default { state_entry() { @outer; { jump outer; } { jump inner; @inner; } } }",
+        "integer choose() { @same; { @same; } jump same; return 1; } default { }",
+        "integer choose() { jump missing; } default { }",
+        "default { state_entry() { jump missing; } }",
+        "integer spin() { while (0xFFFFFFFF) { } } integer no() { while (0x0) { } } default { }",
+        "integer wrap() { while (0xFFFFFFFF + 1) { } } integer shift() { while (1 << 31) { } } default { }",
+        "integer division() { while (1 / 0) { } } integer remainder() { while (1 % 0) { } } default { }",
+        "integer float_yes() { while (1.0) { } } integer float_no() { while (0.0) { } } default { }",
+        "integer known() { if (TRUE) return 1; } integer choose_param(integer TRUE) { if (TRUE) return 1; } default { }",
+        "integer choose_local() { integer TRUE; if (TRUE) return 1; } integer choose_nested() { { integer TRUE; if (TRUE) return 1; } } default { }",
+        "integer choose_global() { if (TRUE) return 1; } integer TRUE = 0; default { }",
+        "integer equality() { while ((7 & 3) == 3 && (1 | 2) == 3) { } } default { }",
+        "integer overflow() { while (2147483647 + 1) { } } default { }",
+        "integer loop_jump_inside(integer flag) { while (flag) { jump done; @done; return 1; } } default { }",
+        "default { state_entry() { @done; } } state running { state_entry() { @done; } }",
+        "integer f() { @a; { jump a; } return 1; } integer g() { { @b; } jump b; return 1; } default { }",
+        "integer f() { { @a; } { jump a; } return 1; } default { }",
+        "integer f() { @a; { { jump a; } } return 1; } default { }",
+        "integer f(integer flag) { if (missing_name) return 1; } default { }",
+        "integer a() { while (1 << -1) { } } integer b() { while (1 >> 32) { } } default { }",
+        "integer a() { while (0xFFFFFFFF + 1) { } } integer b() { while (2147483648) { } } default { }",
+        "integer f() { jump missing; } default { }",
+        "integer spin() { for ( ; ; ) { } } default { }",
+        "do_work() { return ,; } default { }",
+        "integer f() { return ,; } default { }",
+        "integer f() { for (; ,; ) { } } default { }",
+        "integer f() { for (; 1 + ; ) { } } default { }",
+        "do_work() { return @done; jump done; } default { }",
+        "do_work() { return jump missing; jump missing; } default { }",
+    ] {
+        assert_parity(source);
+    }
+}
+
+#[test]
+fn sem008_exact_return_messages_and_spans() {
+    let source = "integer get_value() { return; } default { state_entry() { } }";
+    let keyword = source.find("return").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM008",
+            "function get_value returns integer, but this return statement has no value".to_owned(),
+            source,
+            keyword,
+            "return".len()
+        )]
+    );
+
+    let source = "do_work() { return 1; } default { state_entry() { } }";
+    let value = source.find('1').unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM008",
+            "function do_work does not return a value, but this return statement has one"
+                .to_owned(),
+            source,
+            value,
+            1
+        )]
+    );
+
+    let source = "integer get_value() { return \"wrong\"; } default { }";
+    let value = source.find("\"wrong\"").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM008",
+            "function get_value returns integer, but this return expression has type string"
+                .to_owned(),
+            source,
+            value,
+            "\"wrong\"".len()
+        )]
+    );
+}
+
+#[test]
+fn sem009_and_sem010_exact_messages_and_spans() {
+    let source = "integer get_value() { @same; { @same; } } default { }";
+    let first = source.find("@same").unwrap() + 1;
+    let second = source.rfind("@same").unwrap() + 1;
+    let first_span = span(source, first, "same".len());
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM009",
+            format!(
+                "duplicate jump label 'same' in get_value; first declared at {}:{}",
+                first_span.line, first_span.column
+            ),
+            source,
+            second,
+            "same".len()
+        )]
+    );
+
+    let source = "integer get_value() { jump inside; { @inside; } return 1; } default { }";
+    let target = source.find("inside").unwrap();
+    assert_eq!(
+        migrated(&semantic(source)).into_iter().cloned().collect::<Vec<_>>(),
+        vec![expected(
+            "SEM010",
+            "jump target 'inside' is inside a nested block and is not accessible from this jump in get_value".to_owned(),
+            source,
+            target,
+            "inside".len()
+        )]
+    );
+
+    let source = "integer get_value() { jump missing; return 1; } default { }";
+    let target = source.find("missing").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM010",
+            "jump target 'missing' is not defined in get_value".to_owned(),
+            source,
+            target,
+            "missing".len()
+        )]
+    );
+}
+
+#[test]
+fn sem011_exact_message_and_span() {
+    let source = "integer get_value() { llOwnerSay(\"missing\"); } default { state_entry() { } }";
+    let name = source.find("get_value").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM011",
+            "function get_value may reach the end without returning a value".to_owned(),
+            source,
+            name,
+            "get_value".len()
+        )]
+    );
+}
+
+#[test]
+fn parser_preserves_return_keyword_and_empty_for_condition() {
+    let source = "integer f() { for (;;) { return; } } default { }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let body = function.body.as_ref().unwrap();
+    let neolint::ast::StatementKind::For(for_statement) = &body.statements[0].kind else {
+        panic!("expected for statement");
+    };
+    assert!(for_statement.condition_missing);
+    let neolint::ast::StatementKind::Block(block) = &for_statement.body.kind else {
+        panic!("expected block body");
+    };
+    let neolint::ast::StatementKind::Return(return_statement) = &block.statements[0].kind else {
+        panic!("expected return");
+    };
+    let keyword = source.find("return").unwrap();
+    assert_eq!(
+        return_statement.keyword_span,
+        span(source, keyword, "return".len())
+    );
+}
+
+#[test]
+fn firestorm_switch_and_break_suppress_missing_return_conservatively() {
+    use neolint::ast::{parse_ast_with_options, AstParseOptions};
+    let source = "integer choose(integer value) { switch (value) { case 1: break; } } default { state_entry() { } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) =
+        parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM011"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn cfg_node_budget_skips_only_the_oversized_function() {
+    let boundary = format!(
+        "integer boundary() {{ {} }} default {{ }}",
+        ";".repeat(4_095)
+    );
+    assert!(analyze_ast(
+        &parse_ast(&lex(&boundary).0).0,
+        &parse_ast(&lex(&boundary).0).1
+    )
+    .iter()
+    .any(|diagnostic| diagnostic.code == "SEM011"));
+
+    let over = format!(
+        "integer huge() {{ {} }} integer small() {{ }} default {{ }}",
+        ";".repeat(4_096)
+    );
+    let (tokens, lexical) = lex(&over);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    let diagnostics = analyze_ast(&ast, &syntax)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.code == "SEM011")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].message.contains("function small"));
+}
+
+#[test]
+fn cfg_depth_budget_skips_only_the_oversized_function() {
+    let depth = 130;
+    let source = format!(
+        "integer huge() {{ {}{}{} }} integer small() {{ }} default {{ }}",
+        "{".repeat(depth),
+        "",
+        "}".repeat(depth)
+    );
+    let (tokens, lexical) = lex(&source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    let diagnostics = analyze_ast(&ast, &syntax)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.code == "SEM011")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].message.contains("function small"));
+}
+
+#[test]
+fn invalid_jump_suppresses_sem011_for_that_function() {
+    let source = "integer choose() { jump missing; } default { }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM010"));
+    assert!(!diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM011"));
+    assert_parity(source);
+}
+
+#[test]
+fn malformed_return_expression_keeps_sem008_value_span() {
+    let source = "do_work() { return ,; } default { }";
+    let comma = source.find(',').unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM008",
+            "function do_work does not return a value, but this return statement has one"
+                .to_owned(),
+            source,
+            comma,
+            1
+        )]
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn malformed_for_condition_is_unknown_not_missing() {
+    let source = "integer f() { for (; ,; ) { } } default { }";
+    assert!(
+        semantic(source)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM011"),
+        "malformed non-empty condition must stay unknown, not infinite"
+    );
+    assert_parity(source);
+
+    let source = "integer f() { for (;;) { } } default { }";
+    assert!(
+        !semantic(source)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM011"),
+        "genuinely empty condition remains always true"
+    );
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::For(for_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected for");
+    };
+    assert!(for_statement.condition_missing);
+    assert!(!for_statement.condition_malformed);
+
+    let source = "integer f() { for (; ,; ) { } } default { }";
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::For(for_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected for");
+    };
+    assert!(!for_statement.condition_missing);
+    assert!(for_statement.condition_malformed);
+}
+
+#[test]
+fn malformed_return_preserves_nested_recovered_label_scope() {
+    let source = "do_work() { return { @done; }; jump done; } default { }";
+    let diagnostics = semantic(source);
+    let migrated_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, "SEM008" | "SEM009" | "SEM010"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        migrated_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec!["SEM008", "SEM010"],
+        "{diagnostics:?}"
+    );
+
+    let jump_target = source.find("jump done").unwrap() + "jump ".len();
+    assert_eq!(
+        migrated_diagnostics[1].message,
+        "jump target 'done' is inside a nested block and is not accessible from this jump in do_work"
+    );
+    assert_eq!(
+        migrated_diagnostics[1].span,
+        span(source, jump_target, "done".len())
+    );
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::Return(return_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected recovered return");
+    };
+    assert_eq!(return_statement.recovered_labels.len(), 1);
+    assert_eq!(return_statement.recovered_labels[0].scope_path.len(), 1);
+}
+
+#[test]
+fn malformed_return_preserves_recovered_label_visibility() {
+    let source = "do_work() { return @done; jump done; } default { }";
+    let at = source.find('@').unwrap();
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code, "SEM008" | "SEM009" | "SEM010"))
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec!["SEM008"],
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "SEM008" && diagnostic.span.start == at }));
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::Return(return_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected recovered return");
+    };
+    assert_eq!(return_statement.recovered_labels.len(), 1);
+    assert_eq!(return_statement.recovered_labels[0].label.name, "done");
+    assert!(return_statement.recovered_jumps.is_empty());
 }
