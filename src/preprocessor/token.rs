@@ -154,6 +154,40 @@ impl MappedText {
         (mapped, source_text.len())
     }
 
+    /// Build a range with all backslash-newline splices removed. This is used
+    /// for ordinary active code: line splicing happens before tokenization.
+    pub(crate) fn spliced_range(
+        source_text: &str,
+        source: SourceId,
+        start: usize,
+        end: usize,
+    ) -> Self {
+        let mut mapped = Self {
+            source,
+            text: String::new(),
+            chunks: Vec::new(),
+            fallback_start: start,
+        };
+        let mut run_start = start;
+        let mut index = start;
+        while index < end {
+            if source_text[index..].starts_with('\\') {
+                let after_backslash = index + 1;
+                let newline_len = newline_len_at(source_text, after_backslash);
+                if newline_len > 0 && after_backslash + newline_len <= end {
+                    mapped.push_run(source_text, run_start, index);
+                    index = after_backslash + newline_len;
+                    run_start = index;
+                    continue;
+                }
+            }
+            let ch = source_text[index..].chars().next().unwrap_or('\0');
+            index += ch.len_utf8();
+        }
+        mapped.push_run(source_text, run_start, end);
+        mapped
+    }
+
     fn push_run(&mut self, source_text: &str, start: usize, end: usize) {
         if end <= start {
             return;
@@ -277,7 +311,8 @@ impl WorkItem {
     }
 }
 
-/// Tokenize original source text in `[start, end)`.
+/// Tokenize original source text in `[start, end)`. Test helper.
+#[cfg(test)]
 pub(crate) fn tokenize_source(
     source_text: &str,
     source: SourceId,

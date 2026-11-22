@@ -17,8 +17,8 @@ use crate::preprocessor::expand::{
 use crate::preprocessor::expr;
 use crate::preprocessor::macros::{DefineOutcome, MacroDefinition, MacroTable};
 use crate::preprocessor::token::{
-    is_identifier_continue, needs_separator, tokenize_mapped, tokenize_source, MappedText,
-    PieceKind, RawSpan, WorkItem, WorkOrigin,
+    is_identifier_continue, needs_separator, tokenize_mapped, MappedText, PieceKind, RawSpan,
+    WorkItem, WorkOrigin,
 };
 use crate::preprocessor::{PreparedSource, PreprocessDiagnostic, RelatedLocation};
 use crate::source::file::SourceFile;
@@ -50,6 +50,8 @@ pub(crate) struct Preprocessor<'a> {
     diags: DiagSink,
     limits: ExpansionLimits,
     last_directive_end: Option<usize>,
+    pending_start: Option<usize>,
+    pending_end: usize,
     stopped: bool,
 }
 
@@ -72,6 +74,8 @@ impl<'a> Preprocessor<'a> {
             diags: DiagSink::new(),
             limits: ExpansionLimits::new(),
             last_directive_end: None,
+            pending_start: None,
+            pending_end: 0,
             stopped: false,
         }
     }
@@ -81,8 +85,10 @@ impl<'a> Preprocessor<'a> {
         let mut in_block_comment = false;
         while position < self.text.len() {
             let line_start = position;
-            if !in_block_comment {
+            let continued = continued_line(self.text, position);
+            if !in_block_comment && !continued {
                 if let Some(hash) = directive_hash(self.text, position) {
+                    self.flush_pending();
                     let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
                     let directive_span = directive_span(self.source, self.text, hash, end);
                     self.process_directive(line_start, hash, &mapped, directive_span);
@@ -91,30 +97,33 @@ impl<'a> Preprocessor<'a> {
                     position = end;
                     continue;
                 }
-            } else if let Some((hash, comment_end)) = closing_comment_directive(self.text, position)
-            {
-                if self.is_active() {
-                    self.append_direct(position, comment_end);
+            } else if !continued {
+                if let Some((hash, comment_end)) = closing_comment_directive(self.text, position) {
+                    if self.is_active() {
+                        self.push_pending(position, comment_end);
+                    }
+                    self.flush_pending();
+                    let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
+                    let directive_span = directive_span(self.source, self.text, hash, end);
+                    self.process_directive(comment_end, hash, &mapped, directive_span);
+                    self.last_directive_end = Some(end);
+                    self.emit_last_newline(comment_end, end);
+                    position = end;
+                    in_block_comment = false;
+                    continue;
                 }
-                let (mapped, end) = MappedText::logical_line(self.text, self.source, hash + 1);
-                let directive_span = directive_span(self.source, self.text, hash, end);
-                self.process_directive(comment_end, hash, &mapped, directive_span);
-                self.last_directive_end = Some(end);
-                self.emit_last_newline(comment_end, end);
-                position = end;
-                in_block_comment = false;
-                continue;
             }
             let (end, new_block) = scan_line(self.text, position, in_block_comment);
             if self.is_active() {
-                let pieces = tokenize_source(self.text, self.source, position, end);
-                self.expand_and_append(pieces);
+                self.push_pending(position, end);
             } else {
+                self.flush_pending();
                 self.emit_newlines(position, end);
             }
             position = end;
             in_block_comment = new_block;
         }
+        self.flush_pending();
 
         let eof = RawSpan::point(self.source, self.text.len());
         while let Some(frame) = self.conditions.pop() {
@@ -135,17 +144,30 @@ impl<'a> Preprocessor<'a> {
         self.conditions.last().map_or(true, |frame| frame.active)
     }
 
-    fn append_direct(&mut self, start: usize, end: usize) {
+    fn push_pending(&mut self, start: usize, end: usize) {
         if end <= start || self.stopped {
             return;
         }
-        let span = RawSpan::new(self.source, start, end);
-        self.append(vec![WorkItem {
-            text: self.text[start..end].to_owned(),
-            kind: PieceKind::Comment,
-            span,
-            origin: WorkOrigin::Direct,
-        }]);
+        if self.pending_start.is_some() && self.pending_end != start {
+            self.flush_pending();
+        }
+        if self.pending_start.is_none() {
+            self.pending_start = Some(start);
+        }
+        self.pending_end = end;
+    }
+
+    fn flush_pending(&mut self) {
+        let Some(start) = self.pending_start.take() else {
+            return;
+        };
+        let end = self.pending_end;
+        if self.stopped || end <= start {
+            return;
+        }
+        let mapped = MappedText::spliced_range(self.text, self.source, start, end);
+        let pieces = tokenize_mapped(&mapped);
+        self.expand_and_append(pieces);
     }
 
     fn append(&mut self, items: Vec<WorkItem>) {
@@ -206,12 +228,14 @@ impl<'a> Preprocessor<'a> {
                 continue;
             };
             let span = RawSpan::new(self.source, index, index + len);
-            self.append(vec![WorkItem {
-                text: self.text[index..index + len].to_owned(),
-                kind: PieceKind::Whitespace,
-                span,
-                origin: WorkOrigin::Direct,
-            }]);
+            if !is_spliced_newline(self.text, index) {
+                self.append(vec![WorkItem {
+                    text: self.text[index..index + len].to_owned(),
+                    kind: PieceKind::Whitespace,
+                    span,
+                    origin: WorkOrigin::Direct,
+                }]);
+            }
             index += len;
         }
     }
@@ -281,8 +305,8 @@ impl<'a> Preprocessor<'a> {
             "ifdef" => self.open_if(&rest, directive_span, name_span, ConditionalKind::Ifdef),
             "ifndef" => self.open_if(&rest, directive_span, name_span, ConditionalKind::Ifndef),
             "elif" => self.elif(&rest, name_span, directive_span),
-            "else" => self.else_directive(name_span),
-            "endif" => self.endif(name_span),
+            "else" => self.else_directive(&rest, name_span, directive_span),
+            "endif" => self.endif(&rest, name_span, directive_span),
             "include" | "pragma" => {
                 if self.is_active() {
                     self.diags.push(
@@ -566,7 +590,14 @@ impl<'a> Preprocessor<'a> {
         frame.any_taken |= active;
     }
 
-    fn else_directive(&mut self, name_span: RawSpan) {
+    fn else_directive(&mut self, rest: &MappedText, name_span: RawSpan, directive_span: RawSpan) {
+        if has_expression_token(rest) {
+            self.diags.push(
+                PRE_MALFORMED_DIRECTIVE,
+                "unexpected tokens after #else",
+                directive_span,
+            );
+        }
         let Some(frame) = self.conditions.last_mut() else {
             self.diags.push(
                 PRE_ELSE_WITHOUT_IF,
@@ -586,7 +617,14 @@ impl<'a> Preprocessor<'a> {
         frame.any_taken |= frame.active;
     }
 
-    fn endif(&mut self, name_span: RawSpan) {
+    fn endif(&mut self, rest: &MappedText, name_span: RawSpan, directive_span: RawSpan) {
+        if has_expression_token(rest) {
+            self.diags.push(
+                PRE_MALFORMED_DIRECTIVE,
+                "unexpected tokens after #endif",
+                directive_span,
+            );
+        }
         if self.conditions.pop().is_none() {
             self.diags.push(
                 PRE_ENDIF_WITHOUT_IF,
@@ -864,6 +902,29 @@ fn closing_comment_directive(text: &str, start: usize) -> Option<(usize, usize)>
     } else {
         None
     }
+}
+
+fn continued_line(text: &str, start: usize) -> bool {
+    if start < 2 {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    if bytes[start - 1] == b'\n' {
+        let before = if start >= 3 && bytes[start - 2] == b'\r' {
+            start - 3
+        } else {
+            start - 2
+        };
+        bytes[before] == b'\\'
+    } else if bytes[start - 1] == b'\r' {
+        start >= 2 && bytes[start - 2] == b'\\'
+    } else {
+        false
+    }
+}
+
+fn is_spliced_newline(text: &str, index: usize) -> bool {
+    index > 0 && text.as_bytes()[index - 1] == b'\\'
 }
 
 fn directive_span(source: SourceId, text: &str, start: usize, end: usize) -> RawSpan {
@@ -2284,5 +2345,189 @@ mod phase2_rendered_diagnostic_tests {
         assert_eq!(rendered.diagnostic().span.start, 0);
         assert_eq!(rendered.diagnostic().span.end, 5);
         assert_eq!(rendered.related().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod phase2_review_regression_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(919), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    }
+
+    #[test]
+    fn line_splicing_prevents_directive_after_continuation_lf() {
+        let source = "integer x = 1 + \\\n#define X 2\ninteger y = X;\n";
+        let prepared = run(source);
+        assert_eq!(
+            prepared.text(),
+            "integer x = 1 + #define X 2\ninteger y = X;\n"
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert!(prepared
+            .map()
+            .resolve_span(PreparedSpan::new(
+                prepared.unit(),
+                0,
+                prepared.prepared_len()
+            ))
+            .is_ok());
+        assert_eq!(prepared.map().eof_anchor().start(), source.len());
+    }
+
+    #[test]
+    fn line_splicing_prevents_directive_after_continuation_crlf() {
+        let source = "integer x = 1 + \\\r\n#define X 2\r\ninteger y = X;\r\n";
+        let prepared = run(source);
+        assert_eq!(
+            prepared.text(),
+            "integer x = 1 + #define X 2\r\ninteger y = X;\r\n"
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn line_splicing_prevents_directive_after_continuation_lone_cr() {
+        let source = "integer x = 1 + \\\r#define X 2\rinteger y = X;\r";
+        let prepared = run(source);
+        assert_eq!(
+            prepared.text(),
+            "integer x = 1 + #define X 2\rinteger y = X;\r"
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leading_empty_line_does_not_break_continuation_state() {
+        let prepared = run("\n#define X 1\nX\n");
+        assert!(prepared.text().contains('1'));
+        let prepared = run("\r\n#define X 1\r\nX\r\n");
+        assert!(prepared.text().contains('1'));
+        let prepared = run("\r#define X 1\rX\r");
+        assert!(prepared.text().contains('1'));
+    }
+
+    #[test]
+    fn function_macro_invocation_spans_physical_lines() {
+        let source = "#define ADD(a,b) ((a)+(b))\ninteger x = ADD(\n  1,\n  2\n);\n";
+        let prepared = run(source);
+        assert_eq!(prepared.text(), "\ninteger x = ((1)+(2));\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert!(prepared
+            .map()
+            .resolve_span(PreparedSpan::new(
+                prepared.unit(),
+                0,
+                prepared.prepared_len()
+            ))
+            .is_ok());
+    }
+
+    #[test]
+    fn function_macro_invocation_spans_crlf_lines() {
+        let source = "#define ADD(a,b) ((a)+(b))\r\ninteger x = ADD(\r\n  1,\r\n  2\r\n);\r\n";
+        let prepared = run(source);
+        assert_eq!(prepared.text(), "\r\ninteger x = ((1)+(2));\r\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn else_rejects_extra_tokens_and_recovers() {
+        let prepared = run("#if 0\n#else junk\nyes\n#endif\n");
+        assert_eq!(codes(&prepared), vec!["PRE002"]);
+        assert!(prepared.text().contains("yes"));
+        assert!(!prepared.text().contains("junk"));
+    }
+
+    #[test]
+    fn endif_rejects_extra_tokens_and_recovers() {
+        let prepared = run("#if 1\nyes\n#endif junk\n");
+        assert_eq!(codes(&prepared), vec!["PRE002"]);
+        assert!(prepared.text().contains("yes"));
+    }
+
+    #[test]
+    fn else_and_endif_allow_whitespace_and_comments() {
+        let prepared = run("#if 0\n#else /* c */\nyes\n#endif // c\n");
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert!(prepared.text().contains("yes"));
+    }
+
+    #[test]
+    fn negative_shift_operands_select_else_and_diagnose() {
+        for operator in ["<<", ">>"] {
+            let source = format!("#if -1 {operator} 1\nyes\n#else\nno\n#endif\n");
+            let prepared = run(&source);
+            assert!(prepared.text().contains("no"), "operator {operator}");
+            assert!(!prepared.text().contains("yes"), "operator {operator}");
+            assert_eq!(codes(&prepared), vec!["PRE028"], "operator {operator}");
+        }
+    }
+
+    #[test]
+    fn non_negative_shift_controls_remain_valid() {
+        for (source, expected) in [
+            ("#if 0 << 1\nyes\n#else\nno\n#endif\n", false),
+            ("#if 1 << 1\nyes\n#else\nno\n#endif\n", true),
+            ("#if 0 >> 1\nyes\n#else\nno\n#endif\n", false),
+            ("#if 1 >> 1\nyes\n#else\nno\n#endif\n", false),
+        ] {
+            let prepared = run(source);
+            assert_eq!(prepared.text().contains("yes"), expected, "{source}");
+            assert_eq!(prepared.text().contains("no"), !expected, "{source}");
+            assert!(prepared.preprocess_diagnostics().is_empty(), "{source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod phase2_multiline_provenance_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+    use crate::source::map::PreparedSpan;
+    use crate::source::SourceSpan;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(920), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+    }
+
+    fn text_of(prepared: &PreparedSource, span: SourceSpan) -> &str {
+        &prepared.map().file(span.source()).unwrap().text()[span.start()..span.end()]
+    }
+
+    #[test]
+    fn multiline_argument_keeps_original_span_and_invocation() {
+        let prepared = run("#define ID(x) x\nID(\n  42\n)\n");
+        assert_eq!(prepared.text(), "\n42\n");
+        let start = prepared.text().find("42").unwrap();
+        let resolved = prepared
+            .map()
+            .resolve_span(PreparedSpan::new(prepared.unit(), start, start + 2))
+            .unwrap();
+        assert_eq!(text_of(&prepared, resolved.primary()), "42");
+        assert!(resolved
+            .related()
+            .iter()
+            .any(|span| text_of(&prepared, *span).contains("ID(")));
+        assert!(resolved
+            .related()
+            .iter()
+            .any(|span| text_of(&prepared, *span).contains("#define ID")));
     }
 }

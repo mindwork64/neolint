@@ -57,7 +57,7 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | Code | Meaning | Related/notes |
 | --- | --- | --- |
 | `PRE001` | Unknown preprocessor directive. | Primary is the directive line. |
-| `PRE002` | Malformed or empty directive. | Primary is the directive line. |
+| `PRE002` | Malformed or empty directive, including unexpected tokens after `#else`/`#endif`. | Primary is the directive line; conditional recovery still matches the frame. |
 | `PRE003` | Invalid `#define` (missing name, bad parameter list, variadic/duplicate parameter). | Primary is the definition name/line. |
 | `PRE004` | Invalid `#undef` (missing, extra, or non-identifier operand). | Primary is the directive/operand. |
 | `PRE005` | Conflicting macro redefinition. | Related points at the previous definition; the old definition remains active. |
@@ -82,7 +82,7 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | `PRE025` | Conditional nesting depth exceeds 64. | The over-deep frame is treated as inactive and still matched by `#endif`. |
 | `PRE026` | Division or remainder by zero in an evaluated expression. | The expression evaluates as false; unselected short-circuit branches are not diagnosed. |
 | `PRE027` | Checked `i64` arithmetic, literal, negation, division, or shift overflow. | The expression evaluates as false. |
-| `PRE028` | Invalid shift count (negative or at least 64) in an evaluated expression. | The expression evaluates as false. |
+| `PRE028` | Invalid shift: negative left operand, negative count, or count at least 64 in an evaluated expression. | The expression evaluates as false. |
 | `PRE029` | Malformed decimal/octal/hexadecimal integer literal. | The literal is treated as zero so parsing can continue. |
 | `PRE030` | Missing `#if`/`#elif` expression. | Primary is a zero-length point at the directive end; related is the conditional opening. |
 

@@ -421,6 +421,14 @@ impl Parser<'_> {
             ExprTokenKind::Gt => Ok(u8::from(left > right).into()),
             ExprTokenKind::Ge => Ok(u8::from(left >= right).into()),
             ExprTokenKind::Shl | ExprTokenKind::Shr => {
+                if left < 0 {
+                    self.diags.push(
+                        PRE_INVALID_SHIFT,
+                        "left operand of shift must be non-negative",
+                        span,
+                    );
+                    return Err(());
+                }
                 if !(0..64).contains(&right) {
                     self.diags
                         .push(PRE_INVALID_SHIFT, "shift count must be in 0..63", span);
@@ -627,7 +635,9 @@ mod tests {
 
     #[test]
     fn invalid_shifts_are_diagnosed() {
-        for source in ["1 << 64", "1 >> 64", "1 << -1", "1 >> -1"] {
+        for source in [
+            "1 << 64", "1 >> 64", "1 << -1", "1 >> -1", "-1 << 1", "-1 >> 1",
+        ] {
             let (result, codes) = eval(source);
             assert!(result.is_err(), "expression {source:?}");
             assert!(codes.contains(&PRE_INVALID_SHIFT), "{source:?}: {codes:?}");
@@ -660,5 +670,9 @@ mod tests {
         assert_eq!(eval("0x2a").0, Ok(42));
         assert_eq!(eval("UNKNOWN").0, Ok(0));
         assert_eq!(eval("0x7fffffffffffffff").0, Ok(i64::MAX));
+        assert_eq!(eval("0 << 1").0, Ok(0));
+        assert_eq!(eval("1 << 1").0, Ok(2));
+        assert_eq!(eval("0 >> 1").0, Ok(0));
+        assert_eq!(eval("1 >> 1").0, Ok(0));
     }
 }

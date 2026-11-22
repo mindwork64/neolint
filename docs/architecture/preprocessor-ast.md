@@ -2525,11 +2525,16 @@ still creates identity units; CLI integration is Phase 3.
 **Scanner and directives.** The scanner works on original bytes, not regular
 expressions or the LSL lexer. It tracks strings, `//` comments, `/* ... */`
 comments, physical line starts, whitespace, and backslash-newline splicing.
-Directives are recognized only when `#` is the first token of a logical line
-after whitespace/comments; a `#` inside a string, comment, or ordinary code is
-not a directive. LF, CRLF, and lone CR are preserved. A directive consumes its
-logical line; one original line terminator is retained as direct output so
-neighbouring tokens are not glued together. The conditional stack stores
+Line splicing applies to ordinary active code as well as directive text: the
+backslash-newline bytes are removed before tokenization, so a `#` later on the
+same logical line is never a directive. Directives are recognized only when `#`
+is the first token of a logical line after whitespace/comments; a `#` inside a
+string, comment, or ordinary code is not a directive. LF, CRLF, and lone CR are
+preserved (except the spliced newline). A directive consumes its logical line;
+one original line terminator is retained as direct output so neighbouring
+tokens are not glued together. Active ordinary code is accumulated across
+physical lines and tokenized as one stream, so function-like calls, arguments,
+comments, and strings may span lines. The conditional stack stores
 parent-active, current-active, branch-taken, `#else`-seen, and opening span, and
 handles nested inactive blocks structurally. `#define`/`#undef` in inactive
 blocks do not change the table. `#elif` after a taken branch or after `#else`
