@@ -515,22 +515,41 @@ impl<'a> Parser<'a> {
             return Some(self.parse_do_while_statement(start));
         }
         if self.matches(TokenKind::KwReturn) {
+            let keyword_span = self.token_span(start);
+            let mut semicolon_consumed = false;
             let value = if !self.check(TokenKind::Semicolon) {
+                let value_start = self.current;
                 let expression = self.parse_expression(1);
                 if expression.is_none() {
                     self.synchronize_statement();
-                    return Some(self.error_statement(start));
+                    if self.current == 0
+                        || self.tokens[self.current - 1].kind != TokenKind::Semicolon
+                    {
+                        return Some(self.error_statement(start));
+                    }
+                    semicolon_consumed = true;
+                    let first_span = self.tokens[value_start].span;
+                    Some(Expression {
+                        span: first_span,
+                        kind: ExpressionKind::Error(ErrorNode {
+                            span: first_span,
+                            code: None,
+                        }),
+                    })
+                } else {
+                    expression
                 }
-                expression
             } else {
                 None
             };
-            self.expect(TokenKind::Semicolon, "expected ';' after return statement");
+            if !semicolon_consumed {
+                self.expect(TokenKind::Semicolon, "expected ';' after return statement");
+            }
             return Some(self.statement(
                 start,
                 StatementKind::Return(ReturnStatement {
                     span: self.span_from(start, self.current),
-                    keyword_span: self.token_span(start),
+                    keyword_span,
                     value,
                 }),
             ));
@@ -817,12 +836,14 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let (condition, condition_missing) = if let Some(expression) = self.parse_expression(1) {
+        let condition_missing = self.check(TokenKind::Semicolon);
+        let (condition, condition_malformed) = if let Some(expression) = self.parse_expression(1) {
             self.expect(TokenKind::Semicolon, "expected ';' after for condition");
             (expression, false)
         } else {
             self.synchronize_for_condition();
-            (self.error_expression(self.here_span()), true)
+            let malformed = !condition_missing;
+            (self.error_expression(self.here_span()), malformed)
         };
 
         let (increment, ok) = self.parse_for_expression_list(TokenKind::RParen);
@@ -839,6 +860,7 @@ impl<'a> Parser<'a> {
                 initializer,
                 condition,
                 condition_missing,
+                condition_malformed,
                 increment,
                 body: Box::new(body),
             }),

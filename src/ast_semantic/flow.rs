@@ -601,6 +601,8 @@ fn build_for(
     let condition = graph.node()?;
     let (may_enter, may_exit) = if for_statement.condition_missing {
         (true, false)
+    } else if for_statement.condition_malformed {
+        (true, true)
     } else {
         condition_possibilities(&for_statement.condition, false, scope, scopes)?
     };

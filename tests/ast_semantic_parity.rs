@@ -1088,6 +1088,10 @@ fn focused_flow_rule_parity() {
         "integer a() { while (0xFFFFFFFF + 1) { } } integer b() { while (2147483648) { } } default { }",
         "integer f() { jump missing; } default { }",
         "integer spin() { for ( ; ; ) { } } default { }",
+        "do_work() { return ,; } default { }",
+        "integer f() { return ,; } default { }",
+        "integer f() { for (; ,; ) { } } default { }",
+        "integer f() { for (; 1 + ; ) { } } default { }",
     ] {
         assert_parity(source);
     }
@@ -1330,4 +1334,89 @@ fn invalid_jump_suppresses_sem011_for_that_function() {
         .iter()
         .any(|diagnostic| diagnostic.code == "SEM011"));
     assert_parity(source);
+}
+
+#[test]
+fn malformed_return_expression_keeps_sem008_value_span() {
+    let source = "do_work() { return ,; } default { }";
+    let comma = source.find(',').unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM008",
+            "function do_work does not return a value, but this return statement has one"
+                .to_owned(),
+            source,
+            comma,
+            1
+        )]
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn malformed_for_condition_is_unknown_not_missing() {
+    let source = "integer f() { for (; ,; ) { } } default { }";
+    assert!(
+        semantic(source)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM011"),
+        "malformed non-empty condition must stay unknown, not infinite"
+    );
+    assert_parity(source);
+
+    let source = "integer f() { for (;;) { } } default { }";
+    assert!(
+        !semantic(source)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM011"),
+        "genuinely empty condition remains always true"
+    );
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::For(for_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected for");
+    };
+    assert!(for_statement.condition_missing);
+    assert!(!for_statement.condition_malformed);
+
+    let source = "integer f() { for (; ,; ) { } } default { }";
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::For(for_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected for");
+    };
+    assert!(!for_statement.condition_missing);
+    assert!(for_statement.condition_malformed);
 }

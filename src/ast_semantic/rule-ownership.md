@@ -111,6 +111,8 @@ AST engine yet.
   `ScopeTree::is_ancestor` provides same/ancestor/descendant visibility.
 - SEM008 uses the Phase 6B expression typer and first-definition user signatures;
   `ReturnStatement::keyword_span` supplies the exact no-value primary span.
+  A malformed non-empty return expression retains a recovered `ReturnStatement`
+  with an Error expression at its first token, matching Legacy token scans.
 - SEM009/SEM010 collect labels before resolving jumps, preserving forward jumps,
   first-declaration lookup and nested-block accessibility.
 - SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
@@ -118,6 +120,8 @@ AST engine yet.
   suppression when the same function has SEM009/SEM010 findings.
 - Constant conditions use an AST-only 32-bit evaluator with the Legacy
   wrapping/division/shift rules, canonical constants, mutable-shadow checks and
-  float truthiness. `ForStatement::condition_missing` preserves `for (;;)`.
+  float truthiness. `ForStatement::condition_missing` preserves genuinely empty
+  `for (;;)`, while `condition_malformed` marks a non-empty parse failure as an
+  unknown condition rather than an infinite loop.
 - Firestorm switch/break and Error/recovery control-flow forms conservatively
   suppress SEM011 for the affected function.

@@ -232,6 +232,8 @@ pub struct ForStatement {
     pub condition: Expression,
     /// Whether the source condition was empty (always true).
     pub condition_missing: bool,
+    /// Whether a non-empty condition failed to parse (unknown outcome).
+    pub condition_malformed: bool,
     /// Increment expressions.
     pub increment: Vec<Expression>,
     /// Loop body.
