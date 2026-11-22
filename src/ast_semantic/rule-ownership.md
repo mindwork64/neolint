@@ -1,9 +1,9 @@
 # SEM rule ownership matrix
 
 Phase 6 is incremental. Phase 6A migrated the structural rules, Phase 6B the
-call/event signature rules and Phase 6C the return/control-flow rules below; the
-remaining rules stay owned by the Legacy token analyzer and do not run in the
-AST engine yet.
+call/event signature rules, Phase 6C the return/control-flow rules and Phase 6D
+the expression/assignment rules below; the remaining rules stay owned by the
+Legacy token analyzer and do not run in the AST engine yet.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -20,12 +20,12 @@ AST engine yet.
 | SEM011 | `analyze_missing_return_paths` | `ast_semantic::flow::check_missing_returns` | migrated in 6C | exact | none | `sem011_exact_message_and_span`, full corpus |
 | SEM012 | `analyze_unresolved_variables` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
 | SEM013 | `analyze_deprecated_function_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM014 | `analyze_explicit_casts` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM015 | `analyze_variable_initializers` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM016 | `analyze_variable_assignments` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM017 | `analyze_compound_assignments` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM018 | `analyze_component_assignments` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM019 | `analyze_component_reads` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
+| SEM014 | `analyze_explicit_casts` | `ast_semantic::rules::explicit_casts` | migrated in 6D | exact | none | `sem014_exact_cast_message_and_target_span`, full corpus |
+| SEM015 | `analyze_variable_initializers` | `ast_semantic::rules::variable_initializers` | migrated in 6D | exact | none | `sem015_exact_initializer_message_and_name_span`, full corpus |
+| SEM016 | `analyze_variable_assignments` | `ast_semantic::rules::assignments` | migrated in 6D | exact | none | `sem016_exact_assignment_message_and_target_span`, full corpus |
+| SEM017 | `analyze_compound_assignments` | `ast_semantic::rules::assignments` | migrated in 6D | exact | none | `sem017_exact_messages_and_target_span`, full corpus |
+| SEM018 | `analyze_component_assignments` | `ast_semantic::rules::components` | migrated in 6D | exact | none | `sem018_exact_messages_and_component_span`, full corpus |
+| SEM019 | `analyze_component_reads` | `ast_semantic::rules::components` | migrated in 6D | exact | none | `sem019_exact_read_message_and_component_span`, full corpus |
 | SEM020 | `analyze_state_topology` | `ast_semantic::rules::duplicate_events` | migrated in 6A | exact | none | `sem020_exact_message_and_scope_boundary`, full corpus |
 | SEM021 | `analyze_state_topology` | `ast_semantic::rules::state_namespace` | migrated in 6A | exact | none | `sem021_exact_duplicate_and_namespace_collisions`, full corpus |
 | SEM022 | `analyze_state_topology` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
@@ -127,3 +127,22 @@ AST engine yet.
   unknown condition rather than an infinite loop.
 - Firestorm switch/break and Error/recovery control-flow forms conservatively
   suppress SEM011 for the affected function.
+
+## Phase 6D expression validation and assignment semantics
+
+- `src/ast_semantic/expressions.rs` is the shared AST-only traversal for every
+  expression and declarator initializer, with the same scope propagation as
+  Phase 6A/6B call collection. `calls.rs` now filters this shared fact set, so
+  Phase 6B call order/multiplicity is unchanged.
+- SEM014 reuses the Phase 6B cast matrix and target-type span.
+- SEM015 checks every global/local declarator initializer independently using
+  source-order `lookup_value_at` visibility and the existing implicit conversion
+  rules.
+- SEM016/SEM017 accept only direct ordinary identifier lvalues (matching
+  Legacy's conservative boundary) and reuse the binary result-type matrix.
+- SEM018 supports direct identifier component targets with arbitrary grouping
+  parentheses, plain and all five arithmetic compound operators, the Legacy
+  component validity matrix and exact component spans.
+- SEM019 marks all recognized component write targets first, then reports
+  invalid component reads; a write is never double-reported as a read.
+- Unknown/unresolved types and malformed/Error expressions remain conservative.

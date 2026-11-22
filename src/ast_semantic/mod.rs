@@ -7,6 +7,7 @@
 pub mod scopes;
 
 pub(crate) mod calls;
+pub(crate) mod expressions;
 pub(crate) mod flow;
 pub(crate) mod rules;
 pub(crate) mod types;
@@ -22,7 +23,8 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
     let _ = syntax_diagnostics;
     let scopes = scopes::ScopeTree::build(ast);
     let functions = types::collect_user_functions(ast);
-    let calls = calls::collect_calls(ast, &scopes);
+    let expressions = expressions::collect_facts(ast, &scopes);
+    let calls = calls::collect_calls(&expressions);
     let mut diagnostics = Vec::new();
     diagnostics.extend(rules::duplicate_globals::check(ast));
     diagnostics.extend(rules::duplicate_locals::check(&scopes));
@@ -41,6 +43,26 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
         syntax_diagnostics,
     ));
     diagnostics.extend(rules::event_signatures::check(ast));
+    diagnostics.extend(rules::explicit_casts::check(
+        &expressions.expressions,
+        &scopes,
+        &functions,
+    ));
+    diagnostics.extend(rules::variable_initializers::check(
+        &expressions.initializers,
+        &scopes,
+        &functions,
+    ));
+    diagnostics.extend(rules::assignments::check(
+        &expressions.expressions,
+        &scopes,
+        &functions,
+    ));
+    diagnostics.extend(rules::components::check(
+        &expressions.expressions,
+        &scopes,
+        &functions,
+    ));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);
