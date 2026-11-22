@@ -15,6 +15,7 @@
 //! left unchecked rather than guessed.
 
 pub mod ast;
+pub mod ast_semantic;
 pub mod builtins;
 pub mod config;
 pub mod diagnostic;
@@ -26,6 +27,7 @@ pub mod semantic;
 pub mod source;
 
 pub use ast::{parse_ast, parse_ast_with_options, Ast, AstParseOptions};
+pub use ast_semantic::analyze_ast;
 pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };
