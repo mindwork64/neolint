@@ -246,5 +246,11 @@ mod phase2_api_compatibility_tests {
             PreprocessSettings::identity().dialect(),
             PreprocessDialect::Lsl
         );
+        let firestorm: PreprocessSettings = PreprocessDialect::Firestorm.into();
+        assert_eq!(firestorm.mode(), PreprocessMode::Full);
+        assert_eq!(firestorm.dialect(), PreprocessDialect::Firestorm);
+        let lsl: PreprocessSettings = PreprocessDialect::Lsl.into();
+        assert_eq!(lsl.mode(), PreprocessMode::Full);
+        assert_eq!(lsl.dialect(), PreprocessDialect::Lsl);
     }
 }
