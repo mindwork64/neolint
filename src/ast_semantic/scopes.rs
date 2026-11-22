@@ -60,6 +60,8 @@ pub struct Scope {
 pub struct ScopeTree {
     scopes: Vec<Scope>,
     root: ScopeId,
+    block_scopes: HashMap<(usize, usize), ScopeId>,
+    switch_scopes: HashMap<(usize, usize), ScopeId>,
 }
 
 impl ScopeTree {
@@ -71,6 +73,8 @@ impl ScopeTree {
                 symbols: Vec::new(),
             }],
             root: ScopeId(0),
+            block_scopes: HashMap::new(),
+            switch_scopes: HashMap::new(),
         };
         for item in &ast.items {
             match item {
@@ -102,6 +106,7 @@ impl ScopeTree {
                         continue;
                     };
                     let scope = tree.new_scope(tree.root);
+                    tree.block_scopes.insert(block_key(body), scope);
                     for parameter in &function.parameters {
                         if !parameter.name.is_empty() {
                             tree.register(
@@ -142,6 +147,41 @@ impl ScopeTree {
     /// Look up a scope by id.
     pub fn scope(&self, id: ScopeId) -> Option<&Scope> {
         self.scopes.get(id.0)
+    }
+
+    /// Scope created for a function/event body or nested block.
+    pub fn scope_for_block(&self, block: &Block) -> Option<ScopeId> {
+        self.block_scopes.get(&block_key(block)).copied()
+    }
+
+    /// Scope created for a Firestorm switch body.
+    pub fn scope_for_switch(&self, switch: &SwitchStatement) -> Option<ScopeId> {
+        self.switch_scopes
+            .get(&(switch.span.start, switch.span.end))
+            .copied()
+    }
+
+    /// Resolve a visible value binding at a source byte position.
+    ///
+    /// Function declarations are excluded: they are not LSL values unless
+    /// invoked as a call expression.
+    pub fn lookup_value_at(
+        &self,
+        mut scope: ScopeId,
+        name: &str,
+        use_offset: usize,
+    ) -> Option<&Symbol> {
+        loop {
+            let current = self.scope(scope)?;
+            if let Some(symbol) = current.symbols.iter().rev().find(|item| {
+                item.name == name
+                    && item.kind != SymbolKind::Function
+                    && item.span.start <= use_offset
+            }) {
+                return Some(symbol);
+            }
+            scope = current.parent?;
+        }
     }
 
     /// Resolve a name through the given scope and its ancestors.
@@ -191,6 +231,7 @@ impl ScopeTree {
             return;
         };
         let scope = self.new_scope(self.root);
+        self.block_scopes.insert(block_key(body), scope);
         // Legacy conservatively registers parameters only for canonical events;
         // unknown extension event bodies are still scanned for local declarations.
         if builtins::definitions()
@@ -239,6 +280,7 @@ impl ScopeTree {
                 }
                 StatementKind::Block(block) => {
                     let child = self.new_scope(current_scope);
+                    self.block_scopes.insert(block_key(block), child);
                     for statement in block.statements.iter().rev() {
                         stack.push((statement, child));
                     }
@@ -280,6 +322,8 @@ impl ScopeTree {
         stack: &mut Vec<(&'a Statement, ScopeId)>,
     ) {
         let scope = self.new_scope(parent);
+        self.switch_scopes
+            .insert((switch.span.start, switch.span.end), scope);
         for arm in switch.arms.iter().rev() {
             for statement in arm.statements.iter().rev() {
                 stack.push((statement, scope));
@@ -288,7 +332,7 @@ impl ScopeTree {
     }
 }
 
-fn type_name(kind: TypeKind) -> &'static str {
+pub(crate) fn type_name(kind: TypeKind) -> &'static str {
     match kind {
         TypeKind::Integer => "integer",
         TypeKind::Float => "float",
@@ -320,4 +364,8 @@ pub fn symbol_counts(scope: &Scope) -> HashMap<&str, usize> {
         *counts.entry(symbol.name.as_str()).or_insert(0) += 1;
     }
     counts
+}
+
+fn block_key(block: &Block) -> (usize, usize) {
+    (block.span.start, block.span.end)
 }
