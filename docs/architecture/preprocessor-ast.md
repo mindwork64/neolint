@@ -1,15 +1,15 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5, 6A, 6B and 6C implemented on the experimental branch**;
+Status: **Phases 1–5, 6A, 6B, 6C and 6D implemented on the experimental branch**;
 this document remains the normative contract for the remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
 implemented; the Phase 6A structural semantics foundation, Phase 6B
-expression-typing/call-signature rules and Phase 6C return/control-flow rules are
-implemented, while the remaining AST semantics and engine migration remain
-future work.
+expression-typing/call-signature rules, Phase 6C return/control-flow rules and
+Phase 6D expression/assignment validation are implemented, while the remaining
+AST semantics and engine migration remain future work.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -2886,7 +2886,7 @@ access/assignment/casts/indices/spans/malformed recovery and deep nesting.
 `tests/ast_bridge.rs` resolves every new node span through identity, macro and
 include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
-### Phase 6 — AST semantic analyzer and migration (Phase 6A/6B/6C implemented)
+### Phase 6 — AST semantic analyzer and migration (Phase 6A/6B/6C/6D implemented)
 
 #### Phase 6A implementation record
 
@@ -3024,7 +3024,43 @@ return expressions, label/jump ancestry, constant conditions, loops, budget
 boundaries, invalid-jump suppression, malformed recovery and Firestorm
 switch/break. No intentional diagnostic deltas exist in this slice.
 
-**Boundary.** SEM012–SEM019, SEM022 and SEM023 remain Legacy-only. No new SEM
+**Boundary at the end of 6C.** SEM012–SEM019, SEM022 and SEM023 remained
+Legacy-only. No new SEM codes, severity changes, CLI/pipeline selection or Legacy
+behavior changes.
+
+#### Phase 6D implementation record
+
+**Status:** implemented independently in `src/ast_semantic/expressions.rs` and
+focused rule modules; still not connected to `AnalysisRun`, CLI, pipeline,
+preprocessor or SourceMap. Legacy remains the only user-visible semantic engine.
+
+**Shared traversal.** One AST-only facts pass provides every expression with its
+`ScopeId` plus every declarator initializer. Scope propagation matches Phase 6A:
+root globals, function/event body scopes, nested blocks, switch scopes and
+unbraced control-flow bodies. Unknown extension event bodies are traversed.
+Phase 6B call collection now filters the same facts, preserving call order and
+multiplicity.
+
+**Migrated rules.** SEM014 reuses the Phase 6B cast matrix and target type span.
+SEM015 checks each global/local declarator initializer independently with
+source-order visibility. SEM016/SEM017 accept the same conservative direct
+identifier lvalues as Legacy and reuse the binary result-type matrix. SEM018
+handles grouped vector/rotation component writes for plain and arithmetic
+compound operators. SEM019 marks recognized component writes first and reports
+only invalid reads, so writes never double-report.
+
+**Conservatism.** Unknown/unresolved types, malformed/Error expressions and
+Legacy-ignored grouped identifier lvalues remain unchecked. No token scanning,
+source slicing or duplicate type matrices were introduced.
+
+**Parity.** The differential harness now compares full normalized records for the
+19 migrated codes SEM001–SEM011, SEM014–SEM021 over every corpus fixture. Focused
+tests cover exact messages/spans, the cast matrix, comma declarators, nested
+control-flow/switch/unknown-event initializers, plain/compound assignments,
+grouped component lvalues, component read/write suppression, unknown bases and
+cross-rule multiplicity. No intentional diagnostic deltas exist in this slice.
+
+**Boundary.** SEM012, SEM013, SEM022 and SEM023 remain Legacy-only. No new SEM
 codes, severity changes, CLI/pipeline selection or Legacy behavior changes.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
