@@ -1,8 +1,9 @@
 # SEM rule ownership matrix
 
-Phase 6 is incremental. Phase 6A migrated the structural rules and Phase 6B
-migrated the call/event signature rules below; the remaining rules stay owned by
-the Legacy token analyzer and do not run in the AST engine yet.
+Phase 6 is incremental. Phase 6A migrated the structural rules, Phase 6B the
+call/event signature rules and Phase 6C the return/control-flow rules below; the
+remaining rules stay owned by the Legacy token analyzer and do not run in the
+AST engine yet.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -13,10 +14,10 @@ the Legacy token analyzer and do not run in the AST engine yet.
 | SEM005 | `analyze_user_function_calls` | `ast_semantic::rules::user_calls` | migrated in 6B | exact | none | `sem005_and_sem006_exact_messages_and_spans`, full corpus |
 | SEM006 | `analyze_user_function_calls` | `ast_semantic::rules::user_calls` | migrated in 6B | exact | none | `sem005_and_sem006_exact_messages_and_spans`, full corpus |
 | SEM007 | `semantic::ScopeModel::add_variable` | `ast_semantic::rules::duplicate_locals` | migrated in 6A | exact | none | `sem007_exact_messages_spans_and_shadowing`, full corpus |
-| SEM008 | `analyze_function_returns` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM009 | `analyze_jump_labels` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM010 | `analyze_jump_labels` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM011 | `analyze_missing_return_paths` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
+| SEM008 | `analyze_function_returns` | `ast_semantic::flow::check_returns` | migrated in 6C | exact | none | `sem008_exact_return_messages_and_spans`, full corpus |
+| SEM009 | `analyze_jump_labels` | `ast_semantic::flow::check_jumps` | migrated in 6C | exact | none | `sem009_and_sem010_exact_messages_and_spans`, full corpus |
+| SEM010 | `analyze_jump_labels` | `ast_semantic::flow::check_jumps` | migrated in 6C | exact | none | `sem009_and_sem010_exact_messages_and_spans`, full corpus |
+| SEM011 | `analyze_missing_return_paths` | `ast_semantic::flow::check_missing_returns` | migrated in 6C | exact | none | `sem011_exact_message_and_span`, full corpus |
 | SEM012 | `analyze_unresolved_variables` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
 | SEM013 | `analyze_deprecated_function_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
 | SEM014 | `analyze_explicit_casts` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
@@ -100,3 +101,23 @@ the Legacy token analyzer and do not run in the AST engine yet.
   identifiers followed by `(` at top level participate in the duplicate scan.
 - Firestorm switch/lazy AST forms are traversed without panics and without
   inventing types; the Legacy analyzer remains the reference oracle.
+
+## Phase 6C return and control-flow analysis
+
+- `src/ast_semantic/flow.rs` consumes typed AST nodes and `ScopeTree` only; it
+  never accepts or rescans tokens.
+- Function bodies and canonical event bodies form independent label/jump code
+  scopes. Missing/unclosed bodies and unknown extension events are skipped.
+  `ScopeTree::is_ancestor` provides same/ancestor/descendant visibility.
+- SEM008 uses the Phase 6B expression typer and first-definition user signatures;
+  `ReturnStatement::keyword_span` supplies the exact no-value primary span.
+- SEM009/SEM010 collect labels before resolving jumps, preserving forward jumps,
+  first-declaration lookup and nested-block accessibility.
+- SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
+  deduplicated edges, fail-closed skip on unsupported/partial graphs and
+  suppression when the same function has SEM009/SEM010 findings.
+- Constant conditions use an AST-only 32-bit evaluator with the Legacy
+  wrapping/division/shift rules, canonical constants, mutable-shadow checks and
+  float truthiness. `ForStatement::condition_missing` preserves `for (;;)`.
+- Firestorm switch/break and Error/recovery control-flow forms conservatively
+  suppress SEM011 for the affected function.

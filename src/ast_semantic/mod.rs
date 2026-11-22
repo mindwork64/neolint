@@ -7,6 +7,7 @@
 pub mod scopes;
 
 pub(crate) mod calls;
+pub(crate) mod flow;
 pub(crate) mod rules;
 pub(crate) mod types;
 
@@ -40,5 +41,13 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
         syntax_diagnostics,
     ));
     diagnostics.extend(rules::event_signatures::check(ast));
+    diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
+    let jumps = flow::check_jumps(ast, &scopes);
+    diagnostics.extend(jumps.diagnostics);
+    diagnostics.extend(flow::check_missing_returns(
+        ast,
+        &scopes,
+        &jumps.invalid_functions,
+    ));
     diagnostics
 }
