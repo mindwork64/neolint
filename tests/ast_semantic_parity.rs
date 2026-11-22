@@ -1512,6 +1512,6 @@ fn malformed_return_preserves_recovered_label_visibility() {
         panic!("expected recovered return");
     };
     assert_eq!(return_statement.recovered_labels.len(), 1);
-    assert_eq!(return_statement.recovered_labels[0].name, "done");
+    assert_eq!(return_statement.recovered_labels[0].label.name, "done");
     assert!(return_statement.recovered_jumps.is_empty());
 }
