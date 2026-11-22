@@ -2693,7 +2693,9 @@ without preprocessing flags keeps the frozen legacy pipeline. Prepared units use
 one `PreparedSource`/`SourceMap`, convert preprocess diagnostics directly and
 engine diagnostics through the map, group rendered diagnostics by source load
 order, and preserve existing human/JSON schema and exit code semantics. A
-per-unit total-diagnostic cap of 10,000 appends one terminal `PRE039`.
+per-unit total-diagnostic cap of 10,000 appends one terminal `PRE039`; the CLI
+applies the same 10,000 limit across all `FileResult`s, truncates every excess
+result and appends exactly one invocation-terminal `PRE039`.
 
 **Tests.** Permanent suites cover quoted/angle/nested/duplicate includes, guards,
 pragma once, cycles, depth 64/65, missing/malformed/remote paths, Unicode/spaces,

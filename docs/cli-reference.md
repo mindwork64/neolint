@@ -99,6 +99,8 @@ neolint --format json corpus/invalid/duplicate_event.lsl
 
 `start`/`end` are byte offsets, not display columns. Columns are one-based character positions as reported by the lexer.
 
+The CLI retains at most 10,000 diagnostics across all inputs. On overflow it removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity, exit code 1 unless an input error already requires 2).
+
 ## Exit codes
 
 | Code | Meaning |

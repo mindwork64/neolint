@@ -91,7 +91,7 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | `PRE036` | Unknown `#pragma` (other than `#pragma once`). | Primary is the pragma spelling/directive. |
 | `PRE037` | Firestorm `//fspreprocessor off` kill switch was found. | Severity **info**; primary is the exact marker range; never affects exit code. |
 | `PRE038` | Invalid `#`/`##` use, operands, or token-paste result. | Primary is the invocation; the affected expansion is left bounded. |
-| `PRE039` | Total rendered diagnostics limit (10,000) reached per AnalysisUnit. | Terminal error diagnostic at the map EOF anchor; later findings are suppressed. |
+| `PRE039` | Total rendered diagnostics limit (10,000) reached for an AnalysisUnit or a CLI invocation. | Terminal error diagnostic; later findings are suppressed. A CLI overflow removes unit-level PRE039 terminals and appends exactly one terminal PRE039. |
 
 `PRE016` remains intentionally unused; malformed invocation classes are covered by
 `PRE014` and `PRE015`.
