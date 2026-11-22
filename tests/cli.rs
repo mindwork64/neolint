@@ -748,3 +748,77 @@ fn included_file_diagnostics_use_the_included_path_and_keep_json_shape() {
     assert!(!stdout.contains("\"notes\""), "{stdout}");
     fs::remove_dir_all(directory).unwrap();
 }
+
+fn json_array_is_structurally_valid(text: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            } else if ch.is_control() {
+                return false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' => stack.push(ch),
+            ']' => {
+                if stack.pop() != Some('[') {
+                    return false;
+                }
+            }
+            '}' if stack.pop() != Some('{') => return false,
+            '}' => {}
+            _ => {}
+        }
+    }
+    !in_string
+        && stack.is_empty()
+        && text.trim_start().starts_with('[')
+        && text.trim_end().ends_with(']')
+}
+
+#[test]
+fn global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039() {
+    let directory = temporary_directory();
+    let first = directory.join("a.lsl");
+    let second = directory.join("b.lsl");
+    let mut source = String::new();
+    for _ in 0..10_100 {
+        source.push_str("integer duplicate;\n");
+    }
+    fs::write(&first, &source).unwrap();
+    fs::write(&second, &source).unwrap();
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("--format")
+        .arg("json")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        json_array_is_structurally_valid(&stdout),
+        "invalid JSON output"
+    );
+    let diagnostic_count = stdout.matches("\"code\":\"").count();
+    assert!(
+        diagnostic_count <= 10_000,
+        "diagnostics: {diagnostic_count}"
+    );
+    assert_eq!(stdout.matches("PRE039").count(), 1);
+    assert!(
+        !stdout.contains("b.lsl"),
+        "later file retained diagnostics beyond the budget"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

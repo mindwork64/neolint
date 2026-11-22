@@ -443,15 +443,15 @@ fn run_preprocessed(
     if total > neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS {
         let mut remaining = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS - 1;
         for result in &mut results {
+            // A unit-level cap may already have appended a terminal diagnostic.
+            // The CLI-level overflow must leave exactly one terminal diagnostic.
+            result
+                .diagnostics
+                .retain(|diagnostic| diagnostic.code != "PRE039");
             if result.diagnostics.len() > remaining {
                 result.diagnostics.truncate(remaining);
-                remaining = 0;
-            } else {
-                remaining -= result.diagnostics.len();
             }
-            if remaining == 0 {
-                break;
-            }
+            remaining -= result.diagnostics.len();
         }
         if let Some(first) = results.first_mut() {
             first.diagnostics.push(Diagnostic {
