@@ -2255,21 +2255,33 @@ impl<'a> Parser<'a> {
         &self,
         start: usize,
         semicolon: usize,
-    ) -> (Vec<LabelStatement>, Vec<JumpStatement>) {
+    ) -> (Vec<RecoveredLabelStatement>, Vec<RecoveredJumpStatement>) {
         let mut labels = Vec::new();
         let mut jumps = Vec::new();
+        let mut scope_path = Vec::new();
         let mut index = start;
         while index <= semicolon {
             match self.tokens[index].kind {
+                TokenKind::LBrace => {
+                    scope_path.push(self.token_span(index));
+                    index += 1;
+                }
+                TokenKind::RBrace => {
+                    scope_path.pop();
+                    index += 1;
+                }
                 TokenKind::At
                     if index + 2 <= semicolon
                         && self.tokens[index + 1].kind == TokenKind::Identifier
                         && self.tokens[index + 2].kind == TokenKind::Semicolon =>
                 {
-                    labels.push(LabelStatement {
-                        span: join_spans(self.tokens[index].span, self.tokens[index + 2].span),
-                        name: self.token_text(index + 1),
-                        name_span: self.token_span(index + 1),
+                    labels.push(RecoveredLabelStatement {
+                        label: LabelStatement {
+                            span: join_spans(self.tokens[index].span, self.tokens[index + 2].span),
+                            name: self.token_text(index + 1),
+                            name_span: self.token_span(index + 1),
+                        },
+                        scope_path: scope_path.clone(),
                     });
                     index += 3;
                 }
@@ -2277,10 +2289,13 @@ impl<'a> Parser<'a> {
                     if index < semicolon
                         && self.tokens[index + 1].kind == TokenKind::Identifier =>
                 {
-                    jumps.push(JumpStatement {
-                        span: join_spans(self.tokens[index].span, self.tokens[index + 1].span),
-                        label: self.token_text(index + 1),
-                        label_span: self.token_span(index + 1),
+                    jumps.push(RecoveredJumpStatement {
+                        jump: JumpStatement {
+                            span: join_spans(self.tokens[index].span, self.tokens[index + 1].span),
+                            label: self.token_text(index + 1),
+                            label_span: self.token_span(index + 1),
+                        },
+                        scope_path: scope_path.clone(),
                     });
                     index += 2;
                 }
