@@ -530,6 +530,7 @@ impl<'a> Parser<'a> {
                 start,
                 StatementKind::Return(ReturnStatement {
                     span: self.span_from(start, self.current),
+                    keyword_span: self.token_span(start),
                     value,
                 }),
             ));
@@ -816,12 +817,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let condition = if let Some(expression) = self.parse_expression(1) {
+        let (condition, condition_missing) = if let Some(expression) = self.parse_expression(1) {
             self.expect(TokenKind::Semicolon, "expected ';' after for condition");
-            expression
+            (expression, false)
         } else {
             self.synchronize_for_condition();
-            self.error_expression(self.here_span())
+            (self.error_expression(self.here_span()), true)
         };
 
         let (increment, ok) = self.parse_for_expression_list(TokenKind::RParen);
@@ -837,6 +838,7 @@ impl<'a> Parser<'a> {
                 span: self.span_from(start, self.current),
                 initializer,
                 condition,
+                condition_missing,
                 increment,
                 body: Box::new(body),
             }),

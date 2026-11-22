@@ -228,8 +228,10 @@ pub struct ForStatement {
     pub span: Span,
     /// Initializer expressions.
     pub initializer: Vec<Expression>,
-    /// Required condition.
+    /// Required condition; see `condition_missing` for `for (;;)`.
     pub condition: Expression,
+    /// Whether the source condition was empty (always true).
+    pub condition_missing: bool,
     /// Increment expressions.
     pub increment: Vec<Expression>,
     /// Loop body.
@@ -263,6 +265,8 @@ pub struct DoWhileStatement {
 pub struct ReturnStatement {
     /// Statement span.
     pub span: Span,
+    /// `return` keyword span.
+    pub keyword_span: Span,
     /// Optional returned expression.
     pub value: Option<Expression>,
 }
