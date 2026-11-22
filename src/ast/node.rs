@@ -272,9 +272,27 @@ pub struct ReturnStatement {
     /// Optional returned expression.
     pub value: Option<Expression>,
     /// Labels recovered from a malformed non-empty return expression.
-    pub recovered_labels: Vec<LabelStatement>,
+    pub recovered_labels: Vec<RecoveredLabelStatement>,
     /// Jumps recovered from a malformed non-empty return expression.
-    pub recovered_jumps: Vec<JumpStatement>,
+    pub recovered_jumps: Vec<RecoveredJumpStatement>,
+}
+
+/// Recovered label and its lexical brace path within a malformed return expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredLabelStatement {
+    /// Recovered label node.
+    pub label: LabelStatement,
+    /// Opening-brace spans from the return's containing scope to this label's scope.
+    pub scope_path: Vec<Span>,
+}
+
+/// Recovered jump and its lexical brace path within a malformed return expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredJumpStatement {
+    /// Recovered jump node.
+    pub jump: JumpStatement,
+    /// Opening-brace spans from the return's containing scope to this jump's scope.
+    pub scope_path: Vec<Span>,
 }
 
 /// `jump label;` statement.
