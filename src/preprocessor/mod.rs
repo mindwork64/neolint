@@ -91,6 +91,8 @@ pub struct PreparedSource {
     map: Arc<SourceMap>,
     preprocess_diagnostics: Vec<PreprocessDiagnostic>,
     include_graph: Arc<IncludeGraph>,
+    switches_enabled: bool,
+    lazy_lists_enabled: bool,
 }
 
 impl PreparedSource {
@@ -107,7 +109,15 @@ impl PreparedSource {
             map,
             preprocess_diagnostics,
             include_graph,
+            switches_enabled: false,
+            lazy_lists_enabled: false,
         }
+    }
+
+    pub(crate) fn with_extensions(mut self, switches: bool, lazy_lists: bool) -> Self {
+        self.switches_enabled = switches;
+        self.lazy_lists_enabled = lazy_lists;
+        self
     }
 
     pub(crate) fn with_preprocess_diagnostics(
@@ -156,6 +166,16 @@ impl PreparedSource {
     /// Deterministic include graph for this unit.
     pub fn include_graph(&self) -> &IncludeGraph {
         &self.include_graph
+    }
+
+    /// Effective Firestorm switch support for this prepared unit.
+    pub fn switches_enabled(&self) -> bool {
+        self.switches_enabled
+    }
+
+    /// Effective Firestorm lazy-list support for this prepared unit.
+    pub fn lazy_lists_enabled(&self) -> bool {
+        self.lazy_lists_enabled
     }
 
     /// The only public `Span -> PreparedSpan` adapter.

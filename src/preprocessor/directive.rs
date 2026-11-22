@@ -86,6 +86,11 @@ pub(crate) struct Preprocessor<'a> {
     pending_start: Option<usize>,
     pending_end: usize,
     stopped: bool,
+    dialect: PreprocessDialect,
+    switches_requested: bool,
+    lazy_lists_requested: bool,
+    switches_latched: bool,
+    lazy_lists_latched: bool,
 }
 
 impl<'a> Preprocessor<'a> {
@@ -139,6 +144,11 @@ impl<'a> Preprocessor<'a> {
             pending_start: None,
             pending_end: 0,
             stopped: false,
+            dialect: options.dialect(),
+            switches_requested: options.switches_enabled(),
+            lazy_lists_requested: options.lazy_lists_enabled(),
+            switches_latched: false,
+            lazy_lists_latched: false,
         })
     }
 
@@ -707,6 +717,11 @@ impl<'a> Preprocessor<'a> {
             replacement: pieces,
             definition_span: directive_span,
         };
+        if definition.name == "USE_SWITCHES" {
+            self.switches_latched = true;
+        } else if definition.name == "USE_LAZY_LISTS" {
+            self.lazy_lists_latched = true;
+        }
         let existing_span = self
             .macros
             .get(&definition.name)
@@ -1128,13 +1143,13 @@ impl<'a> Preprocessor<'a> {
         builder.set_eof_anchor(anchor)?;
         let graph = self.materialize_include_graph(&mut builder)?;
         let map = Arc::new(builder.build()?);
-        Ok(PreparedSource::new(
-            self.unit,
-            text,
-            map,
-            diagnostics,
-            Arc::new(graph),
-        ))
+        let firestorm = self.dialect == PreprocessDialect::Firestorm;
+        let switches = firestorm && (self.switches_requested || self.switches_latched);
+        let lazy_lists = firestorm && (self.lazy_lists_requested || self.lazy_lists_latched);
+        Ok(
+            PreparedSource::new(self.unit, text, map, diagnostics, Arc::new(graph))
+                .with_extensions(switches, lazy_lists),
+        )
     }
 
     fn materialize_include_graph(
