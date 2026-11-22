@@ -29,18 +29,18 @@ pub(crate) struct JumpReport {
     pub(crate) invalid_functions: HashSet<(usize, usize)>,
 }
 
-#[derive(Clone, Copy)]
 struct LabelSite<'a> {
     name: &'a str,
     span: Span,
     scope: ScopeId,
+    recovery_scope_path: Vec<Span>,
 }
 
-#[derive(Clone, Copy)]
 struct JumpSite<'a> {
     name: &'a str,
     span: Span,
     scope: ScopeId,
+    recovery_scope_path: Vec<Span>,
 }
 
 struct BodyFacts<'a> {
@@ -131,9 +131,9 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
     for code_scope in collect_code_scopes(ast, scopes) {
         let facts = walk_body(code_scope.body, code_scope.scope, scopes);
         let before = report.diagnostics.len();
-        let mut labels: HashMap<&str, (Span, ScopeId)> = HashMap::new();
+        let mut labels: HashMap<&str, (Span, ScopeId, Vec<Span>)> = HashMap::new();
         for label in facts.labels {
-            if let Some((previous, _)) = labels.get(label.name) {
+            if let Some((previous, _, _)) = labels.get(label.name) {
                 report.diagnostics.push(semantic_error(
                     "SEM009",
                     format!(
@@ -143,11 +143,14 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
                     label.span,
                 ));
             } else {
-                labels.insert(label.name, (label.span, label.scope));
+                labels.insert(
+                    label.name,
+                    (label.span, label.scope, label.recovery_scope_path),
+                );
             }
         }
         for jump in facts.jumps {
-            let Some((_, target_scope)) = labels.get(jump.name) else {
+            let Some((_, target_scope, target_recovery_path)) = labels.get(jump.name) else {
                 report.diagnostics.push(semantic_error(
                     "SEM010",
                     format!(
@@ -158,7 +161,13 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
                 ));
                 continue;
             };
-            if !scopes.is_ancestor(*target_scope, jump.scope) {
+            if !label_scope_is_accessible(
+                *target_scope,
+                target_recovery_path,
+                jump.scope,
+                &jump.recovery_scope_path,
+                scopes,
+            ) {
                 report.diagnostics.push(semantic_error(
                     "SEM010",
                     format!(
@@ -218,6 +227,20 @@ pub(crate) fn check_missing_returns(
         }
     }
     diagnostics
+}
+
+fn label_scope_is_accessible(
+    target_scope: ScopeId,
+    target_recovery_path: &[Span],
+    jump_scope: ScopeId,
+    jump_recovery_path: &[Span],
+    scopes: &ScopeTree,
+) -> bool {
+    if target_recovery_path.is_empty() {
+        return scopes.is_ancestor(target_scope, jump_scope);
+    }
+
+    target_scope == jump_scope && jump_recovery_path.starts_with(target_recovery_path)
 }
 
 fn collect_code_scopes<'a>(ast: &'a Ast, scopes: &ScopeTree) -> Vec<CodeScope<'a>> {
@@ -291,21 +314,25 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
             }
             StatementKind::Return(return_statement) => {
                 facts.returns.push((return_statement, current));
-                for label in &return_statement.recovered_labels {
+                for recovered in &return_statement.recovered_labels {
+                    let label = &recovered.label;
                     if !label.name.is_empty() {
                         facts.labels.push(LabelSite {
                             name: &label.name,
                             span: label.name_span,
                             scope: current,
+                            recovery_scope_path: recovered.scope_path.clone(),
                         });
                     }
                 }
-                for jump in &return_statement.recovered_jumps {
+                for recovered in &return_statement.recovered_jumps {
+                    let jump = &recovered.jump;
                     if !jump.label.is_empty() {
                         facts.jumps.push(JumpSite {
                             name: &jump.label,
                             span: jump.label_span,
                             scope: current,
+                            recovery_scope_path: recovered.scope_path.clone(),
                         });
                     }
                 }
@@ -316,6 +343,7 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
                         name: &jump.label,
                         span: jump.label_span,
                         scope: current,
+                        recovery_scope_path: Vec::new(),
                     });
                 }
             }
@@ -325,6 +353,7 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
                         name: &label.name,
                         span: label.name_span,
                         scope: current,
+                        recovery_scope_path: Vec::new(),
                     });
                 }
             }
