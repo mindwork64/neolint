@@ -1,15 +1,16 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5, 6A, 6B, 6C and 6D implemented on the experimental branch**;
+Status: **Phases 1–5 and 6A–6E implemented on the experimental branch**;
 this document remains the normative contract for the remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
 implemented; the Phase 6A structural semantics foundation, Phase 6B
-expression-typing/call-signature rules, Phase 6C return/control-flow rules and
-Phase 6D expression/assignment validation are implemented, while the remaining
-AST semantics and engine migration remain future work.
+expression-typing/call-signature rules, Phase 6C return/control-flow rules,
+Phase 6D expression/assignment validation and Phase 6E symbol/deprecation
+warnings are implemented, while SEM022/SEM023 and engine migration remain future
+work.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -2886,7 +2887,7 @@ access/assignment/casts/indices/spans/malformed recovery and deep nesting.
 `tests/ast_bridge.rs` resolves every new node span through identity, macro and
 include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
-### Phase 6 — AST semantic analyzer and migration (Phase 6A/6B/6C/6D implemented)
+### Phase 6 — AST semantic analyzer and migration (Phase 6A–6E implemented)
 
 #### Phase 6A implementation record
 
@@ -3060,8 +3061,46 @@ control-flow/switch/unknown-event initializers, plain/compound assignments,
 grouped component lvalues, component read/write suppression, unknown bases and
 cross-rule multiplicity. No intentional diagnostic deltas exist in this slice.
 
-**Boundary.** SEM012, SEM013, SEM022 and SEM023 remain Legacy-only. No new SEM
-codes, severity changes, CLI/pipeline selection or Legacy behavior changes.
+**Boundary at the end of 6D.** SEM012, SEM013, SEM022 and SEM023 remained
+Legacy-only. No new SEM codes, severity changes, CLI/pipeline selection or Legacy
+behavior changes.
+
+#### Phase 6E implementation record
+
+**Status:** implemented independently in `src/ast_semantic/rules/`; still not
+connected to `AnalysisRun`, CLI, pipeline, preprocessor or SourceMap. Legacy
+remains the only user-visible semantic engine.
+
+**SEM012.** Source-ordered expression facts and `ScopeTree::lookup_value_at`
+resolve visible variables/parameters; canonical constants are known; direct call
+callees are excluded. Unknown-call argument ranges suppress only with a real
+matched `)`, including nested expressions and nested unknown calls. Unknown
+extension event bodies suppress only when state/event bodies are structurally
+closed. Malformed/unmatched calls therefore retain eligible identifiers.
+
+**SEM013.** Actual call sites are checked against the existing canonical
+`definitions().deprecated_functions` metadata. User functions shadow/reuse of a
+deprecated name suppress the warning; declarations are not calls. A real matched
+`)` is required, but syntax errors inside matched arguments are not suppression
+and `arguments_complete` is irrelevant. SEM013 is independent of SEM012's
+unknown-call/event boundaries. Candidates are source-sorted by callee span.
+
+**AST metadata.** `CallExpression::matched_close` distinguishes real closing
+parentheses from malformed-call recovery. Malformed unmatched calls retain
+eligible identifier expressions so SEM012 sees them while no suppression range
+is created; malformed event parameter identifiers are retained as recovered
+references without becoming declared parameters. The metadata is additive and
+parser diagnostics are unchanged.
+
+**Parity.** The differential harness compares full normalized records for all 21
+migrated codes SEM001–SEM021 over every corpus fixture. Focused exact tests cover
+warning severity/kind/spans, canonical deprecated metadata (without hardcoding
+the list), unknown-call/event suppression, malformed unmatched calls, nested
+calls, source-order/multiplicity and cross-rule independence. No intentional
+diagnostic deltas exist in this slice.
+
+**Boundary.** SEM022 and SEM023 remain Legacy-only. No new SEM codes, severity
+changes, CLI/pipeline selection or Legacy behavior changes.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
