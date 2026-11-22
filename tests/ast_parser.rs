@@ -168,6 +168,8 @@ fn focused_malformed_examples_keep_parity() {
         "default { state_entry() { llOwnerSay(, \"x\"); } }",
         "default { state_entry() { llOwnerSay(\"x\" \"y\"); } }",
         "integer f(integer x) { return x; } default { state_entry() { f(1,); f(, 1); } }",
+        "integer f(string) { return 1; } default { state_entry() { f(1); } }",
+        "default { state_entry() { llOwnerSay(1; llGetListLength(1)); } }",
         "default { state_entry(bad, integer value) { integer value; } state_entry() { } }",
         "default {\n    state_entry(integer) {\n",
         "integer phantom()\ndefault { }\nstate phantom { }",

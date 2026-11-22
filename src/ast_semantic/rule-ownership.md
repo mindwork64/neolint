@@ -86,7 +86,15 @@ the Legacy token analyzer and do not run in the AST engine yet.
   for this bounded range.
 - Malformed argument lists recover to the bounded closing parenthesis and store
   `declared_argument_count` plus `arguments_complete`; arity still matches
-  Legacy even when expression recovery failed.
+  Legacy even when expression recovery failed. Recovery stops at a top-level
+  semicolon so a following call is not swallowed.
+- Event nodes retain declared parameter type kinds independently of optional
+  parameter names; SEM003 uses that list when arity matches.
+- Malformed top-level function headers with `)` + body contribute a recoverable
+  signature through `Ast::recovered_functions`, without changing parser
+  diagnostics; first-definition selection stays source ordered.
+- Switch case expressions are traversed in the switch body scope, so locals from
+  earlier arms resolve exactly as Legacy ScopeModel sees them.
 - Legacy SEM001's top-level-call quirk in global initializers is modeled too:
   identifiers followed by `(` at top level participate in the duplicate scan.
 - Firestorm switch/lazy AST forms are traversed without panics and without

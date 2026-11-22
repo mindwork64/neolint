@@ -2952,9 +2952,14 @@ Legacy multiplicity.
 **Recovery/suppression.** `CallExpression` stores opening/closing parenthesis
 spans and `declared_argument_count`/`arguments_complete` so syntax diagnostics
 inside an argument list suppress SEM002–SEM006 like Legacy and malformed arity is
-still counted. `EventHandler` stores `declared_parameter_count`, preserving
-malformed parameter positions for SEM003. Unknown extension events remain
-unchecked.
+still counted; recovery stops at a top-level semicolon. `EventHandler` stores
+`declared_parameter_count` and declared parameter type kinds, preserving
+malformed/nameless parameter positions for SEM003. Malformed top-level function
+headers with `)` plus a body contribute a recoverable signature through
+`Ast::recovered_functions` without changing parser diagnostics, so user-call
+checks retain the Legacy first definition. Unknown extension events remain
+unchecked. Switch case expressions use the switch body scope, matching Legacy
+local visibility from earlier arms.
 SEM001 also mirrors Legacy's top-level-call-in-global-initializer quirk.
 
 **Parity.** `tests/ast_semantic_parity.rs` compares full normalized multisets for

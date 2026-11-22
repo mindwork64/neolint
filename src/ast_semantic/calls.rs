@@ -113,7 +113,7 @@ fn walk_block<'a>(
                 let switch_scope = scopes.scope_for_switch(switch).unwrap_or(current_scope);
                 for arm in &switch.arms {
                     if let crate::ast::SwitchLabel::Case(expression) = &arm.label {
-                        collect_in_expression(expression, current_scope, calls);
+                        collect_in_expression(expression, switch_scope, calls);
                     }
                     for statement in arm.statements.iter().rev() {
                         work.push((statement, switch_scope));

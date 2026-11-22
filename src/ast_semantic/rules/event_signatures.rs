@@ -36,12 +36,12 @@ pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
                 continue;
             }
             for (parameter_index, (actual, expected)) in event
-                .parameters
+                .declared_parameter_types
                 .iter()
                 .zip(signature.parameters.iter())
                 .enumerate()
             {
-                let actual_type = type_name(actual.ty.kind);
+                let actual_type = type_name(*actual);
                 if actual_type != expected.type_name {
                     diagnostics.push(semantic_error(
                         "SEM003",

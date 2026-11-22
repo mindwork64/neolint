@@ -22,7 +22,7 @@ pub(crate) struct UserFunctionSignature {
 pub(crate) fn collect_user_functions(
     ast: &crate::ast::Ast,
 ) -> HashMap<String, UserFunctionSignature> {
-    let mut functions = HashMap::new();
+    let mut candidates = Vec::new();
     for item in &ast.items {
         let TopLevel::Function(function) = item else {
             continue;
@@ -33,9 +33,10 @@ pub(crate) fn collect_user_functions(
         let return_type = function
             .return_type
             .map_or_else(|| "void".to_owned(), |ty| type_name(ty.kind).to_owned());
-        functions
-            .entry(function.name.clone())
-            .or_insert(UserFunctionSignature {
+        candidates.push((
+            function.name_span.start,
+            function.name.clone(),
+            UserFunctionSignature {
                 return_type,
                 parameters: function
                     .parameters
@@ -43,7 +44,24 @@ pub(crate) fn collect_user_functions(
                     .map(|parameter| type_name(parameter.ty.kind).to_owned())
                     .collect(),
                 declaration_span: function.name_span,
-            });
+            },
+        ));
+    }
+    for function in &ast.recovered_functions {
+        candidates.push((
+            function.name_span.start,
+            function.name.clone(),
+            UserFunctionSignature {
+                return_type: function.return_type.clone(),
+                parameters: function.parameter_types.clone(),
+                declaration_span: function.name_span,
+            },
+        ));
+    }
+    candidates.sort_by_key(|(offset, _, _)| *offset);
+    let mut functions = HashMap::new();
+    for (_, name, signature) in candidates {
+        functions.entry(name).or_insert(signature);
     }
     functions
 }

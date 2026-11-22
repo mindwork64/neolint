@@ -40,6 +40,7 @@ struct Parser<'a> {
     options: AstParseOptions,
     switch_depth: usize,
     suppress_diagnostics: usize,
+    recovered_functions: Vec<RecoveredFunction>,
 }
 
 impl<'a> Parser<'a> {
@@ -57,6 +58,7 @@ impl<'a> Parser<'a> {
             options,
             switch_depth: 0,
             suppress_diagnostics: 0,
+            recovered_functions: Vec::new(),
         }
     }
 
@@ -104,7 +106,14 @@ impl<'a> Parser<'a> {
         } else {
             self.span_from(0, end)
         };
-        (Ast { items, span }, self.diagnostics)
+        (
+            Ast {
+                items,
+                recovered_functions: self.recovered_functions,
+                span,
+            },
+            self.diagnostics,
+        )
     }
 
     fn last_non_eof_end(&self) -> usize {
@@ -134,8 +143,25 @@ impl<'a> Parser<'a> {
         let name_span = self.tokens[name_index].span;
 
         if self.matches(TokenKind::LParen) {
+            let parameter_open = self.current - 1;
             let (parameters, header_ok) = self.parse_parameters();
             if !header_ok {
+                if let Some(close) = self.event_parameter_close_before_body() {
+                    let parameter_types = self
+                        .parameter_type_kinds_between(parameter_open, close)
+                        .into_iter()
+                        .map(type_kind_name)
+                        .map(str::to_owned)
+                        .collect();
+                    self.recovered_functions.push(RecoveredFunction {
+                        name: name.clone(),
+                        name_span,
+                        return_type: return_type
+                            .map(|ty| type_kind_name(ty.kind).to_owned())
+                            .unwrap_or_else(|| "void".to_owned()),
+                        parameter_types,
+                    });
+                }
                 self.synchronize_top_level();
                 return Some(TopLevel::Error(ErrorNode {
                     span: self.span_from(start, self.current),
@@ -342,6 +368,10 @@ impl<'a> Parser<'a> {
                                 name: self.tokens[event_name_index].lexeme.clone(),
                                 name_span: self.tokens[event_name_index].span,
                                 declared_parameter_count: parameters.len(),
+                                declared_parameter_types: parameters
+                                    .iter()
+                                    .map(|parameter| parameter.ty.kind)
+                                    .collect(),
                                 parameters,
                                 body,
                             });
@@ -364,6 +394,8 @@ impl<'a> Parser<'a> {
                                     parameters,
                                     declared_parameter_count: self
                                         .count_declared_parameters(parameter_open, close),
+                                    declared_parameter_types: self
+                                        .parameter_type_kinds_between(parameter_open, close),
                                     body: Some(body),
                                 });
                             } else {
@@ -1539,7 +1571,7 @@ impl<'a> Parser<'a> {
                     }
                     brace_depth -= 1;
                 }
-                TokenKind::Semicolon if bracket_depth == 0 && brace_depth == 0 && depth == 0 => {
+                TokenKind::Semicolon if bracket_depth == 0 && brace_depth == 0 && depth == 1 => {
                     return None;
                 }
                 _ => {}
@@ -1957,6 +1989,24 @@ impl<'a> Parser<'a> {
         parameters
     }
 
+    fn parameter_type_kinds_between(&self, open: usize, close: usize) -> Vec<TypeKind> {
+        let mut types = Vec::new();
+        let mut expect_type = true;
+        for token in self.tokens.iter().take(close).skip(open + 1) {
+            if token.kind == TokenKind::Comma {
+                expect_type = true;
+                continue;
+            }
+            if expect_type {
+                if let Some(kind) = type_kind(token.kind) {
+                    types.push(kind);
+                    expect_type = false;
+                }
+            }
+        }
+        types
+    }
+
     fn count_declared_parameters(&self, open: usize, close: usize) -> usize {
         if close == open + 1 {
             return 0;
@@ -2242,6 +2292,18 @@ fn is_type_token(kind: TokenKind) -> bool {
     )
 }
 
+fn type_kind_name(kind: TypeKind) -> &'static str {
+    match kind {
+        TypeKind::Integer => "integer",
+        TypeKind::Float => "float",
+        TypeKind::String => "string",
+        TypeKind::Key => "key",
+        TypeKind::List => "list",
+        TypeKind::Vector => "vector",
+        TypeKind::Rotation => "rotation",
+    }
+}
+
 fn type_kind(kind: TokenKind) -> Option<TypeKind> {
     match kind {
         TokenKind::KwInteger => Some(TypeKind::Integer),
@@ -2480,6 +2542,7 @@ fn worker_failure_result(tokens: &[Token], reason: &str) -> (Ast, Vec<Diagnostic
     (
         Ast {
             items: Vec::new(),
+            recovered_functions: Vec::new(),
             span,
         },
         vec![Diagnostic {

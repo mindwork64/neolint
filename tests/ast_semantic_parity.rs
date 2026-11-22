@@ -871,7 +871,9 @@ fn focused_malformed_call_parity() {
         "integer f(integer x) { return x; } default { state_entry() { f(1,); f(, 1); } }",
         "default { state_entry() { llOwnerSay(); } }",
         "default { state_entry() { llOwnerSay(1 + ); } }",
+        "default { state_entry() { llOwnerSay(1; llGetListLength(1)); } }",
         "default { state_entry(integer,) { } }",
+        "default { touch_start(string) { } }",
         "default { touch_start(integer x,) { } }",
         "default {\n    state_entry(integer) {\n",
     ] {
@@ -919,6 +921,72 @@ fn malformed_call_recovery_keeps_declared_argument_count() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "SEM002"
             && diagnostic.message == "llOwnerSay expects 1 argument(s), but received 2"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn switch_case_expressions_use_switch_scope() {
+    use neolint::ast::{parse_ast_with_options, AstParseOptions};
+    let source = "integer takes(integer value) { return value; } default { state_entry() { switch (1) { case 0: string text = \"x\"; case takes(text): ; } } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let legacy_syntax = parse_legacy(&tokens);
+    let legacy = neolint::semantic::analyze_with_syntax_diagnostics(&tokens, &legacy_syntax);
+    let (ast, syntax) =
+        parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+    let ast_semantic = analyze_ast(&ast, &syntax);
+    assert_eq!(normalize(&legacy), normalize(&ast_semantic));
+    assert!(ast_semantic.iter().any(|diagnostic| {
+        diagnostic.code == "SEM006"
+            && diagnostic.message == "takes argument 1 has type string, expected integer"
+    }));
+}
+
+#[test]
+fn recovered_event_without_parameter_name_keeps_declared_type() {
+    let source = "default { touch_start(string) { } }";
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM003")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "event touch_start parameter 1 has type string, expected integer"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn malformed_function_header_keeps_user_signature() {
+    let source = "integer f(string) { return 1; } default { state_entry() { f(1); } }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM006"
+            && diagnostic.message == "f argument 1 has type integer, expected string"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn recovered_first_definition_still_wins() {
+    let source = "integer f(string) { return 1; } integer f(integer x) { return x; } default { state_entry() { f(\"x\"); f(1); } }";
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM006")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM006"
+            && diagnostic.message == "f argument 1 has type integer, expected string"
     }));
     assert_parity(source);
 }

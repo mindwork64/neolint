@@ -10,9 +10,34 @@ use super::semantic_error;
 pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut globals: HashMap<&str, Span> = HashMap::new();
+    enum Declaration<'a> {
+        Item(&'a TopLevel),
+        Recovered(&'a crate::ast::RecoveredFunction),
+    }
+    let mut declarations = Vec::new();
     for item in &ast.items {
-        match item {
-            TopLevel::Global(global) => {
+        let offset = match item {
+            TopLevel::Global(global) => global.span.start,
+            TopLevel::Function(function) => function.name_span.start,
+            TopLevel::State(state) => state.span.start,
+            TopLevel::Error(error) => error.span.start,
+        };
+        declarations.push((offset, Declaration::Item(item)));
+    }
+    for function in &ast.recovered_functions {
+        declarations.push((function.name_span.start, Declaration::Recovered(function)));
+    }
+    declarations.sort_by_key(|(offset, _)| *offset);
+
+    for (_, declaration) in declarations {
+        match declaration {
+            Declaration::Recovered(function) => add(
+                &function.name,
+                function.name_span,
+                &mut globals,
+                &mut diagnostics,
+            ),
+            Declaration::Item(TopLevel::Global(global)) => {
                 // Legacy SEM001 registers only the first declarator of a global
                 // declaration; later declarators are visible to ScopeModel but
                 // are not part of the SEM001 duplicate scan.
@@ -40,7 +65,7 @@ pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
                     add(name, span, &mut globals, &mut diagnostics);
                 }
             }
-            TopLevel::Function(function) => {
+            Declaration::Item(TopLevel::Function(function)) => {
                 if !function.name.is_empty() {
                     add(
                         &function.name,
@@ -50,7 +75,7 @@ pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
                     );
                 }
             }
-            TopLevel::State(_) | TopLevel::Error(_) => {}
+            Declaration::Item(TopLevel::State(_) | TopLevel::Error(_)) => {}
         }
     }
     diagnostics
