@@ -1092,6 +1092,8 @@ fn focused_flow_rule_parity() {
         "integer f() { return ,; } default { }",
         "integer f() { for (; ,; ) { } } default { }",
         "integer f() { for (; 1 + ; ) { } } default { }",
+        "do_work() { return @done; jump done; } default { }",
+        "do_work() { return jump missing; jump missing; } default { }",
     ] {
         assert_parity(source);
     }
@@ -1419,4 +1421,46 @@ fn malformed_for_condition_is_unknown_not_missing() {
     };
     assert!(!for_statement.condition_missing);
     assert!(for_statement.condition_malformed);
+}
+
+#[test]
+fn malformed_return_preserves_recovered_label_visibility() {
+    let source = "do_work() { return @done; jump done; } default { }";
+    let at = source.find('@').unwrap();
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code, "SEM008" | "SEM009" | "SEM010"))
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec!["SEM008"],
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "SEM008" && diagnostic.span.start == at }));
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::Return(return_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected recovered return");
+    };
+    assert_eq!(return_statement.recovered_labels.len(), 1);
+    assert_eq!(return_statement.recovered_labels[0].name, "done");
+    assert!(return_statement.recovered_jumps.is_empty());
 }

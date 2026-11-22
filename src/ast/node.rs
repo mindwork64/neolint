@@ -271,6 +271,10 @@ pub struct ReturnStatement {
     pub keyword_span: Span,
     /// Optional returned expression.
     pub value: Option<Expression>,
+    /// Labels recovered from a malformed non-empty return expression.
+    pub recovered_labels: Vec<LabelStatement>,
+    /// Jumps recovered from a malformed non-empty return expression.
+    pub recovered_jumps: Vec<JumpStatement>,
 }
 
 /// `jump label;` statement.

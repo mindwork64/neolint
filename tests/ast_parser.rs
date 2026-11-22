@@ -172,6 +172,8 @@ fn focused_malformed_examples_keep_parity() {
         "default { state_entry() { llOwnerSay(1; llGetListLength(1)); } }",
         "do_work() { return ,; } default { }",
         "integer f() { for (; ,; ) { } } default { }",
+        "do_work() { return @done; jump done; } default { }",
+        "do_work() { return jump missing; jump missing; } default { }",
         "default { state_entry(bad, integer value) { integer value; } state_entry() { } }",
         "default {\n    state_entry(integer) {\n",
         "integer phantom()\ndefault { }\nstate phantom { }",

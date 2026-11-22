@@ -291,6 +291,24 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
             }
             StatementKind::Return(return_statement) => {
                 facts.returns.push((return_statement, current));
+                for label in &return_statement.recovered_labels {
+                    if !label.name.is_empty() {
+                        facts.labels.push(LabelSite {
+                            name: &label.name,
+                            span: label.name_span,
+                            scope: current,
+                        });
+                    }
+                }
+                for jump in &return_statement.recovered_jumps {
+                    if !jump.label.is_empty() {
+                        facts.jumps.push(JumpSite {
+                            name: &jump.label,
+                            span: jump.label_span,
+                            scope: current,
+                        });
+                    }
+                }
             }
             StatementKind::Jump(jump) => {
                 if !jump.label.is_empty() {

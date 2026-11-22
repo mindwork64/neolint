@@ -517,6 +517,8 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::KwReturn) {
             let keyword_span = self.token_span(start);
             let mut semicolon_consumed = false;
+            let mut recovered_labels = Vec::new();
+            let mut recovered_jumps = Vec::new();
             let value = if !self.check(TokenKind::Semicolon) {
                 let value_start = self.current;
                 let expression = self.parse_expression(1);
@@ -528,6 +530,9 @@ impl<'a> Parser<'a> {
                         return Some(self.error_statement(start));
                     }
                     semicolon_consumed = true;
+                    let semicolon = self.current - 1;
+                    (recovered_labels, recovered_jumps) =
+                        self.recover_return_flow_nodes(value_start, semicolon);
                     let first_span = self.tokens[value_start].span;
                     Some(Expression {
                         span: first_span,
@@ -551,6 +556,8 @@ impl<'a> Parser<'a> {
                     span: self.span_from(start, self.current),
                     keyword_span,
                     value,
+                    recovered_labels,
+                    recovered_jumps,
                 }),
             ));
         }
@@ -2242,6 +2249,45 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    fn recover_return_flow_nodes(
+        &self,
+        start: usize,
+        semicolon: usize,
+    ) -> (Vec<LabelStatement>, Vec<JumpStatement>) {
+        let mut labels = Vec::new();
+        let mut jumps = Vec::new();
+        let mut index = start;
+        while index <= semicolon {
+            match self.tokens[index].kind {
+                TokenKind::At
+                    if index + 2 <= semicolon
+                        && self.tokens[index + 1].kind == TokenKind::Identifier
+                        && self.tokens[index + 2].kind == TokenKind::Semicolon =>
+                {
+                    labels.push(LabelStatement {
+                        span: join_spans(self.tokens[index].span, self.tokens[index + 2].span),
+                        name: self.token_text(index + 1),
+                        name_span: self.token_span(index + 1),
+                    });
+                    index += 3;
+                }
+                TokenKind::KwJump
+                    if index < semicolon
+                        && self.tokens[index + 1].kind == TokenKind::Identifier =>
+                {
+                    jumps.push(JumpStatement {
+                        span: join_spans(self.tokens[index].span, self.tokens[index + 1].span),
+                        label: self.token_text(index + 1),
+                        label_span: self.token_span(index + 1),
+                    });
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+        }
+        (labels, jumps)
     }
 
     fn synchronize_statement(&mut self) {

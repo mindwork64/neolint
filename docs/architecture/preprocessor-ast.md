@@ -2994,8 +2994,9 @@ first-definition user signatures. Untyped functions reject values, typed
 functions reject missing values, and known incompatible types use the existing
 implicit-conversion matrix. `ReturnStatement::keyword_span` preserves the exact
 Legacy no-value primary span. A malformed non-empty return expression retains a
-recovered `ReturnStatement` with an Error expression at its first token. Events
-are not checked.
+recovered `ReturnStatement` with an Error expression at its first token; labels
+and jumps inside that range are retained as recovered AST metadata for
+SEM009/SEM010. Events are not checked.
 
 **SEM009/SEM010.** Labels are collected before jumps, so forward references are
 valid. Duplicates keep the first declaration for lookup; jumps resolve against

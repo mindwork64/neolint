@@ -113,6 +113,8 @@ AST engine yet.
   `ReturnStatement::keyword_span` supplies the exact no-value primary span.
   A malformed non-empty return expression retains a recovered `ReturnStatement`
   with an Error expression at its first token, matching Legacy token scans.
+  Labels and jumps inside that recovered range are retained as AST metadata for
+  SEM009/SEM010 visibility without rescanning tokens in `flow.rs`.
 - SEM009/SEM010 collect labels before resolving jumps, preserving forward jumps,
   first-declaration lookup and nested-block accessibility.
 - SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
