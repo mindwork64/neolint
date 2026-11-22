@@ -2,6 +2,7 @@
 
 use crate::diagnostic::Span;
 
+use super::ext::{BreakStatement, LazyIndexExpression, SwitchStatement};
 use super::types::{AssignmentOperator, BinaryOperator, IncrementOperator, Type, UnaryOperator};
 
 /// Root of one parsed LSL file.
@@ -163,6 +164,10 @@ pub enum StatementKind {
     Label(LabelStatement),
     /// Expression statement.
     Expression(ExpressionStatement),
+    /// Firestorm `switch`.
+    Switch(SwitchStatement),
+    /// Firestorm contextual `break;`.
+    Break(BreakStatement),
     /// Recovered malformed statement.
     Error(ErrorNode),
 }
@@ -321,6 +326,8 @@ pub enum ExpressionKind {
     Cast(CastExpression),
     /// Prefix or postfix increment/decrement.
     Increment(IncrementExpression),
+    /// Firestorm lazy-list index expression.
+    LazyIndex(LazyIndexExpression),
     /// Recovered malformed expression.
     Error(ErrorNode),
 }
