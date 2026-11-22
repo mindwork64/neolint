@@ -2820,7 +2820,7 @@ boundaries 255/256/257, extreme expression nesting, and deeply nested blocks.
 
 **Status:** implemented in `src/ast/ext.rs`, `src/ast/parser.rs`,
 `src/preprocessor/config.rs`, `src/preprocessor/directive.rs`, and
-`PreprocessedSource`. `main` and the CLI remain on the Legacy engine.
+`PreparedSource`. `main` and the CLI remain on the Legacy engine.
 
 **Independent gates.** `PreprocessSettings` carries `switches_enabled` and
 `lazy_lists_enabled`, both false by default, with independent builders. The
