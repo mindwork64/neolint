@@ -28,15 +28,30 @@ pub(crate) fn check(ast: &Ast, scopes: &ScopeTree) -> Vec<Diagnostic> {
         }
     }
     // Legacy collect_user_functions only treats a declaration as a user
-    // function when its parameter list is followed by a body.
+    // function when its parameter list is followed by a body. Sort normal and
+    // recoverable declarations by source position so the first definition wins.
+    let mut function_candidates = Vec::new();
     for item in &ast.items {
         if let TopLevel::Function(function) = item {
             if function.body.is_some() && !function.name.is_empty() {
-                functions
-                    .entry(function.name.as_str())
-                    .or_insert(function.name_span);
+                function_candidates.push((
+                    function.name_span.start,
+                    function.name.as_str(),
+                    function.name_span,
+                ));
             }
         }
+    }
+    for function in &ast.recovered_functions {
+        function_candidates.push((
+            function.name_span.start,
+            function.name.as_str(),
+            function.name_span,
+        ));
+    }
+    function_candidates.sort_by_key(|(offset, _, _)| *offset);
+    for (_, name, span) in function_candidates {
+        functions.entry(name).or_insert(span);
     }
 
     let mut seen_states: HashMap<&str, Span> = HashMap::new();

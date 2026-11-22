@@ -1,17 +1,17 @@
 # SEM rule ownership matrix
 
-Phase 6 is incremental. Phase 6A migrates only the four structural rules below;
-all other rules remain owned by the Legacy token analyzer and do not run in the
-AST engine yet.
+Phase 6 is incremental. Phase 6A migrated the structural rules and Phase 6B
+migrated the call/event signature rules below; the remaining rules stay owned by
+the Legacy token analyzer and do not run in the AST engine yet.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
 | SEM001 | `semantic::analyze_with_syntax_diagnostics` top-level scan | `ast_semantic::rules::duplicate_globals` | migrated in 6A | exact | none | `tests/ast_semantic_parity.rs::sem001_exact_messages_and_spans`, full corpus |
-| SEM002 | `analyze_builtin_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM003 | `analyze_event_signatures` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM004 | `analyze_builtin_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM005 | `analyze_user_function_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM006 | `analyze_user_function_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
+| SEM002 | `analyze_builtin_calls` | `ast_semantic::rules::builtin_calls` | migrated in 6B | exact | none | `sem002_and_sem004_exact_messages_and_spans`, full corpus |
+| SEM003 | `analyze_event_signatures` | `ast_semantic::rules::event_signatures` | migrated in 6B | exact | none | `sem003_exact_arity_and_type_messages_and_spans`, full corpus |
+| SEM004 | `analyze_builtin_calls` | `ast_semantic::rules::builtin_calls` | migrated in 6B | exact | none | `sem002_and_sem004_exact_messages_and_spans`, full corpus |
+| SEM005 | `analyze_user_function_calls` | `ast_semantic::rules::user_calls` | migrated in 6B | exact | none | `sem005_and_sem006_exact_messages_and_spans`, full corpus |
+| SEM006 | `analyze_user_function_calls` | `ast_semantic::rules::user_calls` | migrated in 6B | exact | none | `sem005_and_sem006_exact_messages_and_spans`, full corpus |
 | SEM007 | `semantic::ScopeModel::add_variable` | `ast_semantic::rules::duplicate_locals` | migrated in 6A | exact | none | `sem007_exact_messages_spans_and_shadowing`, full corpus |
 | SEM008 | `analyze_function_returns` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
 | SEM009 | `analyze_jump_labels` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
@@ -60,3 +60,43 @@ AST engine yet.
   Legacy `register_parameters`. Syntax findings inside the skipped body are
   suppressed, and suppressed EOF errors do not set the parser's EOF latch, so
   Legacy parser diagnostic parity remains unchanged.
+
+## Phase 6B expression typer and call signatures
+
+- `src/ast_semantic/types.rs` infers a type only when the typed AST proves it:
+  literals, list/vector/rotation literals, visible identifiers, constants,
+  casts, components, unary/binary operators, and known built-in/user calls.
+  Unknown expressions return `None`; no default type is guessed.
+- Identifier lookup uses `ScopeTree::lookup_value_at` and filters bindings whose
+  declaration span is after the use, preserving Legacy source-order visibility
+  and nested shadowing. Function declarations are not values.
+- User signatures come from the first AST function declaration with a body;
+  built-in signatures and constants come from the existing vendored
+  `builtins::definitions()` metadata. No second catalogue exists.
+- `src/ast_semantic/calls.rs` visits every call exactly once across globals,
+  declarations, control flow, switch conditions/case labels/arms, lazy indices,
+  calls, lists and vector/rotation literals.
+- SEM002/SEM004 and SEM005/SEM006 independently check the same call name, so a
+  user function shadowing a built-in keeps Legacy multiplicity.
+- SEM003 uses AST `declared_parameter_count`, including malformed parameter
+  positions, plus recovered parameter types; unknown extension events are
+  ignored.
+- A syntax diagnostic inside a call's parentheses suppresses call arity/type
+  findings, matching Legacy. The AST stores the opening/closing parenthesis spans
+  for this bounded range.
+- Malformed argument lists recover to the bounded closing parenthesis and store
+  `declared_argument_count` plus `arguments_complete`; arity still matches
+  Legacy even when expression recovery failed. Recovery stops at a top-level
+  semicolon so a following call is not swallowed.
+- Event nodes retain declared parameter type kinds independently of optional
+  parameter names; SEM003 uses that list when arity matches.
+- Malformed top-level function headers with `)` + body contribute a recoverable
+  signature through `Ast::recovered_functions`, without changing parser
+  diagnostics; first-definition selection stays source ordered and recovered
+  names participate in SEM021 namespace precedence before built-ins.
+- Switch case expressions are traversed in the switch body scope, so locals from
+  earlier arms resolve exactly as Legacy ScopeModel sees them.
+- Legacy SEM001's top-level-call quirk in global initializers is modeled too:
+  identifiers followed by `(` at top level participate in the duplicate scan.
+- Firestorm switch/lazy AST forms are traversed without panics and without
+  inventing types; the Legacy analyzer remains the reference oracle.

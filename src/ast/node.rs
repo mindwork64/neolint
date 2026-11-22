@@ -3,15 +3,32 @@
 use crate::diagnostic::Span;
 
 use super::ext::{BreakStatement, LazyIndexExpression, SwitchStatement};
-use super::types::{AssignmentOperator, BinaryOperator, IncrementOperator, Type, UnaryOperator};
+use super::types::{
+    AssignmentOperator, BinaryOperator, IncrementOperator, Type, TypeKind, UnaryOperator,
+};
 
 /// Root of one parsed LSL file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ast {
     /// Top-level declarations and states in source order.
     pub items: Vec<TopLevel>,
+    /// Recoverable user-function signatures whose parameter list was malformed.
+    pub recovered_functions: Vec<RecoveredFunction>,
     /// Range from the first through the last non-EOF token.
     pub span: Span,
+}
+
+/// User-function signature recovered from a malformed but body-complete header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredFunction {
+    /// Function name.
+    pub name: String,
+    /// Function name span.
+    pub name_span: Span,
+    /// Return type name, or `void` for an untyped function.
+    pub return_type: String,
+    /// Declared parameter type names in source order.
+    pub parameter_types: Vec<String>,
 }
 
 /// A top-level declaration.
@@ -117,6 +134,10 @@ pub struct EventHandler {
     pub name_span: Span,
     /// Event parameters.
     pub parameters: Vec<Parameter>,
+    /// Number of declared parameter positions, including malformed ones.
+    pub declared_parameter_count: usize,
+    /// Declared type kinds in Legacy parameter-types order.
+    pub declared_parameter_types: Vec<TypeKind>,
     /// Handler body; `None` when the opening block delimiter is missing.
     pub body: Option<Block>,
 }
@@ -406,7 +427,15 @@ pub struct CallExpression {
     pub span: Span,
     /// Callee expression (an identifier for valid LSL).
     pub callee: Box<Expression>,
-    /// Arguments.
+    /// Opening parenthesis span.
+    pub open_paren_span: Span,
+    /// Closing parenthesis span.
+    pub close_paren_span: Span,
+    /// Number of declared argument positions, including malformed ones.
+    pub declared_argument_count: usize,
+    /// Whether all argument expressions were parsed without recovery.
+    pub arguments_complete: bool,
+    /// Arguments successfully parsed before any recovery.
     pub arguments: Vec<Expression>,
 }
 

@@ -20,6 +20,13 @@ pub const AST_RECURSION_LIMIT: &str = "AST001";
 /// Stable safe-failure diagnostic code when the parser worker cannot run.
 pub const AST_WORKER_UNAVAILABLE: &str = "AST002";
 
+struct ParsedArguments {
+    arguments: Vec<Expression>,
+    complete: bool,
+    close_span: Span,
+    declared_count: usize,
+}
+
 struct Parser<'a> {
     tokens: &'a [Token],
     current: usize,
@@ -33,6 +40,7 @@ struct Parser<'a> {
     options: AstParseOptions,
     switch_depth: usize,
     suppress_diagnostics: usize,
+    recovered_functions: Vec<RecoveredFunction>,
 }
 
 impl<'a> Parser<'a> {
@@ -50,6 +58,7 @@ impl<'a> Parser<'a> {
             options,
             switch_depth: 0,
             suppress_diagnostics: 0,
+            recovered_functions: Vec::new(),
         }
     }
 
@@ -97,7 +106,14 @@ impl<'a> Parser<'a> {
         } else {
             self.span_from(0, end)
         };
-        (Ast { items, span }, self.diagnostics)
+        (
+            Ast {
+                items,
+                recovered_functions: self.recovered_functions,
+                span,
+            },
+            self.diagnostics,
+        )
     }
 
     fn last_non_eof_end(&self) -> usize {
@@ -127,8 +143,25 @@ impl<'a> Parser<'a> {
         let name_span = self.tokens[name_index].span;
 
         if self.matches(TokenKind::LParen) {
+            let parameter_open = self.current - 1;
             let (parameters, header_ok) = self.parse_parameters();
             if !header_ok {
+                if let Some(close) = self.event_parameter_close_before_body() {
+                    let parameter_types = self
+                        .parameter_type_kinds_between(parameter_open, close)
+                        .into_iter()
+                        .map(type_kind_name)
+                        .map(str::to_owned)
+                        .collect();
+                    self.recovered_functions.push(RecoveredFunction {
+                        name: name.clone(),
+                        name_span,
+                        return_type: return_type
+                            .map(|ty| type_kind_name(ty.kind).to_owned())
+                            .unwrap_or_else(|| "void".to_owned()),
+                        parameter_types,
+                    });
+                }
                 self.synchronize_top_level();
                 return Some(TopLevel::Error(ErrorNode {
                     span: self.span_from(start, self.current),
@@ -334,6 +367,11 @@ impl<'a> Parser<'a> {
                                 span: self.span_from(event_start, self.current),
                                 name: self.tokens[event_name_index].lexeme.clone(),
                                 name_span: self.tokens[event_name_index].span,
+                                declared_parameter_count: parameters.len(),
+                                declared_parameter_types: parameters
+                                    .iter()
+                                    .map(|parameter| parameter.ty.kind)
+                                    .collect(),
                                 parameters,
                                 body,
                             });
@@ -354,6 +392,10 @@ impl<'a> Parser<'a> {
                                     name: self.tokens[event_name_index].lexeme.clone(),
                                     name_span: self.tokens[event_name_index].span,
                                     parameters,
+                                    declared_parameter_count: self
+                                        .count_declared_parameters(parameter_open, close),
+                                    declared_parameter_types: self
+                                        .parameter_type_kinds_between(parameter_open, close),
                                     body: Some(body),
                                 });
                             } else {
@@ -1186,15 +1228,20 @@ impl<'a> Parser<'a> {
                 if !call_suffix_allowed {
                     self.error_here("PAR007", "function call suffix requires an identifier");
                 }
+                let open_paren_span = self.here_span();
                 self.advance();
-                let arguments = self.parse_argument_list(depth + 1)?;
-                let span = join_spans(expression.span, self.previous_span());
+                let parsed = self.parse_argument_list(depth + 1)?;
+                let span = join_spans(expression.span, parsed.close_span);
                 expression = Expression {
                     span,
                     kind: ExpressionKind::Call(CallExpression {
                         span,
                         callee: Box::new(expression),
-                        arguments,
+                        open_paren_span,
+                        close_paren_span: parsed.close_span,
+                        declared_argument_count: parsed.declared_count,
+                        arguments_complete: parsed.complete,
+                        arguments: parsed.arguments,
                     }),
                 };
                 call_suffix_allowed = false;
@@ -1450,15 +1497,30 @@ impl<'a> Parser<'a> {
         Some(expression)
     }
 
-    fn parse_argument_list(&mut self, depth: usize) -> Option<Vec<Expression>> {
+    fn parse_argument_list(&mut self, depth: usize) -> Option<ParsedArguments> {
+        let open = self.current.checked_sub(1)?;
         let mut arguments = Vec::new();
         if self.matches(TokenKind::RParen) {
-            return Some(arguments);
+            return Some(ParsedArguments {
+                arguments,
+                complete: true,
+                close_span: self.previous_span(),
+                declared_count: 0,
+            });
         }
         loop {
             let Some(expression) = self.parse_expression_at(1, depth) else {
                 self.synchronize_arguments();
-                return None;
+                if self.current == 0 || self.tokens[self.current - 1].kind != TokenKind::RParen {
+                    return None;
+                }
+                let close = self.current - 1;
+                return Some(ParsedArguments {
+                    arguments,
+                    complete: false,
+                    close_span: self.tokens[close].span,
+                    declared_count: self.count_call_arguments(open, close),
+                });
             };
             arguments.push(expression);
             if !self.matches(TokenKind::Comma) {
@@ -1466,10 +1528,156 @@ impl<'a> Parser<'a> {
             }
         }
         if self.expect(TokenKind::RParen, "expected ')' after arguments") {
-            Some(arguments)
-        } else {
-            None
+            let close = self.current - 1;
+            return Some(ParsedArguments {
+                declared_count: arguments.len(),
+                arguments,
+                complete: true,
+                close_span: self.tokens[close].span,
+            });
         }
+        let close = self.matching_call_close(open)?;
+        while self.current <= close {
+            self.advance();
+        }
+        let declared_count = self.count_call_arguments(open, close);
+        Some(ParsedArguments {
+            arguments,
+            complete: false,
+            close_span: self.tokens[close].span,
+            declared_count,
+        })
+    }
+
+    fn matching_call_close(&self, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(open) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        return None;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::Semicolon if bracket_depth == 0 && brace_depth == 0 && depth == 1 => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn count_call_arguments(&self, open: usize, close: usize) -> usize {
+        if close == open + 1 {
+            return 0;
+        }
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut vector_depth = 0usize;
+        let mut commas = 0usize;
+        let mut has_argument = false;
+        for (index, token) in self.tokens.iter().enumerate().take(close).skip(open + 1) {
+            match token.kind {
+                TokenKind::LParen => {
+                    paren_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => {
+                    bracket_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => {
+                    brace_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less if self.starts_vector_literal(index) => {
+                    vector_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::Greater if vector_depth > 0 => vector_depth -= 1,
+                TokenKind::Comma
+                    if paren_depth == 0
+                        && bracket_depth == 0
+                        && brace_depth == 0
+                        && vector_depth == 0 =>
+                {
+                    commas += 1;
+                    has_argument = true;
+                }
+                _ => has_argument = true,
+            }
+        }
+        if has_argument {
+            commas + 1
+        } else {
+            0
+        }
+    }
+
+    fn starts_vector_literal(&self, index: usize) -> bool {
+        let Some(previous) = index
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+        else {
+            return true;
+        };
+        match previous.kind {
+            TokenKind::KwReturn
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::Comma
+            | TokenKind::Equal
+            | TokenKind::PlusEqual
+            | TokenKind::MinusEqual
+            | TokenKind::StarEqual
+            | TokenKind::SlashEqual
+            | TokenKind::PercentEqual
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Question
+            | TokenKind::Colon
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Xor
+            | TokenKind::AndAnd
+            | TokenKind::OrOr => true,
+            TokenKind::RParen => self.closes_explicit_cast_parentheses(index - 1),
+            _ => false,
+        }
+    }
+
+    fn closes_explicit_cast_parentheses(&self, close: usize) -> bool {
+        let Some(open) = close.checked_sub(2) else {
+            return false;
+        };
+        self.tokens.get(close).map(|token| token.kind) == Some(TokenKind::RParen)
+            && self.tokens.get(open).map(|token| token.kind) == Some(TokenKind::LParen)
+            && self
+                .tokens
+                .get(open + 1)
+                .is_some_and(|token| is_type_token(token.kind))
     }
 
     fn parse_delimited_expressions(
@@ -1781,6 +1989,75 @@ impl<'a> Parser<'a> {
         parameters
     }
 
+    fn parameter_type_kinds_between(&self, open: usize, close: usize) -> Vec<TypeKind> {
+        let mut types = Vec::new();
+        let mut expect_type = true;
+        for token in self.tokens.iter().take(close).skip(open + 1) {
+            if token.kind == TokenKind::Comma {
+                expect_type = true;
+                continue;
+            }
+            if expect_type {
+                if let Some(kind) = type_kind(token.kind) {
+                    types.push(kind);
+                    expect_type = false;
+                }
+            }
+        }
+        types
+    }
+
+    fn count_declared_parameters(&self, open: usize, close: usize) -> usize {
+        if close == open + 1 {
+            return 0;
+        }
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut vector_depth = 0usize;
+        let mut commas = 0usize;
+        let mut has_argument = false;
+        for token in self.tokens.iter().take(close).skip(open + 1) {
+            match token.kind {
+                TokenKind::LParen => {
+                    paren_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => {
+                    bracket_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => {
+                    brace_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less => {
+                    vector_depth += 1;
+                    has_argument = true;
+                }
+                TokenKind::Greater if vector_depth > 0 => vector_depth -= 1,
+                TokenKind::Comma
+                    if paren_depth == 0
+                        && bracket_depth == 0
+                        && brace_depth == 0
+                        && vector_depth == 0 =>
+                {
+                    commas += 1;
+                    has_argument = true;
+                }
+                _ => has_argument = true,
+            }
+        }
+        if has_argument {
+            commas + 1
+        } else {
+            0
+        }
+    }
+
     fn event_parameter_close_before_body(&self) -> Option<usize> {
         let mut index = self.current;
         let mut paren_depth = 0usize;
@@ -2013,6 +2290,18 @@ fn is_type_token(kind: TokenKind) -> bool {
             | TokenKind::KwVector
             | TokenKind::KwRotation
     )
+}
+
+fn type_kind_name(kind: TypeKind) -> &'static str {
+    match kind {
+        TypeKind::Integer => "integer",
+        TypeKind::Float => "float",
+        TypeKind::String => "string",
+        TypeKind::Key => "key",
+        TypeKind::List => "list",
+        TypeKind::Vector => "vector",
+        TypeKind::Rotation => "rotation",
+    }
 }
 
 fn type_kind(kind: TokenKind) -> Option<TypeKind> {
@@ -2253,6 +2542,7 @@ fn worker_failure_result(tokens: &[Token], reason: &str) -> (Ast, Vec<Diagnostic
     (
         Ast {
             items: Vec::new(),
+            recovered_functions: Vec::new(),
             span,
         },
         vec![Diagnostic {
