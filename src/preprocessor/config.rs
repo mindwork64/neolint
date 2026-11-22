@@ -1,8 +1,8 @@
 //! Preprocessor configuration.
 //!
-//! Identity mode is the default and preserves the Phase 1 byte-identical
-//! behavior. Full mode enables the directive and macro engine; include
-//! directories and the dialect profile are explicit opt-ins.
+//! [`PreprocessOptions`] is the compact Phase 2 mode selector. Phase 3
+//! extensions (dialect and include directories) live in [`PreprocessSettings`]
+//! so the Phase 2 `Copy`/`const` contract stays intact.
 
 use std::path::PathBuf;
 
@@ -37,50 +37,89 @@ impl PreprocessConfig {
     }
 
     /// Full LSL directive and macro preprocessing.
-    pub fn full() -> PreprocessOptions {
+    pub const fn full() -> PreprocessOptions {
         PreprocessOptions::full()
     }
 }
 
-/// Explicit preprocessing settings passed to the Phase 3 entry points.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Compact Phase 2 preprocessing mode.
+///
+/// This type remains `Copy` and its constructors/accessor remain `const`.
+/// Phase 3 options are carried separately by [`PreprocessSettings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PreprocessOptions {
     mode: PreprocessMode,
-    dialect: PreprocessDialect,
-    include_dirs: Vec<PathBuf>,
 }
 
 impl PreprocessOptions {
     /// Identity options.
-    pub fn identity() -> Self {
-        Self::default()
+    pub const fn identity() -> Self {
+        Self {
+            mode: PreprocessMode::Identity,
+        }
+    }
+
+    /// Full LSL preprocessing.
+    pub const fn full() -> Self {
+        Self {
+            mode: PreprocessMode::Full,
+        }
+    }
+
+    /// Selected mode.
+    pub const fn mode(self) -> PreprocessMode {
+        self.mode
+    }
+}
+
+/// Phase 3 preprocessing settings: the Phase 2 mode plus dialect and includes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreprocessSettings {
+    options: PreprocessOptions,
+    dialect: PreprocessDialect,
+    include_dirs: Vec<PathBuf>,
+}
+
+impl PreprocessSettings {
+    /// Identity settings.
+    pub const fn identity() -> Self {
+        Self {
+            options: PreprocessOptions::identity(),
+            dialect: PreprocessDialect::Lsl,
+            include_dirs: Vec::new(),
+        }
     }
 
     /// Full LSL preprocessing with no include directories.
-    pub fn full() -> Self {
+    pub const fn full() -> Self {
         Self {
-            mode: PreprocessMode::Full,
+            options: PreprocessOptions::full(),
             dialect: PreprocessDialect::Lsl,
             include_dirs: Vec::new(),
         }
     }
 
     /// Full Firestorm profile preprocessing.
-    pub fn firestorm() -> Self {
+    pub const fn firestorm() -> Self {
         Self {
-            mode: PreprocessMode::Full,
+            options: PreprocessOptions::full(),
             dialect: PreprocessDialect::Firestorm,
             include_dirs: Vec::new(),
         }
     }
 
+    /// Phase 2 mode selector.
+    pub fn options(&self) -> PreprocessOptions {
+        self.options
+    }
+
     /// Selected mode.
-    pub const fn mode(&self) -> PreprocessMode {
-        self.mode
+    pub fn mode(&self) -> PreprocessMode {
+        self.options.mode()
     }
 
     /// Selected dialect.
-    pub const fn dialect(&self) -> PreprocessDialect {
+    pub fn dialect(&self) -> PreprocessDialect {
         self.dialect
     }
 
@@ -96,15 +135,25 @@ impl PreprocessOptions {
     }
 
     /// Replace the dialect profile.
-    pub const fn with_dialect(mut self, dialect: PreprocessDialect) -> Self {
+    pub fn with_dialect(mut self, dialect: PreprocessDialect) -> Self {
         self.dialect = dialect;
         self
     }
 
     /// Enable full preprocessing while retaining the selected dialect.
-    pub const fn with_full(mut self) -> Self {
-        self.mode = PreprocessMode::Full;
+    pub fn with_full(mut self) -> Self {
+        self.options = PreprocessOptions::full();
         self
+    }
+}
+
+impl From<PreprocessOptions> for PreprocessSettings {
+    fn from(options: PreprocessOptions) -> Self {
+        Self {
+            options,
+            dialect: PreprocessDialect::Lsl,
+            include_dirs: Vec::new(),
+        }
     }
 }
 
@@ -122,15 +171,80 @@ impl From<&PreprocessConfig> for PreprocessOptions {
 
 impl From<PreprocessMode> for PreprocessOptions {
     fn from(mode: PreprocessMode) -> Self {
-        Self {
-            mode,
-            ..Self::identity()
-        }
+        Self { mode }
     }
 }
 
-impl From<PreprocessDialect> for PreprocessOptions {
+impl From<PreprocessDialect> for PreprocessSettings {
     fn from(dialect: PreprocessDialect) -> Self {
-        Self::firestorm().with_dialect(dialect)
+        PreprocessSettings::firestorm().with_dialect(dialect)
+    }
+}
+
+impl From<PreprocessConfig> for PreprocessSettings {
+    fn from(config: PreprocessConfig) -> Self {
+        PreprocessOptions::from(config).into()
+    }
+}
+
+impl From<&PreprocessConfig> for PreprocessSettings {
+    fn from(config: &PreprocessConfig) -> Self {
+        PreprocessOptions::from(config).into()
+    }
+}
+
+impl From<PreprocessMode> for PreprocessSettings {
+    fn from(mode: PreprocessMode) -> Self {
+        PreprocessOptions::from(mode).into()
+    }
+}
+
+#[cfg(test)]
+mod phase2_api_compatibility_tests {
+    use super::*;
+
+    fn require_copy<T: Copy>() {}
+
+    const IDENTITY: PreprocessOptions = PreprocessOptions::identity();
+    const FULL: PreprocessOptions = PreprocessOptions::full();
+    const FULL_MODE: PreprocessMode = PreprocessOptions::full().mode();
+    const CONFIG_FULL: PreprocessOptions = PreprocessConfig::full();
+    const FIRESTORM_SETTINGS: PreprocessSettings = PreprocessSettings::firestorm();
+
+    #[test]
+    fn phase2_options_remain_copy_and_const_constructible() {
+        require_copy::<PreprocessOptions>();
+        assert_eq!(IDENTITY.mode(), PreprocessMode::Identity);
+        assert_eq!(FULL.mode(), PreprocessMode::Full);
+        assert_eq!(FULL_MODE, PreprocessMode::Full);
+        assert_eq!(CONFIG_FULL.mode(), PreprocessMode::Full);
+        assert_eq!(FIRESTORM_SETTINGS.mode(), PreprocessMode::Full);
+        assert_eq!(FIRESTORM_SETTINGS.dialect(), PreprocessDialect::Firestorm);
+    }
+
+    #[test]
+    fn phase2_conversions_still_compile() {
+        let from_mode: PreprocessOptions = PreprocessMode::Full.into();
+        let from_config: PreprocessOptions = PreprocessConfig.into();
+        let from_ref: PreprocessOptions = (&PreprocessConfig).into();
+        assert_eq!(from_mode.mode(), PreprocessMode::Full);
+        assert_eq!(from_config.mode(), PreprocessMode::Identity);
+        assert_eq!(from_ref.mode(), PreprocessMode::Identity);
+        let settings: PreprocessSettings = from_mode.into();
+        assert_eq!(settings.mode(), PreprocessMode::Full);
+    }
+
+    #[test]
+    fn phase3_settings_carry_dialect_and_include_directories() {
+        let settings = PreprocessSettings::full()
+            .with_dialect(PreprocessDialect::Firestorm)
+            .with_include_dirs(vec![PathBuf::from("./includes")]);
+        assert_eq!(settings.mode(), PreprocessMode::Full);
+        assert_eq!(settings.dialect(), PreprocessDialect::Firestorm);
+        assert_eq!(settings.include_dirs(), &[PathBuf::from("./includes")]);
+        assert_eq!(
+            PreprocessSettings::identity().dialect(),
+            PreprocessDialect::Lsl
+        );
     }
 }

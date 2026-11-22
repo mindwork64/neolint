@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::diagnostic::resolve::RenderedDiagnostic;
-use crate::preprocessor::config::PreprocessOptions;
+use crate::preprocessor::config::PreprocessSettings;
 use crate::preprocessor::identity::preprocess_identity;
 use crate::preprocessor::preprocess_with_includes;
 use crate::source::file::{AnalysisUnitId, RunId};
@@ -228,7 +228,7 @@ impl AnalysisRun {
     pub fn add_preprocessed_file(
         &mut self,
         path: impl AsRef<Path>,
-        options: PreprocessOptions,
+        options: PreprocessSettings,
     ) -> Result<usize, SetupError> {
         let (index, unit_id, mut manager) = self.begin_unit()?;
         let root = manager.load_root_file(path)?;
@@ -243,7 +243,7 @@ impl AnalysisRun {
         &mut self,
         display_name: &str,
         text: &str,
-        options: PreprocessOptions,
+        options: PreprocessSettings,
     ) -> Result<usize, SetupError> {
         let (index, unit_id, mut manager) = self.begin_unit()?;
         let root = manager.load_root_text(display_name, text)?;
@@ -258,7 +258,7 @@ impl AnalysisRun {
         &mut self,
         display_name: &str,
         reader: impl Read,
-        options: PreprocessOptions,
+        options: PreprocessSettings,
     ) -> Result<usize, SetupError> {
         let (index, unit_id, mut manager) = self.begin_unit()?;
         let root = manager.load_root_reader(display_name, reader)?;
@@ -487,7 +487,7 @@ mod tests {
 #[cfg(test)]
 mod phase3_total_diagnostic_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use crate::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
 
     #[test]
@@ -498,7 +498,7 @@ mod phase3_total_diagnostic_tests {
         }
         let mut run = AnalysisRun::new().unwrap();
         let index = run
-            .add_preprocessed_text("root.lsl", &source, PreprocessOptions::full())
+            .add_preprocessed_text("root.lsl", &source, PreprocessSettings::full())
             .unwrap();
         let rendered = run.unit(index).unwrap().analyze().unwrap();
         assert_eq!(rendered.len(), MAX_TOTAL_DIAGNOSTICS);

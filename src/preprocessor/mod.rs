@@ -23,7 +23,9 @@ use crate::diagnostic::Span;
 use crate::source::file::AnalysisUnitId;
 use crate::source::map::{PreparedSpan, SourceMap, SpanError};
 
-pub use config::{PreprocessConfig, PreprocessDialect, PreprocessMode, PreprocessOptions};
+pub use config::{
+    PreprocessConfig, PreprocessDialect, PreprocessMode, PreprocessOptions, PreprocessSettings,
+};
 pub use diagnostics::{PreprocessDiagnostic, RelatedLocation};
 pub use identity::preprocess_identity;
 pub use include::{IncludeEdge, IncludeGraph, IncludeNode};
@@ -39,15 +41,25 @@ pub fn preprocess(
     root: crate::source::SourceId,
     config: impl Into<PreprocessOptions>,
 ) -> Result<PreparedSource, SpanError> {
-    let options = config.into();
-    match options.mode() {
+    preprocess_with_settings(manager, root, PreprocessSettings::from(config.into()))
+}
+
+/// Run preprocessing with the extended Phase 3 settings without mutating the
+/// caller's `SourceManager`. Included files are loaded into a snapshot.
+pub fn preprocess_with_settings(
+    manager: &crate::source::manager::SourceManager,
+    root: crate::source::SourceId,
+    settings: impl Into<PreprocessSettings>,
+) -> Result<PreparedSource, SpanError> {
+    let settings = settings.into();
+    match settings.mode() {
         PreprocessMode::Identity => identity::preprocess_identity(manager, root),
         PreprocessMode::Full => {
             // Preserve the Phase 2 read-only entry point. Included files are
             // loaded into a snapshot; callers that need the unit's SourceManager
             // updated use `preprocess_with_includes`.
             let mut snapshot = manager.clone();
-            directive::preprocess_full(&mut snapshot, root, &options)
+            directive::preprocess_full(&mut snapshot, root, &settings)
         }
     }
 }
@@ -62,12 +74,12 @@ pub fn preprocess(
 pub fn preprocess_with_includes(
     manager: &mut crate::source::manager::SourceManager,
     root: crate::source::SourceId,
-    config: impl Into<PreprocessOptions>,
+    settings: impl Into<PreprocessSettings>,
 ) -> Result<PreparedSource, SpanError> {
-    let options = config.into();
-    match options.mode() {
+    let settings = settings.into();
+    match settings.mode() {
         PreprocessMode::Identity => identity::preprocess_identity(manager, root),
-        PreprocessMode::Full => directive::preprocess_full(manager, root, &options),
+        PreprocessMode::Full => directive::preprocess_full(manager, root, &settings),
     }
 }
 
@@ -256,5 +268,33 @@ mod tests {
             prepared.map().resolve_point(eof).unwrap(),
             prepared.map().eof_anchor()
         );
+    }
+}
+
+#[cfg(test)]
+mod phase2_entry_point_compatibility_tests {
+    use super::*;
+    use crate::source::file::RunId;
+    use crate::source::manager::SourceManager;
+
+    #[test]
+    fn phase2_preprocess_calls_remain_source_compatible() {
+        let unit = AnalysisUnitId::new(RunId::new(949), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager
+            .load_root_text("root.lsl", "#define X 1\nX\n")
+            .unwrap();
+        for prepared in [
+            preprocess(&manager, root, PreprocessOptions::full()).unwrap(),
+            preprocess(&manager, root, PreprocessMode::Full).unwrap(),
+            preprocess(&manager, root, PreprocessConfig::full()).unwrap(),
+        ] {
+            assert!(prepared.text().contains('1'));
+        }
+        let identity = preprocess(&manager, root, PreprocessConfig::identity()).unwrap();
+        assert_eq!(identity.text(), "#define X 1\nX\n");
+        let copied = PreprocessOptions::full();
+        let _also = copied;
+        assert_eq!(copied.mode(), PreprocessMode::Full);
     }
 }

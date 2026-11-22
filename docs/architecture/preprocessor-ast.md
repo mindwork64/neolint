@@ -2515,13 +2515,16 @@ implementations, not stages of the same code.
 expr,token,diagnostics}.rs`. Phase 1 types and the identity pass-through are
 unchanged.
 
-**Entry point.** `preprocess(manager, root, options)` dispatches on
-`PreprocessOptions::mode()`. `PreprocessConfig` remains a unit value and
+**Entry point.** `preprocess(manager, root, options)` dispatches on the compact
+`Copy` `PreprocessOptions::mode()`. `PreprocessConfig` remains a unit value and
 converts to identity options, so existing callers compile unchanged;
 `PreprocessConfig::full()` and `PreprocessOptions::full()` opt into Phase 2.
 `Identity` calls `preprocess_identity` unchanged and `Default` remains identity,
-so plain-LSL callers do not opt in accidentally. `AnalysisRun::add_prepared_*`
-still creates identity units; CLI integration is Phase 3.
+so plain-LSL callers do not opt in accidentally. Phase 3 extensions are carried
+by `PreprocessSettings { options, dialect, include_dirs }`; the read-only
+`preprocess_with_settings` and mutable `preprocess_with_includes` entry points
+accept it. `AnalysisRun::add_prepared_*` still creates identity units; the
+Phase 3 `add_preprocessed_*` methods use the extended settings.
 
 **Scanner and directives.** The scanner works on original bytes, not regular
 expressions or the LSL lexer. It tracks strings, `//` comments, `/* ... */`
@@ -2684,7 +2687,8 @@ unresolved identifiers. Switch and lazy-list syntax remain Phase 5.
 
 **CLI/diagnostics.** `--preprocess`, `--dialect`, and repeated `-I`/`--include-dir`
 are supported; the config file accepts `preprocess`, `dialect`, and repeated
-`include_dir`. CLI dialect/include settings override config. Plain invocation
+`include_dir`. The compact Phase 2 `PreprocessOptions` stays `Copy` and `const`;
+Phase 3 options live in `PreprocessSettings`. CLI dialect/include settings override config. Plain invocation
 without preprocessing flags keeps the frozen legacy pipeline. Prepared units use
 one `PreparedSource`/`SourceMap`, convert preprocess diagnostics directly and
 engine diagnostics through the map, group rendered diagnostics by source load

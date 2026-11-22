@@ -14,7 +14,7 @@
 use neolint::config::LintConfig;
 use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{
-    lex, parse, AnalysisRun, Diagnostic, PreprocessDialect, PreprocessOptions, Severity,
+    lex, parse, AnalysisRun, Diagnostic, PreprocessDialect, PreprocessSettings, Severity,
 };
 use std::collections::HashSet;
 use std::env;
@@ -326,7 +326,7 @@ fn run_preprocessed(
     format: OutputFormat,
     show_tokens: bool,
 ) -> i32 {
-    let options = PreprocessOptions::full()
+    let options = PreprocessSettings::full()
         .with_dialect(config.dialect())
         .with_include_dirs(config.include_dirs().to_vec());
     let mut run = match AnalysisRun::new() {
