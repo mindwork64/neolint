@@ -10,7 +10,7 @@ DIAGNOSTIC_SOURCES = (
     "src/semantic.rs",
 ) + tuple(
     str(path.relative_to(ROOT))
-    for directory in ("src/preprocessor", "src/ast")
+    for directory in ("src/preprocessor", "src/ast", "src/ast_semantic")
     for path in sorted((ROOT / directory).rglob("*.rs"))
 )
 

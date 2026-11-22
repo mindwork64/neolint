@@ -1,12 +1,13 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5 implemented on the experimental branch**; this document
-remains the normative contract for Phase 6.
+Status: **Phases 1–5 and Phase 6A implemented on the experimental branch**;
+this document remains the normative contract for the remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
-implemented; AST semantics and engine migration remain future work.
+implemented; the Phase 6A AST structural semantics foundation is implemented,
+while broader AST semantics and engine migration remain future work.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -2883,7 +2884,43 @@ access/assignment/casts/indices/spans/malformed recovery and deep nesting.
 `tests/ast_bridge.rs` resolves every new node span through identity, macro and
 include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
-### Phase 6 — AST semantic analyzer and migration
+### Phase 6 — AST semantic analyzer and migration (Phase 6A implemented)
+
+#### Phase 6A implementation record
+
+**Status:** implemented independently in `src/ast_semantic/`; not connected to
+`AnalysisRun`, the CLI, pipeline, preprocessor or SourceMap. The Legacy analyzer
+remains compiled, unchanged and authoritative.
+
+**API.** `analyze_ast(&Ast, &[Diagnostic]) -> Vec<Diagnostic>` runs the migrated
+structural rules over the typed AST. `src/ast_semantic/scopes.rs` exposes the
+AST-derived `ScopeTree`, `Scope`, `ScopeId` and `Symbol` model for later type and
+name-resolution work. No token stream is accepted or rescanned.
+
+**Scopes.** The root scope holds global variables and functions. Each function
+and canonical-event body gets a scope, with parameters registered before locals.
+Each `StatementKind::Block` creates a child scope; unbraced control bodies use
+the enclosing scope. Firestorm switch bodies create a child scope, and block-form
+case arms create another child. Missing names/bodies and Error nodes are skipped.
+Traversal uses an explicit work stack rather than recursive AST visitation.
+
+**Migrated rules.** SEM001, SEM007, SEM020 and SEM021 are implemented in focused
+files under `src/ast_semantic/rules/`. They preserve the Legacy code, severity,
+kind, message and primary/previous spans. `src/ast_semantic/rule-ownership.md`
+contains the complete SEM001–SEM023 ownership matrix and parity status.
+
+**Parity.** `tests/ast_semantic_parity.rs` lexes once, runs Legacy parse+semantic
+and AST parse+semantic independently, filters those four codes, and compares the
+full normalized multiset (code, severity, kind, message, all byte and line/column
+coordinates) over every `.lsl` corpus fixture in deterministic order. Focused
+tests cover cross-kind globals, parameter/local collisions, shadowing, canonical
+and unknown events, state/builtin/god-only collisions, malformed recovery and
+nested switch scopes. No intentional diagnostic deltas exist in this slice.
+
+**Boundary.** No CLI/pipeline engine selection, no compare mode, no new SEM codes
+or severity changes, no AST semantic rules beyond these four, and no changes to
+Legacy parser/analyzer behavior. SEM002–SEM006, SEM008–SEM019, SEM022 and SEM023
+remain Legacy-only.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
