@@ -3,7 +3,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-type NormalizedDiagnostic = (String, String, String, usize, usize, usize, usize, String);
+type NormalizedDiagnostic = (
+    String,
+    String,
+    String,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    String,
+);
 
 fn normalized(diagnostics: &[Diagnostic]) -> Vec<NormalizedDiagnostic> {
     let mut values: Vec<_> = diagnostics
@@ -17,6 +28,8 @@ fn normalized(diagnostics: &[Diagnostic]) -> Vec<NormalizedDiagnostic> {
                 diagnostic.span.end,
                 diagnostic.span.line,
                 diagnostic.span.column,
+                diagnostic.span.end_line,
+                diagnostic.span.end_column,
                 diagnostic.message.clone(),
             )
         })
