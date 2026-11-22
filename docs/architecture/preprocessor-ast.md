@@ -2765,13 +2765,16 @@ statement, and block recursion is counted before entering the next recursive
 construct. Exceeding it emits exactly one `AST001` (error/syntax), skips the
 affected branch with a bounded balanced-delimiter skip, and continues with later
 input. Parsing runs on a scoped 16 MiB worker stack so the explicit guard is
-reached safely even in unoptimized builds; no state is shared between parses.
+reached safely even in unoptimized builds; no state is shared between parses. If
+that worker cannot be created or terminates unexpectedly, `parse_ast` returns an
+empty AST plus exactly one `AST002` diagnostic and never retries the recursive
+parser on the caller's stack.
 
 **Known differences.** For ordinary grammar and malformed inputs, the AST parser
 reproduces legacy `PARxxx` code, severity, kind, message and span as a multiset
 on the grammar inventory and full `corpus/{small,medium,large,invalid}`. The only
-intentional additional diagnostic is `AST001` for input nesting that legacy does
-not explicitly guard. AST recovery nodes are internal tree structure and are not
+intentional syntax diagnostics are `AST001` for input nesting that legacy does
+not explicitly guard and `AST002` for the safe worker resource-failure path. AST recovery nodes are internal tree structure and are not
 user-visible diagnostics. No AST semantic analysis, SEM migration, switch/lazy
 syntax, pipeline selection, or CLI behavior is part of Phase 4.
 
