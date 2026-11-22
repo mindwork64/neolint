@@ -337,6 +337,11 @@ impl SourceMap {
         self.prepared_text.len()
     }
 
+    /// Prepared text this map was built for.
+    pub fn prepared_text(&self) -> &str {
+        &self.prepared_text
+    }
+
     /// Original file registered for `id`, if it belongs to this unit.
     pub fn file(&self, id: SourceId) -> Option<&SourceFile> {
         if id.unit() != self.unit {
@@ -391,10 +396,12 @@ impl SourceMap {
             if run_start >= run_end {
                 continue;
             }
-            let origin = self.origin_at(segment.origin)?;
-            let mapped = self.map_run(segment, origin, run_start, run_end)?;
-            candidates.push((origin.kind.priority(), run_start, mapped));
-            self.collect_origin_related(origin, &mut related);
+            let (priority, mapped, chain_related) =
+                self.resolve_run_origin(segment, segment.origin, run_start, run_end)?;
+            candidates.push((priority, run_start, mapped));
+            for span in chain_related {
+                push_unique(&mut related, span);
+            }
             cursor = run_end;
         }
         if cursor < end {
@@ -446,8 +453,7 @@ impl SourceMap {
         if segment.prepared.start > offset || offset >= segment.prepared.end {
             return Err(SpanError::UnmappedPreparedRange);
         }
-        let origin = self.origin_at(segment.origin)?;
-        self.map_point(segment, origin, offset)
+        self.resolve_point_origin(segment, segment.origin, offset)
     }
 
     /// Resolve an original file span to line/column.
@@ -560,13 +566,6 @@ impl SourceMap {
         Ok(())
     }
 
-    fn origin_at(&self, id: OriginId) -> Result<&SourceOrigin, SpanError> {
-        self.validate_origin_chain(id)?;
-        self.origins
-            .get(id.index as usize)
-            .ok_or(SpanError::UnknownOriginId)
-    }
-
     fn validate_origin_chain(&self, id: OriginId) -> Result<(), SpanError> {
         let mut current = Some(id);
         let mut depth = 0;
@@ -617,16 +616,150 @@ impl SourceMap {
         self.validate_source_span_in(file, span)
     }
 
-    fn map_run(
+    fn origin_chain(&self, id: OriginId) -> Result<Vec<OriginId>, SpanError> {
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        while let Some(origin_id) = current {
+            if origin_id.unit != self.unit {
+                return Err(SpanError::ForeignAnalysisUnit);
+            }
+            let origin = self
+                .origins
+                .get(origin_id.index as usize)
+                .ok_or(SpanError::UnknownOriginId)?;
+            self.validate_origin_spans(origin)?;
+            chain.push(origin_id);
+            if chain.len() > 64 {
+                return Err(SpanError::MapInvariant);
+            }
+            current = origin.parent;
+        }
+        Ok(chain)
+    }
+
+    fn resolve_run_origin(
+        &self,
+        segment: &MapSegment,
+        origin_id: OriginId,
+        run_start: usize,
+        run_end: usize,
+    ) -> Result<(u8, SourceSpan, Vec<SourceSpan>), SpanError> {
+        let chain = self.origin_chain(origin_id)?;
+        let mut primary: Option<(usize, u8, SourceSpan)> = None;
+        for (index, id) in chain.iter().enumerate() {
+            let origin = self
+                .origins
+                .get(id.index as usize)
+                .ok_or(SpanError::UnknownOriginId)?;
+            match origin.kind {
+                OriginKind::Generated => continue,
+                OriginKind::TokenPaste | OriginKind::Stringify => {
+                    if let Some(invocation) = origin.invocation {
+                        self.validate_span_owned(invocation)?;
+                        primary = Some((index, OriginKind::MacroInvocation.priority(), invocation));
+                        break;
+                    }
+                }
+                _ => {
+                    let mapped = if index == 0 {
+                        self.map_user_run(segment, origin, run_start, run_end, true)?
+                    } else {
+                        self.validate_span_owned(origin.span)?;
+                        origin.span
+                    };
+                    primary = Some((index, origin.kind.priority(), mapped));
+                    break;
+                }
+            }
+        }
+        let (primary_index, priority, mapped) = match primary {
+            Some(value) => value,
+            None => {
+                let origin = self
+                    .origins
+                    .get(origin_id.index as usize)
+                    .ok_or(SpanError::UnknownOriginId)?;
+                self.validate_span_owned(origin.span)?;
+                (0, origin.kind.priority(), origin.span)
+            }
+        };
+        let mut related = Vec::new();
+        for (index, id) in chain.iter().enumerate() {
+            let origin = self
+                .origins
+                .get(id.index as usize)
+                .ok_or(SpanError::UnknownOriginId)?;
+            if index != primary_index {
+                push_unique(&mut related, origin.span);
+            }
+            if let Some(span) = origin.invocation {
+                push_unique(&mut related, span);
+            }
+            if let Some(span) = origin.definition {
+                push_unique(&mut related, span);
+            }
+        }
+        Ok((priority, mapped, related))
+    }
+
+    fn resolve_point_origin(
+        &self,
+        segment: &MapSegment,
+        origin_id: OriginId,
+        offset: usize,
+    ) -> Result<SourceSpan, SpanError> {
+        let chain = self.origin_chain(origin_id)?;
+        for (index, id) in chain.iter().enumerate() {
+            let origin = self
+                .origins
+                .get(id.index as usize)
+                .ok_or(SpanError::UnknownOriginId)?;
+            match origin.kind {
+                OriginKind::Generated => continue,
+                OriginKind::TokenPaste | OriginKind::Stringify => {
+                    if let Some(invocation) = origin.invocation {
+                        self.validate_span_owned(invocation)?;
+                        let span =
+                            SourceSpan::new(invocation.source, invocation.start, invocation.start);
+                        self.validate_span_owned(span)?;
+                        return Ok(span);
+                    }
+                }
+                _ => {
+                    let span = if index == 0 {
+                        self.map_user_point(segment, origin, offset, true)?
+                    } else {
+                        self.validate_span_owned(origin.span)?;
+                        SourceSpan::new(origin.span.source, origin.span.start, origin.span.start)
+                    };
+                    self.validate_span_owned(span)?;
+                    return Ok(span);
+                }
+            }
+        }
+        let origin = self
+            .origins
+            .get(origin_id.index as usize)
+            .ok_or(SpanError::UnknownOriginId)?;
+        self.validate_span_owned(origin.span)?;
+        Ok(SourceSpan::new(
+            origin.span.source,
+            origin.span.start,
+            origin.span.start,
+        ))
+    }
+
+    fn map_user_run(
         &self,
         segment: &MapSegment,
         origin: &SourceOrigin,
         run_start: usize,
         run_end: usize,
+        allow_relative: bool,
     ) -> Result<SourceSpan, SpanError> {
         let prepared_len = segment.prepared.end - segment.prepared.start;
         let original_len = origin.span.end - origin.span.start;
-        if prepared_len == original_len {
+        if allow_relative && prepared_len == original_len {
             let delta = run_start - segment.prepared.start;
             let start = origin.span.start + delta;
             let end = start + (run_end - run_start);
@@ -639,15 +772,16 @@ impl SourceMap {
         }
     }
 
-    fn map_point(
+    fn map_user_point(
         &self,
         segment: &MapSegment,
         origin: &SourceOrigin,
         offset: usize,
+        allow_relative: bool,
     ) -> Result<SourceSpan, SpanError> {
         let prepared_len = segment.prepared.end - segment.prepared.start;
         let original_len = origin.span.end - origin.span.start;
-        let start = if prepared_len == original_len {
+        let start = if allow_relative && prepared_len == original_len {
             origin.span.start + (offset - segment.prepared.start)
         } else {
             origin.span.start
@@ -655,15 +789,6 @@ impl SourceMap {
         let span = SourceSpan::new(origin.span.source, start, start);
         self.validate_span_owned(span)?;
         Ok(span)
-    }
-
-    fn collect_origin_related(&self, origin: &SourceOrigin, related: &mut Vec<SourceSpan>) {
-        if let Some(span) = origin.invocation {
-            push_unique(related, span);
-        }
-        if let Some(span) = origin.definition {
-            push_unique(related, span);
-        }
     }
 }
 
@@ -1097,6 +1222,122 @@ mod tests {
         let resolved = map.resolve_span(PreparedSpan::new(unit, 0, 4)).unwrap();
         assert_eq!(resolved.primary(), map.source_span(root, 2, 4).unwrap());
         assert_eq!(resolved.related(), &[map.source_span(root, 0, 2).unwrap()]);
+    }
+
+    #[test]
+    fn nested_origin_chain_resolves_primary_and_all_related_locations() {
+        let (unit, root, files) = fixture("abcdef", 0);
+        let mut builder = SourceMapBuilder::new(unit, Arc::from("abcd"), files).unwrap();
+        let origin1 = builder
+            .push_origin(
+                OriginKind::MacroDefinition,
+                builder.source_span(root, 2, 3).unwrap(),
+                Some(builder.source_span(root, 0, 2).unwrap()),
+                Some(builder.source_span(root, 1, 3).unwrap()),
+                None,
+                None,
+            )
+            .unwrap();
+        let origin2 = builder
+            .push_origin(
+                OriginKind::Generated,
+                builder.source_span(root, 4, 5).unwrap(),
+                None,
+                None,
+                Some(origin1),
+                None,
+            )
+            .unwrap();
+        let origin3 = builder
+            .push_origin(
+                OriginKind::MacroDefinition,
+                builder.source_span(root, 3, 4).unwrap(),
+                Some(builder.source_span(root, 0, 1).unwrap()),
+                Some(builder.source_span(root, 1, 4).unwrap()),
+                Some(origin2),
+                None,
+            )
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 0, 4), origin3)
+            .unwrap();
+        builder
+            .set_eof_anchor(builder.source_span(root, 6, 6).unwrap())
+            .unwrap();
+        let map = builder.build().unwrap();
+
+        let resolved = map.resolve_span(PreparedSpan::new(unit, 0, 4)).unwrap();
+        assert_eq!(resolved.primary(), map.source_span(root, 3, 4).unwrap());
+        for expected in [
+            map.source_span(root, 0, 1).unwrap(),
+            map.source_span(root, 1, 4).unwrap(),
+            map.source_span(root, 4, 5).unwrap(),
+            map.source_span(root, 2, 3).unwrap(),
+            map.source_span(root, 0, 2).unwrap(),
+            map.source_span(root, 1, 3).unwrap(),
+        ] {
+            assert!(
+                resolved.related().contains(&expected),
+                "missing related {expected:?}: {resolved:?}"
+            );
+        }
+        assert_eq!(resolved.related().len(), 6);
+        assert!(!resolved.related().contains(&resolved.primary()));
+
+        // A point is anchored to the user origin, not relative-mapped through
+        // a longer prepared segment.
+        assert_eq!(
+            map.resolve_point(PreparedSpan::new(unit, 1, 1)).unwrap(),
+            map.source_span(root, 3, 3).unwrap()
+        );
+        // EOF still uses the map anchor.
+        assert_eq!(
+            map.resolve_point(PreparedSpan::new(unit, 4, 4)).unwrap(),
+            map.source_span(root, 6, 6).unwrap()
+        );
+
+        // A purely generated immediate origin resolves through its parent.
+        let (unit, root, files) = fixture("abcdef", 1);
+        let mut builder = SourceMapBuilder::new(unit, Arc::from("abcd"), files).unwrap();
+        let parent = builder
+            .push_origin(
+                OriginKind::MacroDefinition,
+                builder.source_span(root, 2, 3).unwrap(),
+                Some(builder.source_span(root, 0, 2).unwrap()),
+                Some(builder.source_span(root, 1, 3).unwrap()),
+                None,
+                None,
+            )
+            .unwrap();
+        let generated = builder
+            .push_origin(
+                OriginKind::Generated,
+                builder.source_span(root, 4, 5).unwrap(),
+                None,
+                None,
+                Some(parent),
+                None,
+            )
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 0, 4), generated)
+            .unwrap();
+        builder
+            .set_eof_anchor(builder.source_span(root, 6, 6).unwrap())
+            .unwrap();
+        let map = builder.build().unwrap();
+        let resolved = map.resolve_span(PreparedSpan::new(unit, 0, 4)).unwrap();
+        assert_eq!(resolved.primary(), map.source_span(root, 2, 3).unwrap());
+        assert!(resolved
+            .related()
+            .contains(&map.source_span(root, 4, 5).unwrap()));
+        assert!(resolved
+            .related()
+            .contains(&map.source_span(root, 0, 2).unwrap()));
+        assert_eq!(
+            map.resolve_point(PreparedSpan::new(unit, 2, 2)).unwrap(),
+            map.source_span(root, 2, 2).unwrap()
+        );
     }
 
     #[test]

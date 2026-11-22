@@ -17,7 +17,6 @@ pub struct AnalysisUnit {
     id: AnalysisUnitId,
     manager: SourceManager,
     prepared: Option<PreparedSource>,
-    diagnostics: Vec<Diagnostic>,
 }
 
 impl AnalysisUnit {
@@ -26,7 +25,6 @@ impl AnalysisUnit {
             id,
             manager,
             prepared: None,
-            diagnostics: Vec::new(),
         }
     }
 
@@ -39,7 +37,6 @@ impl AnalysisUnit {
             id,
             manager,
             prepared: Some(prepared),
-            diagnostics: Vec::new(),
         }
     }
 
@@ -85,11 +82,6 @@ impl AnalysisUnit {
         self.prepared.as_ref().map(PreparedSource::map)
     }
 
-    /// Unit-local frozen diagnostics collected by the pipeline.
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
-    }
-
     /// Run the existing lexer/parser/semantic pipeline over this unit and
     /// resolve its diagnostics.
     ///
@@ -98,12 +90,11 @@ impl AnalysisUnit {
     /// Preprocessor diagnostics, when present, are converted first.
     pub fn analyze(&self) -> Result<Vec<RenderedDiagnostic>, SpanError> {
         if let Some(prepared) = &self.prepared {
-            let map = prepared.map();
             let mut rendered = Vec::new();
             for diagnostic in prepared.preprocess_diagnostics() {
                 rendered.push(RenderedDiagnostic::from_preprocess(
                     diagnostic.clone(),
-                    map,
+                    prepared,
                 )?);
             }
             let text = prepared.text();
@@ -120,7 +111,6 @@ impl AnalysisUnit {
                         diagnostic.span,
                     ),
                     prepared,
-                    map,
                 )?);
             }
             return Ok(rendered);

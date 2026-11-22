@@ -7,13 +7,13 @@
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::preprocessor::{PreprocessDiagnostic, RelatedLocation};
 use crate::source::file::{AnalysisUnitId, SourceId};
-use crate::source::map::{PreparedSpan, SourceMap, SpanError};
+use crate::source::map::{PreparedSpan, SourceMap, SourceSpan, SpanError};
 use crate::source::unit::AnalysisUnit;
 
 /// A frozen legacy diagnostic tagged with the unit that produced it.
 ///
-/// Fields are private and there is no public constructor. The unit pipeline
-/// creates it through [`AnalysisUnit::legacy_diagnostic`].
+/// Fields are private and there is no public constructor. Only the unit
+/// pipeline creates it.
 #[derive(Debug, Clone)]
 pub struct LegacyDiagnostic {
     diagnostic: Diagnostic,
@@ -108,11 +108,19 @@ impl RenderedDiagnostic {
         &self.related
     }
 
-    /// Convert a preprocessor finding. Every span must belong to `map`'s unit.
+    /// Convert a preprocessor finding. The map is obtained from the
+    /// `PreparedSource`; every span must belong to that unit.
     pub fn from_preprocess(
         diagnostic: PreprocessDiagnostic,
-        map: &SourceMap,
+        prepared: &crate::preprocessor::PreparedSource,
     ) -> Result<Self, SpanError> {
+        let map = prepared.map();
+        if prepared.unit() != map.unit()
+            || prepared.prepared_len() != map.prepared_len()
+            || prepared.text() != map.prepared_text()
+        {
+            return Err(SpanError::ForeignPreparedSource);
+        }
         let span = map.render_span(diagnostic.primary)?;
         // Explicit ownership check independent of rendering.
         map.location(diagnostic.primary)?;
@@ -136,12 +144,20 @@ impl RenderedDiagnostic {
     }
 
     /// Convert a prepared-coordinate diagnostic.
+    ///
+    /// The map is always obtained from the `PreparedSource`; callers cannot
+    /// supply a different map for the same unit. All related locations from the
+    /// primary range and from every explicit related prepared range are carried
+    /// into the rendered diagnostic, deduplicated and excluding the primary.
     pub fn from_prepared(
         diagnostic: PreparedDiagnostic,
         prepared: &crate::preprocessor::PreparedSource,
-        map: &SourceMap,
     ) -> Result<Self, SpanError> {
-        if prepared.unit() != map.unit() {
+        let map = prepared.map();
+        if prepared.unit() != map.unit()
+            || prepared.prepared_len() != map.prepared_len()
+            || prepared.text() != map.prepared_text()
+        {
             return Err(SpanError::ForeignPreparedSource);
         }
         let prepared_span = prepared.prepared_span(diagnostic.span)?;
@@ -149,20 +165,15 @@ impl RenderedDiagnostic {
         let primary = resolved.primary();
         let span = map.render_span(primary)?;
         let mut related = Vec::new();
+        for source_span in resolved.related() {
+            push_related(map, primary, *source_span, &mut related)?;
+        }
         for prepared_related in diagnostic.related {
             let resolved = map.resolve_span(prepared_related)?;
-            let source_span = resolved.primary();
-            if source_span == primary {
-                continue;
+            push_related(map, primary, resolved.primary(), &mut related)?;
+            for source_span in resolved.related() {
+                push_related(map, primary, *source_span, &mut related)?;
             }
-            if related
-                .iter()
-                .any(|location: &RelatedLocation| location.span == source_span)
-            {
-                continue;
-            }
-            map.render_span(source_span)?;
-            related.push(RelatedLocation::new(source_span, "related location"));
         }
         Ok(Self {
             diagnostic: Diagnostic {
@@ -194,10 +205,32 @@ impl RenderedDiagnostic {
     }
 }
 
+fn push_related(
+    map: &SourceMap,
+    primary: SourceSpan,
+    span: SourceSpan,
+    related: &mut Vec<RelatedLocation>,
+) -> Result<(), SpanError> {
+    if span == primary {
+        return Ok(());
+    }
+    map.render_span(span)?;
+    if related.iter().any(|location| location.span == span) {
+        return Ok(());
+    }
+    related.push(RelatedLocation::new(span, "related location"));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::AnalysisRun;
+    use crate::preprocessor::PreparedSource;
+    use crate::source::file::RunId;
+    use crate::source::manager::SourceManager;
+    use crate::source::map::{OriginKind, SourceMapBuilder};
+    use std::sync::Arc;
 
     fn span(start: usize, end: usize) -> Span {
         Span {
@@ -267,7 +300,6 @@ mod tests {
         let index = run.add_prepared_text("root.lsl", text).unwrap();
         let unit = run.unit(index).unwrap();
         let prepared = unit.prepared_source().unwrap();
-        let map = unit.source_map().unwrap();
         let diagnostic = PreparedDiagnostic::new(
             "PAR999",
             Severity::Error,
@@ -275,7 +307,7 @@ mod tests {
             "prepared",
             span(4, 7),
         );
-        let rendered = RenderedDiagnostic::from_prepared(diagnostic, prepared, map).unwrap();
+        let rendered = RenderedDiagnostic::from_prepared(diagnostic, prepared).unwrap();
         let rendered_span = rendered.diagnostic().span;
         assert_eq!((rendered_span.start, rendered_span.end), (4, 7));
         assert_eq!((rendered_span.line, rendered_span.column), (2, 1));
@@ -284,38 +316,186 @@ mod tests {
     }
 
     #[test]
-    fn prepared_conversion_rejects_mismatched_map_and_foreign_spans() {
+    fn prepared_conversion_keeps_all_related_locations_and_deduplicates() {
+        let unit = crate::source::file::AnalysisUnitId::new(RunId::new(70), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", "abcdefghij").unwrap();
+        let mut builder =
+            SourceMapBuilder::new(unit, Arc::from("abc"), manager.files().to_vec()).unwrap();
+        let origins = [
+            builder
+                .push_origin(
+                    OriginKind::Direct,
+                    builder.source_span(root, 4, 5).unwrap(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            builder
+                .push_origin(
+                    OriginKind::Direct,
+                    builder.source_span(root, 6, 7).unwrap(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            builder
+                .push_origin(
+                    OriginKind::Direct,
+                    builder.source_span(root, 8, 9).unwrap(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+        ];
+        for (index, origin) in origins.iter().enumerate() {
+            builder
+                .push_segment(PreparedSpan::new(unit, index, index + 1), *origin)
+                .unwrap();
+        }
+        builder
+            .set_eof_anchor(builder.source_span(root, 10, 10).unwrap())
+            .unwrap();
+        let map = builder.build().unwrap();
+        let prepared = PreparedSource::new(unit, Arc::from("abc"), Arc::new(map), Vec::new());
+
+        let mut diagnostic = PreparedDiagnostic::new(
+            "PAR999",
+            Severity::Error,
+            DiagnosticKind::Syntax,
+            "prepared",
+            span(0, 3),
+        );
+        diagnostic
+            .related
+            .push(prepared.prepared_span(span(0, 2)).unwrap());
+        let rendered = RenderedDiagnostic::from_prepared(diagnostic, &prepared).unwrap();
+        let primary = prepared.map().source_span(root, 4, 5).unwrap();
+        assert_eq!(rendered.diagnostic().span.start, primary.start());
+        let related: Vec<_> = rendered.related().iter().map(|item| item.span).collect();
+        assert_eq!(
+            related,
+            vec![
+                prepared.map().source_span(root, 6, 7).unwrap(),
+                prepared.map().source_span(root, 8, 9).unwrap(),
+            ],
+            "deterministic related order"
+        );
+        assert!(!related.contains(&primary));
+    }
+
+    #[test]
+    fn prepared_conversion_rejects_a_mismatched_map_length() {
+        let unit = crate::source::file::AnalysisUnitId::new(RunId::new(71), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", "abc").unwrap();
+        let mut builder =
+            SourceMapBuilder::new(unit, Arc::from("ab"), manager.files().to_vec()).unwrap();
+        let origin = builder
+            .push_origin(
+                OriginKind::Direct,
+                builder.source_span(root, 0, 2).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 0, 2), origin)
+            .unwrap();
+        builder
+            .set_eof_anchor(builder.source_span(root, 2, 2).unwrap())
+            .unwrap();
+        let prepared = PreparedSource::new(
+            unit,
+            Arc::from("abc"),
+            Arc::new(builder.build().unwrap()),
+            Vec::new(),
+        );
+        let diagnostic = PreparedDiagnostic::new(
+            "PAR999",
+            Severity::Error,
+            DiagnosticKind::Syntax,
+            "x",
+            span(0, 1),
+        );
+        assert_eq!(
+            RenderedDiagnostic::from_prepared(diagnostic, &prepared).unwrap_err(),
+            SpanError::ForeignPreparedSource
+        );
+    }
+
+    #[test]
+    fn prepared_conversion_rejects_same_length_map_with_different_text() {
+        let unit = crate::source::file::AnalysisUnitId::new(RunId::new(72), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", "abc").unwrap();
+        let mut builder =
+            SourceMapBuilder::new(unit, Arc::from("abc"), manager.files().to_vec()).unwrap();
+        let origin = builder
+            .push_origin(
+                OriginKind::Direct,
+                builder.source_span(root, 0, 3).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 0, 3), origin)
+            .unwrap();
+        builder
+            .set_eof_anchor(builder.source_span(root, 3, 3).unwrap())
+            .unwrap();
+        let prepared = PreparedSource::new(
+            unit,
+            Arc::from("abd"),
+            Arc::new(builder.build().unwrap()),
+            Vec::new(),
+        );
+        let diagnostic = PreparedDiagnostic::new(
+            "PAR999",
+            Severity::Error,
+            DiagnosticKind::Syntax,
+            "x",
+            span(0, 1),
+        );
+        assert_eq!(
+            RenderedDiagnostic::from_prepared(diagnostic, &prepared).unwrap_err(),
+            SpanError::ForeignPreparedSource
+        );
+    }
+
+    #[test]
+    fn prepared_conversion_rejects_foreign_spans_without_a_map_argument() {
         let mut run = AnalysisRun::new().unwrap();
         let first = run.add_prepared_text("a.lsl", "abc").unwrap();
-        let second = run.add_prepared_text("b.lsl", "abc").unwrap();
         let first_unit = run.unit(first).unwrap();
-        let second_unit = run.unit(second).unwrap();
         let diagnostic = PreparedDiagnostic::new(
             "PAR999",
             Severity::Error,
             DiagnosticKind::Syntax,
             "prepared",
-            span(0, 1),
+            span(0, 10),
         );
         assert_eq!(
-            RenderedDiagnostic::from_prepared(
-                diagnostic.clone(),
-                first_unit.prepared_source().unwrap(),
-                second_unit.source_map().unwrap()
-            )
-            .unwrap_err(),
-            SpanError::ForeignPreparedSource
-        );
-        let mut foreign = diagnostic;
-        foreign.span = span(0, 10);
-        assert_eq!(
-            RenderedDiagnostic::from_prepared(
-                foreign,
-                first_unit.prepared_source().unwrap(),
-                first_unit.source_map().unwrap()
-            )
-            .unwrap_err(),
+            RenderedDiagnostic::from_prepared(diagnostic, first_unit.prepared_source().unwrap())
+                .unwrap_err(),
             SpanError::OutOfBounds
+        );
+        // `from_prepared` takes no map argument; the map is obtained from the
+        // PreparedSource, so a same-unit foreign map cannot be supplied.
+        assert_eq!(
+            first_unit.prepared_source().unwrap().map().unit(),
+            first_unit.id()
         );
     }
 
@@ -336,7 +516,9 @@ mod tests {
         diagnostic
             .related
             .push(RelatedLocation::new(primary, "same unit"));
-        let rendered = RenderedDiagnostic::from_preprocess(diagnostic, first_map).unwrap();
+        let rendered =
+            RenderedDiagnostic::from_preprocess(diagnostic, first_unit.prepared_source().unwrap())
+                .unwrap();
         assert_eq!(rendered.source(), first_unit.root().unwrap());
         assert_eq!(rendered.related().len(), 1);
 
@@ -348,7 +530,8 @@ mod tests {
             "foreign",
         ));
         assert_eq!(
-            RenderedDiagnostic::from_preprocess(foreign, first_map).unwrap_err(),
+            RenderedDiagnostic::from_preprocess(foreign, first_unit.prepared_source().unwrap())
+                .unwrap_err(),
             SpanError::ForeignAnalysisUnit
         );
     }

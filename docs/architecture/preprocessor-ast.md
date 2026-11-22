@@ -1230,19 +1230,19 @@ impl RenderedDiagnostic {
     pub fn source(&self) -> SourceId;
     pub fn related(&self) -> &[RelatedLocation];
 
-    /// Direct insertion; primary and every related span must belong to
-    /// `map.unit()`. No prepared-buffer resolution is involved.
+    /// Direct insertion; primary and every related span must belong to the
+    /// unit of `prepared`, whose map is used. No prepared-buffer resolution is
+    /// involved.
     pub fn from_preprocess(
         diagnostic: PreprocessDiagnostic,
-        map: &SourceMap,
+        prepared: &PreparedSource,
     ) -> Result<Self, SpanError>;
 
-    /// Explicit bridge then SourceMap resolution. `prepared.map()` and `map`
-    /// must be the same unit; a mismatch is `ForeignPreparedSource`.
+    /// Explicit bridge then SourceMap resolution. The map is obtained from the
+    /// `PreparedSource`; callers cannot supply a different map for this unit.
     pub fn from_prepared(
         diagnostic: PreparedDiagnostic,
         prepared: &PreparedSource,
-        map: &SourceMap,
     ) -> Result<Self, SpanError>;
 
     /// Pass-through for the plain-LSL compatibility path. The source is
@@ -1442,23 +1442,38 @@ code). `resolve_span` must:
    `Err(SpanError::ForeignPreparedSource)` before any geometry check.
 1. Split the prepared range at every segment boundary into 1..N contiguous
    prepared runs. A zero-length span yields one point run.
-2. Resolve every run through its segment origin to an original `SourceSpan`
-   (walking the origin chain to the nearest real user span for `Generated`,
-   `TokenPaste`, and `Stringify` links).
-3. Choose `primary` by origin priority: `Direct` > `MacroArgument` >
+2. Resolve every run through its **entire** origin chain, after validating
+   every chain node:
+   - a user-visible immediate origin (`Direct`, `Include`, `MacroInvocation`,
+     `MacroArgument`, `MacroDefinition`) maps by relative offsets only when the
+     segment and origin ranges have equal length; otherwise its `span` anchor is
+     used, without inventing an offset correspondence;
+   - `Generated` walks outward to the nearest user-visible origin;
+   - `TokenPaste`/`Stringify` use their invocation site when present, otherwise
+     continue outward;
+   - if no user-visible node exists, the nearest validated anchor is used.
+3. Collect related spans from **all** chain levels: ancestor spans and every
+   `invocation`/`definition` on the chain, plus the other prepared runs. The
+   immediate origin's own span is not duplicated when it is the primary.
+4. For point resolution, apply the same chain walk: relative mapping only for a
+   user-visible immediate origin with equal range lengths, otherwise the
+   corresponding user anchor point. `prepared_len` still resolves to the EOF
+   anchor.
+5. Choose `primary` by the resolved run priority: `Direct` > `MacroArgument` >
    `MacroDefinition` > `Include` > `TokenPaste`/`Stringify` > `Generated`.
    `MacroInvocation` shares the `MacroArgument` user-code tier (it is not used
    as a segment origin in Phase 1). Ties are broken by the leftmost prepared
    run. This ensures a diagnostic that starts in pasted text but continues into
    direct code still points at the user-written code when one exists.
-4. Put the remaining distinct spans into `related`, ordered left-to-right by
-   their prepared run and deduplicated by `(source, start, end)`.
-5. Never return a prepared coordinate or a synthetic file. If every run is
+6. Put the remaining distinct spans into `related`, ordered by prepared run and
+   chain level, deduplicated by `(source, start, end)`.
+7. Never return a prepared coordinate or a synthetic file. If every run is
    generated, every origin still points at a real anchor, so `primary` remains a
    real user location.
-6. If a segment's origin chain is broken, or the segment table has a hole or an
-   overlap, return `Err(SpanError::MapInvariant)`. A malformed map is never
-   repaired by pointing at the EOF anchor.
+8. If a segment's origin chain is broken or cyclic, or the segment table has a
+   hole or an overlap, return `Err(SpanError::MapInvariant)`; a foreign chain
+   node/span returns the corresponding `ForeignAnalysisUnit`. A malformed chain
+   is never partially resolved or repaired by pointing at the EOF anchor.
 
 Consequences:
 
@@ -1617,17 +1632,22 @@ Rules:
   directive, macro definition, or include site may have been removed from the
   prepared buffer. Resolving it through prepared coordinates would be
   impossible or wrong.
-- `PreprocessDiagnostic.primary` and every `RelatedLocation.span` must belong to
-  `map.unit()`. `RenderedDiagnostic::from_preprocess` checks this before
-  rendering and returns `ForeignAnalysisUnit` otherwise; it never falls back to
-  a same-index file of the local unit.
+- `RenderedDiagnostic::from_preprocess` obtains the map from the
+  `PreparedSource` and verifies the pair's unit, prepared length, and prepared
+  text. Primary and
+  related spans must belong to that unit; otherwise it returns
+  `ForeignAnalysisUnit` before rendering and never falls back to a same-index
+  file of the local unit.
 - `PreparedDiagnostic.span` is exactly the frozen `Span` produced by the lexer
   or an engine over the prepared buffer. It is bridged explicitly and then
   resolved. A diagnostic that crosses several segments follows the split and
   priority rules in §7.3.
-- `RenderedDiagnostic::from_prepared` requires
-  `prepared.unit() == map.unit()`. A mismatch returns
-  `ForeignPreparedSource` before the `Span` bridge is called.
+- `RenderedDiagnostic::from_prepared` obtains the map from the
+  `PreparedSource` and verifies the pair's unit, prepared length, and prepared
+  text before the `Span` bridge. There is no caller-supplied map parameter, so a same-unit map
+  built for a different prepared buffer cannot be substituted. Every related
+  span from the primary resolution and from each explicit related prepared range
+  is validated, deduplicated, and excluded when it equals the primary.
 - `Legacy` carries a `LegacyDiagnostic` created only by the producing unit's
   legacy engine. `RenderedDiagnostic::from_legacy` requires
   `legacy.unit() == unit.id()` (`ForeignAnalysisUnit` otherwise) and obtains the
@@ -2435,6 +2455,21 @@ implementations, not stages of the same code.
 - Deferred: directives, macros, includes, Firestorm switches, Lazy Lists, AST,
   AST semantics, and CLI behavior. `SourceFileKind::Included` exists but nothing
   loads it in Phase 1.
+
+#### Phase 1 review fixes
+
+- Resolution walks the complete parent chain: user-visible origins map by
+  relative offsets only when segment and origin lengths match; `Generated`
+  walks to the nearest user origin; `TokenPaste`/`Stringify` prefer invocation.
+  Ancestor spans and all `invocation`/`definition` locations become related.
+- `RenderedDiagnostic::from_prepared` carries `ResolvedSpan.related()` plus the
+  related results of every explicit prepared related range, validates them,
+  deduplicates, and excludes the primary.
+- `from_prepared` and `from_preprocess` take no map argument; both use the
+  `PreparedSource`'s map and verify unit, prepared length, and prepared text, so
+  same-unit foreign maps cannot be supplied. `legacy_diagnostic` is
+  crate-internal; the unused empty `AnalysisUnit::diagnostics()` accessor was
+  removed.
 
 ### Phase 2 — Preprocessor core
 
