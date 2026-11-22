@@ -92,7 +92,8 @@ the Legacy token analyzer and do not run in the AST engine yet.
   parameter names; SEM003 uses that list when arity matches.
 - Malformed top-level function headers with `)` + body contribute a recoverable
   signature through `Ast::recovered_functions`, without changing parser
-  diagnostics; first-definition selection stays source ordered.
+  diagnostics; first-definition selection stays source ordered and recovered
+  names participate in SEM021 namespace precedence before built-ins.
 - Switch case expressions are traversed in the switch body scope, so locals from
   earlier arms resolve exactly as Legacy ScopeModel sees them.
 - Legacy SEM001's top-level-call quirk in global initializers is modeled too:

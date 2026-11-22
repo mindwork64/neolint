@@ -990,3 +990,33 @@ fn recovered_first_definition_still_wins() {
     }));
     assert_parity(source);
 }
+
+#[test]
+fn sem021_uses_recovered_malformed_function_signatures() {
+    let source = "integer llOwnerSay(string) { return 1; } default { } state llOwnerSay { }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM021"
+            && diagnostic.message == "state 'llOwnerSay' conflicts with a function declared at 1:9"
+    }));
+    assert_parity(source);
+
+    let source = "integer phantom(string) { return 1; } default { } state phantom { }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM021"
+            && diagnostic.message == "state 'phantom' conflicts with a function declared at 1:9"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn sem021_recovered_function_preserves_first_definition_span() {
+    let source = "integer phantom(string) { return 1; } integer phantom(integer x) { return x; } default { } state phantom { }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM021"
+            && diagnostic.message == "state 'phantom' conflicts with a function declared at 1:9"
+    }));
+    assert_parity(source);
+}
