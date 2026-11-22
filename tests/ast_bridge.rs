@@ -104,6 +104,24 @@ fn visit_statement(statement: &Statement, visit: &mut impl FnMut(Span)) {
             visit(expression.span);
             visit_expression(&expression.expression, visit);
         }
+        StatementKind::Switch(switch) => {
+            visit(switch.span);
+            visit_expression(&switch.condition, visit);
+            for arm in &switch.arms {
+                visit(arm.span);
+                match &arm.label {
+                    neolint::ast::SwitchLabel::Case(expression) => {
+                        visit_expression(expression, visit)
+                    }
+                    neolint::ast::SwitchLabel::Default => {}
+                    neolint::ast::SwitchLabel::Error(error) => visit(error.span),
+                }
+                for statement in &arm.statements {
+                    visit_statement(statement, visit);
+                }
+            }
+        }
+        StatementKind::Break(break_statement) => visit(break_statement.span),
         StatementKind::Error(error) => visit(error.span),
     }
 }
@@ -172,6 +190,13 @@ fn visit_expression(expression: &Expression, visit: &mut impl FnMut(Span)) {
             visit(increment.span);
             visit(increment.operator_span);
             visit_expression(&increment.operand, visit);
+        }
+        ExpressionKind::LazyIndex(lazy) => {
+            visit(lazy.span);
+            visit_expression(&lazy.base, visit);
+            for index in &lazy.indices {
+                visit_expression(index, visit);
+            }
         }
         ExpressionKind::Error(error) => visit(error.span),
     }
@@ -322,6 +347,93 @@ fn included_ast_node_spans_resolve_to_included_sources() {
     let (tokens, lexical) = lex(prepared.text());
     assert!(lexical.is_empty());
     let (ast, diagnostics) = parse_ast(&tokens);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    resolve_spans(&run, index, &ast, true);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn every_firestorm_identity_ast_span_bridges_and_resolves() {
+    let source = r#"
+        default {
+            state_entry() {
+                switch (value) {
+                    case 1: first(); break;
+                    default: second();
+                }
+                myList[2] = "value";
+                integer extracted = (integer)myList[index];
+            }
+        }
+    "#;
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("root.lsl", source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let prepared = unit.prepared_source().unwrap();
+    let (tokens, lexical) = lex(prepared.text());
+    assert!(lexical.is_empty());
+    let (ast, diagnostics) = neolint::ast::parse_ast_with_options(
+        &tokens,
+        neolint::ast::AstParseOptions::lsl()
+            .with_switches_enabled(true)
+            .with_lazy_lists_enabled(true),
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    resolve_spans(&run, index, &ast, false);
+}
+
+#[test]
+fn every_macro_firestorm_ast_span_resolves_through_the_map() {
+    let source = "#define USE_SWITCHES\n#define USE_LAZY_LISTS\ndefault { state_entry() { switch (value) { case 1: break; } myList[2] = \"value\"; } }\n";
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run
+        .add_preprocessed_text("root.lsl", source, PreprocessSettings::firestorm())
+        .unwrap();
+    let unit = run.unit(index).unwrap();
+    let prepared = unit.prepared_source().unwrap();
+    assert!(prepared.switches_enabled() && prepared.lazy_lists_enabled());
+    let (tokens, lexical) = lex(prepared.text());
+    assert!(lexical.is_empty());
+    let (ast, diagnostics) = neolint::ast::parse_ast_with_options(
+        &tokens,
+        neolint::ast::AstParseOptions::from_flags(
+            prepared.switches_enabled(),
+            prepared.lazy_lists_enabled(),
+        ),
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    resolve_spans(&run, index, &ast, false);
+}
+
+#[test]
+fn every_included_firestorm_ast_span_resolves_to_included_sources() {
+    let directory = temporary_directory();
+    fs::write(
+        directory.join("header.lsl"),
+        "#define USE_SWITCHES\n#define USE_LAZY_LISTS\ninteger included = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("root.lsl"),
+        "#include \"header.lsl\"\ndefault { state_entry() { switch (value) { case 1: break; } myList[2] = \"value\"; } }\n",
+    )
+    .unwrap();
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run
+        .add_preprocessed_file(directory.join("root.lsl"), PreprocessSettings::firestorm())
+        .unwrap();
+    let unit = run.unit(index).unwrap();
+    let prepared = unit.prepared_source().unwrap();
+    assert!(prepared.switches_enabled() && prepared.lazy_lists_enabled());
+    let (tokens, lexical) = lex(prepared.text());
+    assert!(lexical.is_empty());
+    let (ast, diagnostics) = neolint::ast::parse_ast_with_options(
+        &tokens,
+        neolint::ast::AstParseOptions::from_flags(
+            prepared.switches_enabled(),
+            prepared.lazy_lists_enabled(),
+        ),
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     resolve_spans(&run, index, &ast, true);
     fs::remove_dir_all(directory).unwrap();
