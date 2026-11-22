@@ -2668,8 +2668,10 @@ included `SourceId`, include-site invocation, and parent include context.
 variadic parameters ending in `...` with `__VA_ARGS__`. Stringification uses the
 raw (unexpanded) argument, normalizes whitespace/comments, escapes `\` and `"`,
 and preserves an empty argument as `""`. Token pasting uses raw operands,
-supports chains and empty operands, validates that the result is exactly one
-preprocessing token, and diagnoses invalid pastes with `PRE038`. Pasted and
+supports chains and empty operands, joins only the adjacent boundary token of
+each sequence while preserving the argument's remaining tokens, validates that
+the result is exactly one preprocessing token, and diagnoses invalid pastes with
+`PRE038`. Pasted and
 stringified bytes use `OriginKind::TokenPaste`/`Stringify` with the invocation as
 primary and definition/invocation/argument parent context as related. Variadic
 fixed arguments are validated; `__VA_ARGS__` substitutes the remaining arguments

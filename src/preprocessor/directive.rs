@@ -4233,3 +4233,73 @@ mod phase3_builtin_nested_body_tests {
         assert!(prepared.text().contains('4'), "{}", prepared.text());
     }
 }
+
+#[cfg(test)]
+mod phase3_multitoken_paste_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessSettings;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(952), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessSettings::full())
+            .unwrap()
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|item| item.code)
+            .collect()
+    }
+
+    #[test]
+    fn paste_joins_only_adjacent_boundary_tokens() {
+        let prepared = run("#define CAT(a,b) a ## b\nCAT(foo bar, baz)\n");
+        assert!(
+            prepared.text().contains("foo barbaz"),
+            "{}",
+            prepared.text()
+        );
+        assert!(codes(&prepared).is_empty(), "{:?}", codes(&prepared));
+    }
+
+    #[test]
+    fn paste_preserves_remaining_tokens_on_both_sides() {
+        let prepared = run("#define CAT(a,b) a ## b\nCAT(foo bar, baz qux)\n");
+        assert!(
+            prepared.text().contains("foo barbaz qux"),
+            "{}",
+            prepared.text()
+        );
+        assert!(codes(&prepared).is_empty(), "{:?}", codes(&prepared));
+    }
+
+    #[test]
+    fn chained_paste_uses_the_last_boundary_before_each_operator() {
+        let prepared = run("#define CAT3(a,b,c) a ## b ## c\nCAT3(foo bar, baz qux, end)\n");
+        assert!(
+            prepared.text().contains("foo barbaz quxend"),
+            "{}",
+            prepared.text()
+        );
+        assert!(codes(&prepared).is_empty(), "{:?}", codes(&prepared));
+        let prepared = run("#define CAT3(a,b,c) a ## b ## c\nCAT3(foo, bar baz, end)\n");
+        assert!(
+            prepared.text().contains("foobar bazend"),
+            "{}",
+            prepared.text()
+        );
+        assert!(codes(&prepared).is_empty(), "{:?}", codes(&prepared));
+    }
+
+    #[test]
+    fn empty_paste_operands_keep_the_other_side_sequence() {
+        let prepared = run("#define CAT(a,b) a ## b\nCAT(, baz qux)\nCAT(foo bar, )\n");
+        assert!(prepared.text().contains("baz qux"), "{}", prepared.text());
+        assert!(prepared.text().contains("foo bar"), "{}", prepared.text());
+        assert!(codes(&prepared).is_empty(), "{:?}", codes(&prepared));
+    }
+}

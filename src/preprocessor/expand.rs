@@ -141,6 +141,19 @@ enum Unit {
     VarArgs,
     Stringify(String),
     Paste(String),
+    RawItem(WorkItem),
+}
+
+impl Unit {
+    fn is_trivia(&self) -> bool {
+        match self {
+            Unit::Whitespace(_) => true,
+            Unit::RawItem(item) => {
+                matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Returns, for each actual argument, whether it is used in a position that
@@ -201,6 +214,26 @@ fn argument_expansion_needs(definition: &MacroDefinition, arg_count: usize) -> V
     needs
 }
 
+fn split_raw_last(items: &[WorkItem]) -> (Vec<WorkItem>, String) {
+    let Some(index) = items
+        .iter()
+        .rposition(|item| !matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment))
+    else {
+        return (Vec::new(), String::new());
+    };
+    (items[..index].to_vec(), items[index].text.clone())
+}
+
+fn split_raw_first(items: &[WorkItem]) -> (String, Vec<WorkItem>) {
+    let Some(index) = items
+        .iter()
+        .position(|item| !matches!(item.kind, PieceKind::Whitespace | PieceKind::Comment))
+    else {
+        return (String::new(), Vec::new());
+    };
+    (items[index].text.clone(), items[index + 1..].to_vec())
+}
+
 fn stringify_items(items: &[WorkItem]) -> String {
     let mut output = String::new();
     let mut pending_space = false;
@@ -227,35 +260,6 @@ fn stringify_varargs(args: &[Vec<WorkItem>]) -> String {
 
 fn escape_string(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn paste_text(
-    unit: &Unit,
-    _definition: &MacroDefinition,
-    raw_args: &[Vec<WorkItem>],
-    fixed: usize,
-) -> String {
-    match unit {
-        Unit::Literal(piece) => piece.text.clone(),
-        Unit::Whitespace(_) => String::new(),
-        Unit::Param(position) => raw_args
-            .get(*position)
-            .map(|arg| arg.iter().map(|item| item.text.as_str()).collect())
-            .unwrap_or_default(),
-        Unit::VarArgs => raw_args
-            .get(fixed..)
-            .unwrap_or_default()
-            .iter()
-            .map(|arg| {
-                arg.iter()
-                    .map(|item| item.text.as_str())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Unit::Stringify(text) => format!("\"{}\"", escape_string(text)),
-        Unit::Paste(text) => text.clone(),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -657,7 +661,7 @@ impl<'a> Expander<'a> {
                 continue;
             }
             if piece.text == "##" {
-                while matches!(units.last(), Some(Unit::Whitespace(_))) {
+                while units.last().is_some_and(Unit::is_trivia) {
                     units.pop();
                 }
                 let Some(left) = units.pop() else {
@@ -685,10 +689,10 @@ impl<'a> Expander<'a> {
                     );
                     return None;
                 }
-                let right =
-                    self.paste_operand(&pieces[index], definition, raw_args, fixed, call_span)?;
-                let left_text = paste_text(&left, definition, raw_args, fixed);
-                let right_text = paste_text(&right, definition, raw_args, fixed);
+                let (left_prefix, left_text) =
+                    self.paste_left(left, definition, raw_args, fixed, call_span)?;
+                let (right_text, right_suffix) =
+                    self.paste_right(&pieces[index], definition, raw_args, fixed, call_span)?;
                 let pasted = format!("{left_text}{right_text}");
                 if !pasted.is_empty() {
                     let tokens = tokenize_generated(&pasted, call_span);
@@ -710,7 +714,11 @@ impl<'a> Expander<'a> {
                         return None;
                     }
                 }
-                units.push(Unit::Paste(pasted));
+                units.extend(left_prefix);
+                if !pasted.is_empty() {
+                    units.push(Unit::Paste(pasted));
+                }
+                units.extend(right_suffix);
                 index += 1;
                 continue;
             }
@@ -777,6 +785,14 @@ impl<'a> Expander<'a> {
                         origin: WorkOrigin::Node(node),
                     });
                 }
+                Unit::RawItem(item) => {
+                    let context = Context {
+                        parent: invocation_parent,
+                        invocation: Some(call_span),
+                        definition: Some(definition.definition_span),
+                    };
+                    replacement.push(self.convert_direct_item(&item, context));
+                }
                 Unit::Paste(text) => {
                     if text.is_empty() {
                         continue;
@@ -830,21 +846,53 @@ impl<'a> Expander<'a> {
         }
     }
 
-    fn paste_operand(
+    fn paste_left(
+        &mut self,
+        unit: Unit,
+        _definition: &MacroDefinition,
+        raw_args: &[Vec<WorkItem>],
+        fixed: usize,
+        call_span: RawSpan,
+    ) -> Option<(Vec<Unit>, String)> {
+        let split = |items: &[WorkItem]| split_raw_last(items);
+        match unit {
+            Unit::Literal(piece) => Some((Vec::new(), piece.text)),
+            Unit::Whitespace(_) => Some((Vec::new(), String::new())),
+            Unit::Param(position) => {
+                let items = raw_args.get(position)?;
+                let (prefix, text) = split(items);
+                Some((prefix.into_iter().map(Unit::RawItem).collect(), text))
+            }
+            Unit::VarArgs => {
+                let items = self.raw_varargs(raw_args, fixed, call_span);
+                let (prefix, text) = split(&items);
+                Some((prefix.into_iter().map(Unit::RawItem).collect(), text))
+            }
+            Unit::Stringify(text) => Some((Vec::new(), format!("\"{}\"", escape_string(&text)))),
+            Unit::Paste(text) => Some((Vec::new(), text)),
+            Unit::RawItem(item) => Some((Vec::new(), item.text)),
+        }
+    }
+
+    fn paste_right(
         &mut self,
         piece: &Piece,
         definition: &MacroDefinition,
         raw_args: &[Vec<WorkItem>],
         fixed: usize,
         call_span: RawSpan,
-    ) -> Option<Unit> {
+    ) -> Option<(String, Vec<Unit>)> {
         if piece.kind == PieceKind::Identifier {
             if let Some(params) = &definition.params {
                 if let Some(position) = params.iter().position(|param| param == &piece.text) {
-                    return Some(Unit::Param(position));
+                    let items = raw_args.get(position)?;
+                    let (text, suffix) = split_raw_first(items);
+                    return Some((text, suffix.into_iter().map(Unit::RawItem).collect()));
                 }
                 if piece.text == "__VA_ARGS__" && definition.variadic {
-                    return Some(Unit::VarArgs);
+                    let items = self.raw_varargs(raw_args, fixed, call_span);
+                    let (text, suffix) = split_raw_first(&items);
+                    return Some((text, suffix.into_iter().map(Unit::RawItem).collect()));
                 }
             }
         }
@@ -856,8 +904,28 @@ impl<'a> Expander<'a> {
             );
             return None;
         }
-        let _ = (fixed, raw_args);
-        Some(Unit::Literal(piece.clone()))
+        Some((piece.text.clone(), Vec::new()))
+    }
+
+    fn raw_varargs(
+        &mut self,
+        raw_args: &[Vec<WorkItem>],
+        fixed: usize,
+        call_span: RawSpan,
+    ) -> Vec<WorkItem> {
+        let mut items = Vec::new();
+        for (index, arg) in raw_args.get(fixed..).unwrap_or_default().iter().enumerate() {
+            if index > 0 {
+                items.push(WorkItem {
+                    text: ",".to_owned(),
+                    kind: PieceKind::Punct,
+                    span: call_span,
+                    origin: WorkOrigin::Direct,
+                });
+            }
+            items.extend(arg.iter().cloned());
+        }
+        items
     }
 
     fn varargs_items(
