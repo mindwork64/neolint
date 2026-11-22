@@ -163,6 +163,8 @@ fn focused_malformed_examples_keep_parity() {
         "state running { state_entry() { } }",
         "void function() { } default { }",
         "default { bad( { } state_entry() { } }",
+        "default { state_entry(integer) { integer local; integer local; } state_entry() { } }",
+        "integer phantom()\ndefault { }\nstate phantom { }",
     ] {
         let differences = parity_differences(source);
         assert!(

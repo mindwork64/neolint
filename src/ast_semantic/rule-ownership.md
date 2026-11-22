@@ -51,3 +51,9 @@ AST engine yet.
   declarator for SEM021 namespace collision checks.
 - SEM020/SEM021 skip states/events whose body braces were not structurally
   closed, matching the Legacy brace-matching oracle.
+- SEM021 registers a user function only when `FunctionDeclaration::body` is
+  present, matching Legacy `collect_user_functions` requiring `{` after the
+  parameter list.
+- Malformed event parameter lists preserve a recoverable `EventHandler` with its
+  brace-complete body for AST scopes/SEM020/SEM007. Syntax findings inside that
+  skipped body are suppressed so Legacy parser diagnostic parity is unchanged.

@@ -140,6 +140,8 @@ fn focused_structural_rule_parity() {
         "default { } state llOwnerSay { }",
         "default { } state llGodLikeRezObject { }",
         "default state_entry() { }",
+        "integer phantom()\ndefault { }\nstate phantom { }",
+        "default { state_entry(integer) { integer local; integer local; } state_entry() { } }",
     ] {
         assert_parity(source);
     }
@@ -426,4 +428,57 @@ fn deeply_nested_parser_asts_do_not_overflow_semantic_traversal() {
     assert!(!diagnostics
         .iter()
         .any(|diagnostic| MIGRATED.contains(&diagnostic.code)));
+}
+
+#[test]
+fn sem021_ignores_function_declaration_without_body() {
+    let source = "integer phantom()\ndefault { }\nstate phantom { }";
+    let diagnostics = semantic(source);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM021"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn malformed_event_parameters_keep_event_body_semantics() {
+    let source =
+        "default { state_entry(integer) { integer local; integer local; } state_entry() { } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    let state = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::State(state) = item {
+                Some(state)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(state.events.len(), 2);
+    assert!(state.events[0].body.is_some());
+
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM007")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM020")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert_parity(source);
 }

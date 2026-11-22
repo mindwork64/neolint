@@ -22,14 +22,19 @@ pub(crate) fn check(ast: &Ast, scopes: &ScopeTree) -> Vec<Diagnostic> {
     let mut functions: HashMap<&str, Span> = HashMap::new();
     if let Some(root) = root {
         for symbol in &root.symbols {
-            match symbol.kind {
-                SymbolKind::GlobalVariable => {
-                    globals.entry(symbol.name.as_str()).or_insert(symbol.span);
-                }
-                SymbolKind::Function => {
-                    functions.entry(symbol.name.as_str()).or_insert(symbol.span);
-                }
-                SymbolKind::Parameter | SymbolKind::Local => {}
+            if symbol.kind == SymbolKind::GlobalVariable {
+                globals.entry(symbol.name.as_str()).or_insert(symbol.span);
+            }
+        }
+    }
+    // Legacy collect_user_functions only treats a declaration as a user
+    // function when its parameter list is followed by a body.
+    for item in &ast.items {
+        if let TopLevel::Function(function) = item {
+            if function.body.is_some() && !function.name.is_empty() {
+                functions
+                    .entry(function.name.as_str())
+                    .or_insert(function.name_span);
             }
         }
     }

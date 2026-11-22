@@ -32,6 +32,7 @@ struct Parser<'a> {
     recursion_reported: bool,
     options: AstParseOptions,
     switch_depth: usize,
+    suppress_diagnostics: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -48,6 +49,7 @@ impl<'a> Parser<'a> {
             recursion_reported: false,
             options,
             switch_depth: 0,
+            suppress_diagnostics: 0,
         }
     }
 
@@ -321,25 +323,43 @@ impl<'a> Parser<'a> {
                     let event_start = self.current;
                     let event_name_index = self.current;
                     self.advance();
-                    let header_ok =
-                        if self.expect(TokenKind::LParen, "expected '(' after event name") {
-                            let (parameters, ok) = self.parse_parameters();
-                            if ok {
-                                let body = self.parse_block();
+                    if !self.expect(TokenKind::LParen, "expected '(' after event name") {
+                        self.synchronize_event();
+                    } else {
+                        let (parameters, ok) = self.parse_parameters();
+                        if ok {
+                            let body = self.parse_block();
+                            events.push(EventHandler {
+                                span: self.span_from(event_start, self.current),
+                                name: self.tokens[event_name_index].lexeme.clone(),
+                                name_span: self.tokens[event_name_index].span,
+                                parameters,
+                                body,
+                            });
+                        } else if let Some(close) = self.event_parameter_close_before_body() {
+                            while self.current <= close {
+                                self.advance();
+                            }
+                            // Keep a recoverable event shape for the AST semantic
+                            // engine without adding syntax findings the Legacy
+                            // parser would have skipped with synchronize_event.
+                            self.suppress_diagnostics += 1;
+                            let body = self.parse_block();
+                            self.suppress_diagnostics -= 1;
+                            if let Some(body) = body {
                                 events.push(EventHandler {
                                     span: self.span_from(event_start, self.current),
                                     name: self.tokens[event_name_index].lexeme.clone(),
                                     name_span: self.tokens[event_name_index].span,
                                     parameters,
-                                    body,
+                                    body: Some(body),
                                 });
+                            } else {
+                                self.synchronize_event();
                             }
-                            ok
                         } else {
-                            false
-                        };
-                    if !header_ok {
-                        self.synchronize_event();
+                            self.synchronize_event();
+                        }
                     }
                 }
                 if self.current == before {
@@ -1630,6 +1650,9 @@ impl<'a> Parser<'a> {
     }
 
     fn push_error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
+        if self.suppress_diagnostics > 0 {
+            return;
+        }
         self.diagnostics.push(Diagnostic {
             code,
             severity: Severity::Error,
@@ -1724,6 +1747,38 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    fn event_parameter_close_before_body(&self) -> Option<usize> {
+        let mut index = self.current;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while let Some(token) = self.tokens.get(index) {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if token.kind == TokenKind::RParen {
+                    return self
+                        .tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::LBrace)
+                        .then_some(index);
+                }
+                if matches!(
+                    token.kind,
+                    TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semicolon
+                ) {
+                    return None;
+                }
+            }
+            match token.kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            index += 1;
+        }
+        None
     }
 
     fn synchronize_event(&mut self) {
