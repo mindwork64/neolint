@@ -45,8 +45,9 @@ revision of this document.
    and never performs semantic analysis.
 2. **The preprocessor runs before the existing lexer.** There is no second
    tokenization model for directives.
-3. **Both engines receive the same `PreparedSource`/token stream.** No engine
-   preprocesses on its own.
+3. **In prepared mode, both engines receive the same `PreparedSource`/token
+   stream.** No engine preprocesses on its own. Plain-LSL Legacy mode is the
+   explicit no-map/no-PreparedSource compatibility path.
 4. **The legacy API is preserved for the transition period.** `lex`, `parse`,
    `analyze`, `analyze_with_syntax_diagnostics`, `Diagnostic`, `Span`, `Token`,
    and `TokenKind` keep their signatures and meanings.
@@ -175,6 +176,7 @@ Consequences that shape the new architecture:
               |                   |   RunId + deterministic unit index
               +---------+---------+
                         | LoadedSource: unit-scoped SourceId + text + kind
+                        | (plain-LSL Legacy mode bypasses the next two stages)
                         v
               +-------------------+
               |   Preprocessor    |  (identity in Phase 1; core in Phases 2–3)
@@ -232,12 +234,13 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
   and, only for a plain-LSL single-root unit, `legacy_root()`.
 - It owns:
   - its own `SourceId` namespace, where `SourceId` includes the unit id and a
-    local file index (root gets local index 0);
-  - its own macro table;
-  - its own conditional stack;
-  - its own `SourceMap`;
-  - its own include graph and include stack;
-  - its own diagnostics and its own prepared buffer.
+    local file index (root gets local file index 0);
+  - its own `SourceManager` and root source;
+  - its own macro table, conditional stack, include graph, and include stack;
+  - its own diagnostics;
+  - an optional prepared pipeline: `PreparedSource` and its `SourceMap` are
+    created together when preprocessing/prepared-coordinate analysis is active.
+    Plain-LSL Legacy mode has neither and renders against `legacy_root()`.
 - It is created by the CLI/pipeline for each collected input, lives until its
   rendered results are produced, and is then dropped. No state survives.
 - It never reads mutable state from another unit. Only immutable file
@@ -260,9 +263,9 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
 - Scans raw text for directives, comments, and string/character boundaries.
 - Maintains the macro table, conditional stack, and include expansion **for one
   AnalysisUnit**.
-- Produces exactly one prepared text buffer per unit.
-- Produces the unit's `SourceMap`, mapping `PreparedSpan` ranges to original
-  code.
+- When selected for a unit, produces exactly one prepared text buffer and
+  its paired `SourceMap`, mapping `PreparedSpan` ranges to original code. The
+  plain-LSL Legacy no-map path does not invoke the preprocessor.
 - Emits `PRE` diagnostics for directive and include problems.
 - Does not know about tokens, AST nodes, parser recovery, or semantic rules.
 - Does not perform semantic type checking or built-in argument checks.
@@ -275,8 +278,9 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
 - In identity mode, `text` is byte-identical to the input file.
 - Is **not** a `SourceFile` and has no `SourceId`. Its bytes are addressed only
   by `PreparedSpan` (§7.1).
-- Carries its `AnalysisUnitId`. Exactly one PreparedSource exists per unit, so
-  the unit id is the prepared-source identity.
+- Carries its `AnalysisUnitId`. At most one `PreparedSource` exists per unit:
+  it is present with its `SourceMap` in prepared/preprocessor mode and absent in
+  the plain-LSL Legacy no-map path. The unit id is the prepared-source identity.
 - Provides the **single** public, checked bridge
   `prepared_span(Span) -> Result<PreparedSpan, SpanError>` (stamping the unit)
   plus `eof_span() -> PreparedSpan`, and exposes `unit`, `prepared_len`, `text`,
@@ -424,7 +428,8 @@ Invariants:
 
 ### 4.4 Preprocessor → Lexer
 
-Input: exactly one `PreparedSource`. Output: one token stream.
+Input: exactly one `PreparedSource` in the prepared pipeline. Output: one
+prepared token stream. The separate Legacy no-map path lexes the root directly.
 
 Invariants:
 
@@ -659,26 +664,31 @@ unit.
 
 1. **Unit creation.** Create the opaque `AnalysisUnit` handle with its assigned
    `AnalysisUnitId`; allocate the `SourceId` namespace (ids include the unit),
-   macro table, conditional stack, include graph, and `SourceMap`. Exactly one
-   `PreparedSource` will belong to this unit. Only the pipeline constructs the
-   handle.
+   macro table, conditional stack, and include graph. Only the pipeline
+   constructs the handle. A `SourceMap`/`PreparedSource` pair is created only
+   if this unit enters the prepared/preprocessor path; Legacy mode creates
+   neither.
 2. **Root load.** Read the root as UTF-8 and register it as local file index 0,
    producing a unit-owned `SourceId`. Unreadable/invalid root is an input error
    for this unit (exit 2 contribution) and the unit ends.
-3. **Preparation.** Preprocess the root:
-   - identity mode: copy text unchanged, build a trivial map and EOF anchor;
-   - Firestorm mode: scan directives, expand macros, resolve includes in textual
-     order, build the full map.
+3. **Preparation.** Select the coordinate path:
+   - plain-LSL Legacy mode (preprocessing disabled): keep the loaded root as-is;
+     create no `PreparedSource` and no `SourceMap`;
+   - identity/prepared mode: copy the root text byte-for-byte into one
+     `PreparedSource`, build the identity map and EOF anchor;
+   - later Firestorm mode: scan directives, expand macros, resolve includes in
+     textual order, and build the full map.
    Origin records are inserted only through the map builder, which validates
    `span`/`invocation`/`definition` against the unit and rejects foreign spans
    before they enter the arena (§7.5.1). Preprocessor problems become
    `PreprocessDiagnostic` values with original `SourceSpan`s. Failures inside
-   preparation are diagnostics, not Rust errors,
-   except for limits that make further analysis unsafe (still diagnostics; the
-   unit continues with a bounded, truncated prepared stream).
-4. **Lexing.** Tokenize the prepared text. Lexical diagnostics are the frozen
-   `Diagnostic` shape with a prepared `Span`. An empty prepared buffer yields
-   only `Eof` at prepared offset 0.
+   preparation are diagnostics, not Rust errors, except for limits that make
+   further analysis unsafe (still diagnostics; the unit continues with a bounded
+   prepared stream).
+4. **Lexing.** Tokenize the root text directly in Legacy mode, or the
+   `PreparedSource` text in prepared mode. Legacy findings retain original
+   coordinates; prepared-path lexer/engine findings use prepared coordinates.
+   An empty input yields only `Eof` at byte offset 0 in either path.
 5. **Engine selection.**
    - `legacy` (default in Phases 1–5): `parse_legacy` →
      `analyze_with_syntax_diagnostics`; in the plain-LSL path the unit tags each
@@ -700,9 +710,10 @@ unit.
    - `Legacy`: `RenderedDiagnostic::from_legacy(legacy, unit)` verifies the tag
      and obtains the source only from `unit.legacy_root()`; `Diagnostic.span` is
      copied unchanged and no map is consulted.
-   A zero-length span at `Eof` is obtained from
+   A zero-length prepared span at `Eof` is obtained from
    `PreparedSource::eof_span()` and resolved through `resolve_point`; it uses the
-   map's EOF anchor of the same unit (§7.3).
+   same unit's map EOF anchor (§7.3). Legacy EOF diagnostics bypass this path
+   and preserve their original `Diagnostic.span` unchanged.
    A `SpanError` follows §7.3.1: internal diagnostic, drop the affected finding,
    continue; never panic and never substitute the anchor.
 8. **Unit merge.** Apply the engine-specific deduplication policy and sort by
@@ -710,11 +721,13 @@ unit.
    `RunId` is excluded from ordering. Legacy-only single-file output keeps its
    current order.
 
-An empty source file is a valid unit: the prepared buffer is empty, the lexer
-emits only `Eof`, the legacy parser reports `PAR013`, and the `Eof` diagnostic
-resolves to the root file at offset 0 (line 1, column 1). Conditional
-compilation that removes all user code behaves the same way, except that the EOF
-anchor comes from the last directive/anchor location (§7.3).
+An empty source file is a valid unit in either path. The lexer emits only
+`Eof` and the legacy parser reports `PAR013`. In plain-LSL Legacy mode the
+original `Diagnostic.span` is passed through unchanged; in prepared mode the
+zero-length `PreparedSpan` resolves through the map to the root at offset 0
+(line 1, column 1). In later conditional-preprocessor mode, removing all code
+from a non-empty root uses the map's real EOF anchor from the last directive or
+root start (§7.3).
 
 ---
 
@@ -729,13 +742,13 @@ An **AnalysisUnit** is the complete, independent analysis of one root source:
   within the invocation and `RunId` is unique to that invocation;
 - its own `SourceId` namespace, where ids embed the unit id and a local file
   index (root gets index 0);
-- exactly one `PreparedSource`, whose `PreparedSpan` values carry the unit id;
-- its own macro table;
-- its own conditional stack;
-- its own `SourceMap`;
-- its own include graph and include stack;
+- its own `SourceManager` and root source;
+- its own macro table, conditional stack, include graph, and include stack;
+- either no prepared pipeline (plain-LSL Legacy no-map mode), or exactly one
+  `PreparedSource`/`SourceMap` pair. Every `PreparedSpan` in that pair carries
+  the unit id;
 - its own diagnostics;
-- its own prepared buffer and token stream.
+- a prepared buffer/token stream only when the prepared pipeline is active.
 
 One CLI invocation may create any number of AnalysisUnits: one per collected
 file, directory entry, or stdin input. A unit is **not** a CLI invocation-wide
@@ -748,8 +761,9 @@ EOF anchor from one unit is rejected by another unit's map with
 - The unit is created when its root starts loading and is dropped after its
   diagnostics have been resolved and merged into the CLI-wide result.
 - The unit handle is opaque and pipeline-constructed. It exposes its id and, for
-  a plain-LSL single-root unit only, `legacy_root()`; there is no public
-  constructor and no way to attach a different unit's root.
+  a plain-LSL single-root Legacy unit only, `legacy_root()`; there is no public
+  constructor and no way to attach a different unit's root. A prepared unit has
+  its `PreparedSource`/`SourceMap` pair instead and does not expose `legacy_root()`.
 - All preprocessing state is unit-local. `#define`, `#undef`, conditional-stack
   entries, include guards, and `#pragma once` state never cross unit boundaries.
 - Reason: the existing CLI contract analyzes each collected file on its own.
@@ -900,7 +914,8 @@ impl AnalysisUnitId {
 /// is no public constructor, so a caller cannot fabricate a unit-to-source
 /// association.
 pub struct AnalysisUnit {
-    // private: id, root, mode, macro table, map/prepared source, ...
+    // private: id, source manager/root, mode, preprocessor state,
+    // diagnostics, and prepared: Option<PreparedSource>
 }
 
 impl AnalysisUnit {
@@ -938,9 +953,10 @@ pub struct SourceFile {
 }
 
 /// A range in the Prepared Buffer. Offsets are zero-based UTF-8 bytes.
-/// Fields are private. There is exactly one PreparedSource per AnalysisUnit,
-/// so the unit id is the prepared-source identity; a span from another unit is
-/// detected and rejected by the owning SourceMap.
+/// Fields are private. When an AnalysisUnit has a prepared pipeline, it has
+/// exactly one PreparedSource, so the unit id is the prepared-source identity;
+/// a span from another unit is rejected by the owning SourceMap. Legacy units
+/// do not construct this type.
 pub struct PreparedSpan {
     unit: AnalysisUnitId,
     start: usize,
@@ -1118,7 +1134,7 @@ impl SourceMap {
 
 /// The single prepared buffer handed to the lexer for one AnalysisUnit.
 pub struct PreparedSource {
-    unit: AnalysisUnitId,                // one PreparedSource per unit
+    unit: AnalysisUnitId,                // one per prepared AnalysisUnit
     text: Arc<str>,                      // shared with the map for validation
     pub preprocess_diagnostics: Vec<PreprocessDiagnostic>,
     map: Arc<SourceMap>,                 // same unit by construction
@@ -2035,11 +2051,12 @@ Requirements:
    - **TEST H:** a `LegacyDiagnostic` tagged with unit B, passed with unit A's
      handle, returns `ForeignAnalysisUnit`; no A root is attached and the
      diagnostic is not rendered.
-   - **TEST I:** the Legacy path has no `SourceId` parameter. A preprocessed
-     unit exposes `legacy_root() == None` and `from_legacy` returns
-     `NotLegacyUnit`; a plain unit's `legacy_root()` is its root source, never an
-     included file (`SourceFileKind::Included` cannot be obtained as a legacy
-     root).
+   - **TEST I:** the Legacy path has no `SourceId` parameter. A plain-LSL
+     Legacy `AnalysisUnit` has no `PreparedSource`/`SourceMap`, and its
+     `legacy_root()` is its root source, never an included file
+     (`SourceFileKind::Included` cannot be obtained as a legacy root). A
+     prepared unit has exactly one `PreparedSource`/`SourceMap` pair,
+     `legacy_root() == None`, and `from_legacy` returns `NotLegacyUnit`.
    - **TEST J:** a valid Legacy conversion from unit A returns A's root and
      preserves `Diagnostic.span` byte-for-byte, including line, column,
      `end_line`, `end_column`, code, message, severity, and diagnostic order;
@@ -2293,9 +2310,10 @@ implementations, not stages of the same code.
     `PreparedDiagnostic`, `UnifiedDiagnosticInput`, `RenderedDiagnostic`) and
     their resolution rules, even though real `PRE` findings start in Phase 2;
   - `AnalysisUnit` opaque handle with a `RunId`-scoped `AnalysisUnitId`,
-    `legacy_root()`, a unit-scoped `SourceId` namespace, exactly one
-    `PreparedSource`, a map, diagnostics, and preprocessor state placeholders
-    (macro table/conditional stack are empty until Phase 2);
+    `legacy_root()` for plain-LSL no-map units, a unit-scoped `SourceId`
+    namespace, diagnostics and preprocessor state placeholders; prepared units
+    own exactly one `PreparedSource`/`SourceMap` pair, while Legacy units own
+    neither;
   - origin insertion/traversal ownership checks in the `SourceMap` builder, with
     no public `SourceOrigin` constructor;
   - per-file line index with lexer-compatible columns;
@@ -2309,6 +2327,8 @@ implementations, not stages of the same code.
   `src/diagnostic/resolve.rs`, `src/pipeline.rs` (unit orchestration).
 - **Dependencies:** Phase 0/0.1/0.2/0.3 contracts.
 - **Acceptance criteria:**
+  - plain-LSL Legacy units contain no `PreparedSource` or `SourceMap`; prepared
+    units contain exactly one matching pair, and the two modes cannot be mixed;
   - identity prepared text equals input bytes for all fixtures;
   - map covers `[0, prepared_len)`, segments sorted and non-overlapping;
   - `resolve_span`/`resolve_point` return `Ok` for every well-formed range of
@@ -2538,8 +2558,8 @@ src/
                           with foreign-identity rejection
     manager.rs            per-unit loading, path policy, cycles, limits
     unit.rs               RunId/AnalysisUnitId assignment, opaque AnalysisUnit
-                          handle with legacy_root(), source namespace, exactly
-                          one PreparedSource, map, diagnostics
+                          handle with legacy_root(), source namespace, optional
+                          PreparedSource/SourceMap pair, diagnostics
 
   preprocessor/
     mod.rs                prepare(), PreprocessConfig, PreparedSource with
@@ -2730,8 +2750,9 @@ document):
 - **OriginId:** map-local handle to one `SourceOrigin`; carries the owning unit
   and is rejected by another map.
 - **AnalysisUnit:** the independent analysis of one root file or stdin stream;
-  owns its `AnalysisUnitId`, `SourceId` namespace, exactly one `PreparedSource`,
-  macro table, conditional stack, include graph, `SourceMap`, and diagnostics.
+  owns its `AnalysisUnitId`, `SourceId` namespace, source manager, and
+  diagnostics. Prepared/preprocessor mode has one `PreparedSource`/`SourceMap`
+  pair; plain-LSL Legacy mode has neither and uses `legacy_root()`.
 - **ForeignAnalysisUnit:** `SpanError` for a `SourceSpan`/`RelatedLocation`/
   EOF anchor/origin field/origin id used against another unit's (or another
   run's) map.
