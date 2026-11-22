@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 const MIGRATED: &[&str] = &[
     "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM008", "SEM009",
-    "SEM010", "SEM011", "SEM020", "SEM021",
+    "SEM010", "SEM011", "SEM014", "SEM015", "SEM016", "SEM017", "SEM018", "SEM019", "SEM020",
+    "SEM021",
 ];
 
 type Normalized = (
@@ -98,7 +99,7 @@ fn visit_lsl(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn corpus_thirteen_migrated_rules_match_legacy_exactly() {
+fn corpus_nineteen_migrated_rules_match_legacy_exactly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut files = Vec::new();
     visit_lsl(&root, &mut files);
@@ -1514,4 +1515,246 @@ fn malformed_return_preserves_recovered_label_visibility() {
     assert_eq!(return_statement.recovered_labels.len(), 1);
     assert_eq!(return_statement.recovered_labels[0].label.name, "done");
     assert!(return_statement.recovered_jumps.is_empty());
+}
+
+#[test]
+fn focused_expression_rule_parity() {
+    for source in [
+        "integer f() { return (integer)<1, 2, 3>; } default { }",
+        "integer f() { return (vector)1; } default { }",
+        "key f() { return (key)1; } default { }",
+        "list f() { return (list)5; } default { }",
+        "string f() { return (string)5; } default { }",
+        "integer value = (integer)<1, 2, 3>; default { }",
+        "integer x = \"s\"; float y = 1; key k = \"s\"; integer a = 1, b = \"s\", c = 2.0; default { }",
+        "integer g; default { state_entry() { integer x = \"s\"; float y = 1; key k = \"s\"; integer a = 1, b = \"s\", c = 2.0; } }",
+        "integer x; default { state_entry() { x = \"s\"; integer y; y = 1.0; (x) = \"s\"; } }",
+        "integer i; float f; default { state_entry() { i += \"s\"; f += 1; i += 1.0; } }",
+        "vector v; rotation r; integer i; default { state_entry() { v.x = 1; v.x = \"s\"; v.x += \"s\"; v.w = 1; r.s = 1; r.w = 1; i.x = 1; (v.z) = 2; ((v.z)) += 1; } }",
+        "vector v; rotation r; integer i; default { state_entry() { float a = v.w; float b = v.x; float c = r.s; float d = r.w; float e = i.x; } }",
+        "vector v; default { state_entry() { v.x = v.w; v.w = 1; (v.x) = v.w; } }",
+        "default { custom_event() { integer x = \"s\"; x = 1.0; } }",
+        "integer f(integer p) { integer x = p; x = \"s\"; return (integer)p; } default { }",
+        "integer value = (integer)((string)1); default { }",
+        "integer x; default { state_entry() { if ((x = \"s\")) { } for (x = \"s\"; x; x = \"s\") { } } }",
+        "list values = [1, (integer)<1,2,3>]; default { }",
+        "vector values = <(integer)<1,2,3>, 1, 2>; default { }",
+        "integer x = y; integer y = 1; default { }",
+        "integer x = x; default { }",
+        "integer x = custom_call(); default { }",
+        "integer x = ; default { }",
+        r#"integer f(integer p) { integer x = "s"; { string x = "s"; } return (integer)p; } default { }"#,
+        "integer i; default { state_entry() { i -= 1.0; i *= 1.0; i /= 1.0; i %= 1.0; } }",
+        "vector v; default { state_entry() { v.x *= 2; v.x *= <1,2,3>; v.x -= 1.0; r.s += 1; } }",
+        "vector v; default { state_entry() { float a = (v.w); (v.x) = v.w; } }",
+        "integer f() { return (vector)1; } default { }",
+        "integer x = (string)5; default { }",
+        r#"default { custom_event() { integer x = "s"; } }"#,
+    ] {
+        assert_parity(source);
+    }
+}
+
+#[test]
+fn sem014_exact_cast_message_and_target_span() {
+    let source = "integer f() { return (integer)<1, 2, 3>; } default { }";
+    let target = source.rfind("integer").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM014",
+            "cannot explicitly cast vector to integer in LSL".to_owned(),
+            source,
+            target,
+            "integer".len()
+        )]
+    );
+}
+
+#[test]
+fn sem015_exact_initializer_message_and_name_span() {
+    let source = "integer x = \"s\"; default { }";
+    let name = source.find("x =").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM015",
+            "initializer for variable 'x' has type string, expected integer".to_owned(),
+            source,
+            name,
+            "x".len()
+        )]
+    );
+}
+
+#[test]
+fn sem016_exact_assignment_message_and_target_span() {
+    let source = "integer x; default { state_entry() { x = \"s\"; } }";
+    let target = source.rfind("x =").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM016",
+            "assignment to variable 'x' has type string, expected integer".to_owned(),
+            source,
+            target,
+            "x".len()
+        )]
+    );
+}
+
+#[test]
+fn sem017_exact_messages_and_target_span() {
+    let source = "integer i; default { state_entry() { i += \"s\"; } }";
+    let target = source.rfind("i +=").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM017",
+            "compound assignment '+=' is not supported for operand types integer and string"
+                .to_owned(),
+            source,
+            target,
+            "i".len()
+        )]
+    );
+
+    let source = "integer i; default { state_entry() { i += 1.0; } }";
+    let target = source.rfind("i +=").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM017",
+            "compound assignment '+=' to variable 'i' yields type float, expected integer"
+                .to_owned(),
+            source,
+            target,
+            "i".len()
+        )]
+    );
+}
+
+#[test]
+fn sem018_exact_messages_and_component_span() {
+    let source = "vector v; default { state_entry() { v.w = 1; } }";
+    let component = source.find("w =").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM018",
+            "component 'w' is not valid for variable 'v' of type vector".to_owned(),
+            source,
+            component,
+            "w".len()
+        )]
+    );
+
+    let source = "vector v; default { state_entry() { v.x = \"s\"; } }";
+    let component = source.find("x =").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM018",
+            "assignment to component 'v.x' yields type string, expected float".to_owned(),
+            source,
+            component,
+            "x".len()
+        )]
+    );
+
+    let source = "vector v; default { state_entry() { v.x += \"s\"; } }";
+    let component = source.find("x +=").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM018",
+            "compound assignment '+=' is not supported for component types float and string"
+                .to_owned(),
+            source,
+            component,
+            "x".len()
+        )]
+    );
+}
+
+#[test]
+fn sem019_exact_read_message_and_component_span() {
+    let source = "vector v; default { state_entry() { float f = v.w; } }";
+    let component = source.find("w;").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM019",
+            "component access '.w' is not valid for variable 'v' of type vector".to_owned(),
+            source,
+            component,
+            "w".len()
+        )]
+    );
+}
+
+#[test]
+fn sem014_full_cast_matrix_matches_legacy() {
+    let literals = [
+        ("integer", "1"),
+        ("float", "1.0"),
+        ("string", "\"s\""),
+        ("key", "\"k\""),
+        ("list", "[]"),
+        ("vector", "<1, 2, 3>"),
+        ("rotation", "<1, 2, 3, 4>"),
+    ];
+    for (target, _) in literals {
+        for (_, literal) in literals {
+            let source = format!("default {{ state_entry() {{ ({target}){literal}; }} }}");
+            assert_parity(&source);
+        }
+    }
+}
+
+#[test]
+fn firestorm_switch_initializers_are_validated_without_speculation() {
+    use neolint::ast::{parse_ast_with_options, AstParseOptions};
+    let source = r#"integer f() { integer x = "s"; switch (1) { case 1: { integer y = "s"; } } return 1; } default { state_entry() { } }"#;
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) =
+        parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM015")
+            .count(),
+        2,
+        "{diagnostics:?}"
+    );
 }

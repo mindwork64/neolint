@@ -195,7 +195,7 @@ pub(crate) fn can_implicitly_convert(actual: &str, expected: &str) -> bool {
         || (actual == "string" && expected == "key")
 }
 
-fn explicit_cast_supported(source: &str, target: &str) -> bool {
+pub(crate) fn explicit_cast_supported(source: &str, target: &str) -> bool {
     match source {
         "integer" => matches!(target, "integer" | "float" | "string" | "list"),
         "float" => matches!(target, "integer" | "float" | "string" | "list"),
@@ -211,7 +211,7 @@ fn explicit_cast_supported(source: &str, target: &str) -> bool {
     }
 }
 
-fn infer_binary_result_type(
+pub(crate) fn infer_binary_result_type(
     operator: BinaryOperator,
     left: &str,
     right: &str,
