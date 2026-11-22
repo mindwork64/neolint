@@ -75,6 +75,15 @@ revision of this document.
 16. **Different diagnostics carry different coordinate kinds.**
     Preprocessor diagnostics carry original `SourceSpan`s and bypass the map;
     engine diagnostics carry prepared `Span`s and are resolved through it.
+17. **Every coordinate carries owning-unit identity.** `SourceId` embeds
+    `AnalysisUnitId`; `PreparedSpan` carries it. A map rejects foreign
+    coordinates with `ForeignAnalysisUnit`/`ForeignPreparedSource` before any
+    file or segment lookup.
+18. **There is exactly one public `Span` adapter per PreparedSource.** It
+    assigns identity and validates the range; it cannot recover provenance that
+    `Span` does not contain.
+19. **Malformed coordinate handling is panic-free in every build profile.**
+    The path returns `Result::Err`; no `debug_assert!`/`assert!` is used on it.
 
 ---
 
@@ -152,9 +161,10 @@ Consequences that shape the new architecture:
 
 ```
               +-------------------+
-  CLI/config  |   Source Manager  |   one AnalysisUnit per root input
+  CLI/config  |   Source Manager  |   one AnalysisUnit per root input,
+              |                   |   deterministic AnalysisUnitId
               +---------+---------+
-                        | LoadedSource: SourceId + text + kind (per unit)
+                        | LoadedSource: unit-scoped SourceId + text + kind
                         v
               +-------------------+
               |   Preprocessor    |  (identity in Phase 1; core in Phases 2–3)
@@ -164,7 +174,7 @@ Consequences that shape the new architecture:
               +-------------------+
               |      Lexer        |  (unchanged tokenization rules)
               +---------+---------+
-                        | Token stream (PreparedSpan + Eof)
+                        | Token stream (prepared Span + Eof)
            +------------+-------------+
            v                          v
   +------------------+       +------------------+
@@ -204,8 +214,12 @@ resolved through the unit's `SourceMap` (§7.1.1).
 
 - One AnalysisUnit is the complete independent analysis of **one root source**:
   one root file or one stdin stream.
+- The CLI assigns each unit a deterministic run-local `AnalysisUnitId` in
+  collected-input order (`0..N-1`). It is not persisted and does not appear in
+  output.
 - It owns:
-  - its own `SourceId` namespace (root gets the first ID);
+  - its own `SourceId` namespace, where `SourceId` includes the unit id and a
+    local file index (root gets local index 0);
   - its own macro table;
   - its own conditional stack;
   - its own `SourceMap`;
@@ -248,10 +262,17 @@ resolved through the unit's `SourceMap` (§7.1.1).
 - In identity mode, `text` is byte-identical to the input file.
 - Is **not** a `SourceFile` and has no `SourceId`. Its bytes are addressed only
   by `PreparedSpan` (§7.1).
-- Provides the explicit, checked bridge
-  `prepared_span(Span) -> Result<PreparedSpan, SpanError>` and exposes
-  `prepared_len`, `text`, and `map`. It has no implicit conversion to or from
-  `Span`/`SourceSpan`.
+- Carries its `AnalysisUnitId`. Exactly one PreparedSource exists per unit, so
+  the unit id is the prepared-source identity.
+- Provides the **single** public, checked bridge
+  `prepared_span(Span) -> Result<PreparedSpan, SpanError>` (stamping the unit)
+  plus `eof_span() -> PreparedSpan`, and exposes `unit`, `prepared_len`, `text`,
+  and `map`. There is no public `PreparedSpan` constructor and no implicit
+  conversion to or from `Span`/`SourceSpan`.
+- The adapter cannot recover provenance from `Span`: `Span` has no source
+  identity. It validates the range and assigns identity from this source's
+  context; correctness relies on engines being invoked only with the
+  PreparedSource they lexed.
 - Its preprocess diagnostics are already in original coordinates and are **not**
   resolved through the source map.
 
@@ -296,9 +317,10 @@ resolved through the unit's `SourceMap` (§7.1.1).
   - `Prepared(PreparedDiagnostic)` — prepared `Span`, bridged explicitly and
     resolved through `SourceMap`;
   - `Legacy(Diagnostic)` — plain-LSL pass-through with the frozen `Span`.
-- Rejects malformed coordinates with `SpanError` handling (§7.3.1): one internal
-  diagnostic, affected finding dropped, run continues, no panic and no EOF
-  substitution.
+- Rejects malformed **and foreign** coordinates with `SpanError` handling
+  (§7.3.1): unit ownership is checked before geometry or rendering, only the
+  affected finding is dropped, the run continues, and there is no panic, no
+  cross-unit file fallback, and no EOF substitution.
 - Merges diagnostics from both engines and from all units in a deterministic
   order.
 - Applies `LintConfig` exactly once after merging.
@@ -346,9 +368,14 @@ contents.
 
 Invariants:
 
-- `SourceId` is local to the AnalysisUnit. IDs from different units must never be
-  compared, mixed, or persisted.
-- The root receives the first ID in the unit (conventionally `0`).
+- `SourceId` embeds the owning `AnalysisUnitId` plus a unit-local file index.
+  Two units may both have file index 0; those `SourceId` values are different
+  and must never be compared or mixed. IDs are never persisted.
+- The unit id is assigned deterministically by the CLI in input order
+  (`0..N-1`). The root receives local file index 0.
+- Any `SourceSpan` or `RelatedLocation` crossing a unit boundary is rejected by
+  the target `SourceMap` with `ForeignAnalysisUnit`; matching local indexes are
+  never accepted.
 - The macro table, conditional stack, include graph, `SourceMap`, and
   diagnostics are single-unit state. They are never shared between units.
 - Rationale for strict isolation: independent root files are independent LSL
@@ -363,7 +390,7 @@ Invariants:
 
 ### 4.3 Source Manager → Preprocessor
 
-Input: a `LoadedSource` (a unit-local `SourceId`, the file text, and its display
+Input: a `LoadedSource` (a unit-scoped `SourceId`, the file text, and its display
 name); include requests carry the requesting `SourceId` and a path/spelling.
 Output: a resolved include or a `PRE` diagnostic.
 
@@ -388,10 +415,10 @@ Invariants:
 - Removing directives must not merge adjacent tokens in a way that changes
   their meaning; the implementation inserts safe separation where needed.
 - The prepared buffer may be empty. The lexer then emits only `Eof` at byte
-  offset 0; the bridge yields the zero-length `PreparedSpan(0, 0)`.
+  offset 0; the bridge yields the zero-length `PreparedSpan` at offset 0.
 - For non-empty buffers, the lexer's `Eof` position equals the prepared text
   length (byte offset `len`); the bridge yields the zero-length
-  `PreparedSpan(len, len)`.
+  `PreparedSpan` at offset `len`.
 
 ### 4.5 Preprocessor → Source Map
 
@@ -411,11 +438,16 @@ Every prepared byte has exactly one origin segment, addressed by `PreparedSpan`:
   anchor.
 - The map never stores prepared bytes as a `SourceFile`; `SourceSpan` is valid
   only for original files (§7).
-- The map exposes `Result`-based lookups. Well-formed ranges always resolve;
-  malformed ranges and map holes return `SpanError` and are never repaired by
-  pointing at the anchor (§7.3.1).
+- The map is bound to one `AnalysisUnitId`; all files, segments, origins, and
+  the EOF anchor carry that unit. `resolve_span`/`resolve_point` reject a
+  `PreparedSpan` from another unit with `ForeignPreparedSource`;
+  `location`/`render_span`/`source_span` reject a foreign `SourceSpan` with
+  `ForeignAnalysisUnit`.
+- The map exposes `Result`-based lookups. Well-formed ranges of its own unit
+  always resolve; malformed ranges and map holes return `SpanError` and are
+  never repaired by pointing at the anchor (§7.3.1).
 - The EOF anchor is valid by construction (`SourceMap::source_span` was used to
-  build it), so `eof_anchor()` itself is infallible.
+  build it), belongs to the map's unit, and `eof_anchor()` is infallible.
 
 ### 4.6 Lexer → Engines
 
@@ -425,15 +457,18 @@ Invariants:
 
 - Token order is the prepared text order.
 - Every token span lies inside the prepared buffer and on UTF-8 boundaries.
-- The `Eof` token has a zero-length prepared span at the end of the buffer; it is
-  the anchor for parser diagnostics such as `PAR013`.
+- The `Eof` token has byte offset `prepared_len`; `PreparedSource::eof_span()`
+  yields the unit-stamped zero-length `PreparedSpan` used as the anchor for
+  parser diagnostics such as `PAR013`.
 - Neither engine may assume that byte offsets are monotonic *in the original
   files*; monotonicity holds only in the prepared buffer.
 - Engines receive tokens and produce the frozen `Span` values, which address the
   prepared buffer. They do not construct `PreparedSpan` themselves; the unified
   layer bridges each diagnostic with
-  `PreparedSource::prepared_span(span)` and then resolves it (§7.1.1).
-- Zero-length spans (including EOF spans) are legal and resolvable.
+  `PreparedSource::prepared_span(span)`, stamping the source's unit, then
+  resolves it through that unit's map (§7.1.1).
+- Zero-length spans (including EOF spans) are legal and resolvable; use
+  `PreparedSource::eof_span()` for the end-of-buffer point.
 
 ### 4.7 Preprocessor and Engines → Unified Diagnostics
 
@@ -452,10 +487,13 @@ Invariants:
   prepared buffer is empty.
 - A `PreprocessDiagnostic` never passes through `resolve_span`; its primary and
   related spans are already original and go directly through
-  `SourceMap::location`/`render_span`.
+  `SourceMap::location`/`render_span`. Every one of them must belong to the
+  map's unit, or conversion fails with `ForeignAnalysisUnit`.
 - A `PreparedDiagnostic` is bridged explicitly
-  (`PreparedSource::prepared_span`) and then resolved; a bridge or resolve error
-  is handled as an internal error (§7.3.1), never as EOF.
+  (`PreparedSource::prepared_span`) and then resolved. The `PreparedSource` and
+  `SourceMap` must have the same unit; otherwise `ForeignPreparedSource` is
+  returned before bridging. A bridge or resolve error is handled as an internal
+  error (§7.3.1), never as EOF.
 - When preprocessing is disabled, the `Legacy` path is passed through unchanged
   (same `Span`, line, column, order), preserving baseline output.
 - Secondary locations (macro definition, include chain) never replace the
@@ -508,13 +546,19 @@ pub fn analyze_prepared(prepared: &PreparedSource, options: &EngineOptions) -> R
 
 impl PreparedSource {
     pub fn prepared_span(&self, span: Span) -> Result<PreparedSpan, SpanError>;
+    pub fn eof_span(&self) -> PreparedSpan;
+    pub fn unit(&self) -> AnalysisUnitId;
 }
 
 impl SourceMap {
+    pub fn unit(&self) -> AnalysisUnitId;
     pub fn resolve_span(&self, prepared: PreparedSpan) -> Result<ResolvedSpan, SpanError>;
-    pub fn resolve_point(&self, offset: usize) -> Result<SourceSpan, SpanError>;
+    pub fn resolve_point(&self, point: PreparedSpan) -> Result<SourceSpan, SpanError>;
     pub fn location(&self, span: SourceSpan) -> Result<SourceLocation, SpanError>;
     pub fn render_span(&self, span: SourceSpan) -> Result<Span, SpanError>;
+    pub fn source_span(&self, source: SourceId, start: usize, end: usize)
+        -> Result<SourceSpan, SpanError>;
+    pub fn eof_anchor(&self) -> SourceSpan;
 }
 
 pub enum UnifiedDiagnosticInput { Preprocess(PreprocessDiagnostic), Prepared(PreparedDiagnostic), Legacy(Diagnostic) }
@@ -525,9 +569,13 @@ Contract:
 - `lex`, `parse`, `analyze`, `Diagnostic`, `Token`, and `Span` keep their exact
   signatures and field meanings. No existing function parameter or return type
   changes to `PreparedSpan`.
-- The only `Span -> PreparedSpan` path is the checked adapter; the only
-  `PreparedSpan -> SourceSpan` path is `SourceMap::resolve_span`/`resolve_point`.
+- The only `Span -> PreparedSpan` path is
+  `PreparedSource::prepared_span`; there is no public `PreparedSpan`
+  constructor. The only `PreparedSpan -> SourceSpan` path is
+  `SourceMap::resolve_span`/`resolve_point`, which first verify unit ownership.
 - `Span -> SourceSpan` does not exist as a conversion.
+- `SourceSpan`/`PreparedSpan` from another unit are never accepted, even when
+  their offsets and local file indexes coincide.
 - `UnifiedDiagnosticInput` is a new additive type; `Diagnostic` is not changed.
 
 ---
@@ -546,7 +594,8 @@ unit.
    Firestorm extensions without a Firestorm dialect).
 3. **Input collection.** Expand directories deterministically (sorted, symlinks
    skipped), de-duplicate displayed paths, enforce one stdin. The result is an
-   ordered list of root inputs.
+   ordered list of root inputs. Each input receives a deterministic, run-local
+   `AnalysisUnitId` (`0..N-1`); the id is not user-facing.
 4. **Unit loop.** For each root input, in order, run the per-unit lifecycle
    below. A failure in one unit is recorded and does not abort the remaining
    units (matching today's per-file behavior).
@@ -561,11 +610,13 @@ unit.
 
 **Per AnalysisUnit:**
 
-1. **Unit creation.** Allocate the unit-local `SourceId` namespace, macro table,
-   conditional stack, include graph, and `SourceMap`.
-2. **Root load.** Read the root as UTF-8 and register it as the unit's first
-   source. Unreadable/invalid root is an input error for this unit (exit 2
-   contribution) and the unit ends.
+1. **Unit creation.** Create the unit with its assigned `AnalysisUnitId`;
+   allocate the `SourceId` namespace (ids include the unit), macro table,
+   conditional stack, include graph, and `SourceMap`. Exactly one
+   `PreparedSource` will belong to this unit.
+2. **Root load.** Read the root as UTF-8 and register it as local file index 0,
+   producing a unit-owned `SourceId`. Unreadable/invalid root is an input error
+   for this unit (exit 2 contribution) and the unit ends.
 3. **Preparation.** Preprocess the root:
    - identity mode: copy text unchanged, build a trivial map and EOF anchor;
    - Firestorm mode: scan directives, expand macros, resolve includes in textual
@@ -591,16 +642,18 @@ unit.
 7. **Resolution.**
    - `Preprocess`: primary/related `SourceSpan` → `SourceLocation` directly
      (no `resolve_span`).
-   - `Prepared`: `PreparedSource::prepared_span(span)` → `resolve_span` →
-     `SourceSpan` → `SourceLocation`, then `render_span` into the frozen
-     `Diagnostic.span`.
-   - `Legacy`: pass through.
-   Zero-length spans at `Eof` use the map's EOF anchor (§7.3).
+   - `Prepared`: verify `prepared.unit() == map.unit()`; bridge with
+     `PreparedSource::prepared_span(span)` → `resolve_span` → `SourceSpan` →
+     `SourceLocation`, then `render_span` into the frozen `Diagnostic.span`.
+   - `Legacy`: pass through with the unit's root `SourceId`.
+   A zero-length span at `Eof` is obtained from
+   `PreparedSource::eof_span()` and resolved through `resolve_point`; it uses the
+   map's EOF anchor of the same unit (§7.3).
    A `SpanError` follows §7.3.1: internal diagnostic, drop the affected finding,
    continue; never panic and never substitute the anchor.
 8. **Unit merge.** Apply the engine-specific deduplication policy and sort by
-   `(source load order, start offset, code)`. Legacy-only single-file output
-   keeps its current order.
+   `(AnalysisUnitId, source load order inside the unit, start offset, code)`.
+   Legacy-only single-file output keeps its current order.
 
 An empty source file is a valid unit: the prepared buffer is empty, the lexer
 emits only `Eof`, the legacy parser reports `PAR013`, and the `Eof` diagnostic
@@ -617,7 +670,10 @@ anchor comes from the last directive/anchor location (§7.3).
 An **AnalysisUnit** is the complete, independent analysis of one root source:
 
 - one root file, or one stdin stream;
-- its own `SourceId` namespace (root first);
+- one deterministic run-local `AnalysisUnitId`;
+- its own `SourceId` namespace, where ids embed the unit id and a local file
+  index (root gets index 0);
+- exactly one `PreparedSource`, whose `PreparedSpan` values carry the unit id;
 - its own macro table;
 - its own conditional stack;
 - its own `SourceMap`;
@@ -627,7 +683,9 @@ An **AnalysisUnit** is the complete, independent analysis of one root source:
 
 One CLI invocation may create any number of AnalysisUnits: one per collected
 file, directory entry, or stdin input. A unit is **not** a CLI invocation-wide
-namespace.
+namespace. A `SourceId`, `SourceSpan`, `PreparedSpan`, `RelatedLocation`, or
+EOF anchor from one unit is rejected by another unit's map with
+`ForeignAnalysisUnit` or `ForeignPreparedSource`; no same-index fallback exists.
 
 ### 6.2 Lifecycle and isolation
 
@@ -639,7 +697,9 @@ namespace.
   Independent roots are independent scripts; macro state leaking between them
   would make output depend on file order, change results when a directory gains a
   file, and break the baseline compatibility tests.
-- `SourceId` values are unit-local and must not be compared across units.
+- `SourceId` embeds the unit id; two units may both have local file index 0,
+  but those are different ids. Coordinates are only meaningful together with
+  their unit, and cross-unit use is an explicit error.
 - Units may be analyzed sequentially or in parallel. If parallel, merging is
   still performed in input order, so the observable result is deterministic.
 
@@ -710,15 +770,28 @@ The source map is a **range map with origin chains**, not a line-to-line table.
 ### 7.1 Conceptual types
 
 ```rust
-/// Dense identifier of one original file inside one AnalysisUnit.
-/// It is never assigned to the prepared buffer.
-pub struct SourceId(u32);
+/// Deterministic identity of one AnalysisUnit inside a CLI invocation.
+/// Assigned 0..N-1 in collected-input order. It is run-local, is not persisted,
+/// and never appears in human or JSON output.
+pub struct AnalysisUnitId(u32);
+
+/// Identity of one original file. The unit is part of the identity, so the same
+/// local file index in two units is a different SourceId.
+pub struct SourceId {
+    unit: AnalysisUnitId,
+    file: u32,
+}
+
+impl SourceId {
+    pub fn unit(&self) -> AnalysisUnitId;
+    pub fn file(&self) -> u32;
+}
 
 /// Original files only. The prepared buffer is not a file kind.
 pub enum SourceFileKind { Root, Stdin, Included }
 
 pub struct SourceFile {
-    pub id: SourceId,
+    pub id: SourceId,          // carries AnalysisUnitId + local file index
     pub display_name: String,
     pub canonical_path: Option<PathBuf>,
     pub kind: SourceFileKind,
@@ -727,31 +800,26 @@ pub struct SourceFile {
 }
 
 /// A range in the Prepared Buffer. Offsets are zero-based UTF-8 bytes.
-/// Fields are private: the checked constructors below are the only way to
-/// create one, so an inverted, out-of-bounds, or non-boundary prepared range is
-/// unrepresentable through the public API.
+/// Fields are private. There is exactly one PreparedSource per AnalysisUnit,
+/// so the unit id is the prepared-source identity; a span from another unit is
+/// detected and rejected by the owning SourceMap.
 pub struct PreparedSpan {
+    unit: AnalysisUnitId,
     start: usize,
     end: usize,
 }
 
 impl PreparedSpan {
-    /// Checked bridge from the frozen public `Span` to prepared coordinates.
-    /// `Span.line`/`Span.column` are display metadata and are not used here;
-    /// only the byte offsets are validated. There is deliberately no
-    /// `From<Span>`/`Into<PreparedSpan>` implementation.
-    pub fn try_from_lexer(span: Span, prepared_text: &str) -> Result<Self, SpanError>;
-
-    /// Checked constructor used by the pipeline for generated ranges.
-    pub fn new(start: usize, end: usize, prepared_text: &str) -> Result<Self, SpanError>;
-
+    // No public constructor. The only public adapter is
+    // PreparedSource::prepared_span, which stamps the correct unit id.
+    pub fn unit(&self) -> AnalysisUnitId;
     pub fn start(&self) -> usize;
     pub fn end(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
 }
 
-/// A range in an original file. Fields are private so that a span cannot be
-/// forged without validation; `SourceMap::source_span` is the checked
-/// constructor.
+/// A range in an original file. Fields are private; `SourceMap::source_span` is
+/// the only checked constructor and always stamps the map's unit.
 pub struct SourceSpan {
     source: SourceId,
     start: usize,
@@ -783,7 +851,8 @@ pub enum OriginKind {
     Generated,       // text with no direct user counterpart
 }
 
-/// One link in a provenance chain. Every span here is an original-file span.
+/// One link in a provenance chain. Every span here is an original-file span of
+/// this AnalysisUnit.
 pub struct SourceOrigin {
     pub kind: OriginKind,
     pub span: SourceSpan,          // primary location for this link
@@ -805,9 +874,9 @@ pub struct ResolvedSpan {
     pub related: Vec<SourceSpan>,
 }
 
-/// Every way a coordinate can be malformed. All variants are errors, not
-/// fallbacks: in particular `MapInvariant` and `UnmappedPreparedRange` must
-/// never silently resolve to the EOF anchor.
+/// Every way a coordinate can be malformed or cross a boundary. All variants are
+/// errors, not fallbacks: in particular the foreign-identity, map-invariant, and
+/// unmapped variants must never silently resolve to the EOF anchor.
 pub enum SpanError {
     /// `start > end` in either coordinate namespace.
     InvertedRange,
@@ -815,6 +884,12 @@ pub enum SpanError {
     OutOfBounds,
     /// An offset splits a UTF-8 scalar value.
     NotCharBoundary,
+    /// A `SourceSpan` comes from another AnalysisUnit.
+    ForeignAnalysisUnit,
+    /// A `PreparedSpan` comes from another PreparedSource/AnalysisUnit.
+    ForeignPreparedSource,
+    /// `resolve_point` received a non-empty prepared span.
+    NotAPoint,
     /// A `SourceSpan` names a `SourceId` not registered in this unit.
     UnknownSourceId,
     /// A prepared range is not covered by any map segment (builder bug).
@@ -824,35 +899,42 @@ pub enum SpanError {
 }
 
 pub struct SourceMap {
+    unit: AnalysisUnitId,
     prepared_text: Arc<str>,     // validation only; never a SourceFile
-    files: Vec<SourceFile>,
+    files: Vec<SourceFile>,      // all ids in this vec carry `unit`
     segments: Vec<MapSegment>,   // sorted, non-overlapping, cover [0, prepared_len)
-    eof_anchor: SourceSpan,      // always a real original-file position
+    eof_anchor: SourceSpan,      // carries `unit`
     origins: Vec<SourceOrigin>,  // arena; chains are acyclic
 }
 
 impl SourceMap {
-    /// Resolve a prepared range. Every well-formed range with
-    /// `end <= prepared_len` is guaranteed to return `Ok`, including EOF and
-    /// zero-length ranges and ranges crossing segment boundaries. Malformed
-    /// ranges and map holes return `Err`; they never fall back to the EOF
-    /// anchor.
+    pub fn unit(&self) -> AnalysisUnitId;
+
+    /// Resolve a prepared range. Every well-formed range of this unit's
+    /// PreparedSource is guaranteed to return `Ok`, including EOF and
+    /// zero-length ranges and ranges crossing segment boundaries. A span from
+    /// another unit returns `ForeignPreparedSource`. Malformed ranges and map
+    /// holes return `Err`; they never fall back to the EOF anchor.
     pub fn resolve_span(&self, prepared: PreparedSpan) -> Result<ResolvedSpan, SpanError>;
 
-    /// Resolve a single prepared byte offset. `offset == prepared_len`
-    /// resolves to the EOF anchor. Offsets past the end, or offsets that split
-    /// a UTF-8 scalar, return `Err`.
-    pub fn resolve_point(&self, offset: usize) -> Result<SourceSpan, SpanError>;
+    /// Resolve a zero-length prepared point of this unit. `point.start ==
+    /// point.end` is required; `resolve_point` returns `NotAPoint` otherwise.
+    /// The point at `prepared_len` resolves to the EOF anchor. Out-of-bounds
+    /// points, non-UTF-8 boundaries, and foreign units return `Err`.
+    pub fn resolve_point(&self, point: PreparedSpan) -> Result<SourceSpan, SpanError>;
 
-    /// Turn an original-file span into line/column coordinates. Unknown source
-    /// ids and out-of-file ranges return `Err`.
+    /// Turn an original-file span into line/column coordinates. A span from
+    /// another AnalysisUnit returns `ForeignAnalysisUnit` before any file
+    /// lookup. Unknown file indexes and out-of-file ranges return `Err`.
     pub fn location(&self, span: SourceSpan) -> Result<SourceLocation, SpanError>;
 
-    /// Build the frozen public `Span` for a resolved original range, so the
-    /// existing `Diagnostic` shape can be rendered without changing it.
+    /// Build the frozen public `Span` for a resolved original range of this
+    /// unit, so the existing `Diagnostic` shape can be rendered unchanged.
     pub fn render_span(&self, span: SourceSpan) -> Result<Span, SpanError>;
 
-    /// Checked constructor for original spans produced by the pipeline.
+    /// Checked constructor for original spans of this unit. A foreign
+    /// `SourceId` returns `ForeignAnalysisUnit`; the result always carries this
+    /// map's unit id.
     pub fn source_span(
         &self,
         source: SourceId,
@@ -860,31 +942,44 @@ impl SourceMap {
         end: usize,
     ) -> Result<SourceSpan, SpanError>;
 
-    /// The anchor used for empty buffers and end-of-input diagnostics. It is
-    /// valid by construction and never fails.
+    /// The anchor used for empty buffers and end-of-input diagnostics. It
+    /// belongs to this unit and is valid by construction.
     pub fn eof_anchor(&self) -> SourceSpan;
 }
 
-/// The single prepared buffer handed to the lexer, with its explicit bridge to
-/// prepared coordinates. `text` and `map` share the same `Arc<str>`.
+/// The single prepared buffer handed to the lexer for one AnalysisUnit.
 pub struct PreparedSource {
+    unit: AnalysisUnitId,                // one PreparedSource per unit
     text: Arc<str>,                      // shared with the map for validation
     pub preprocess_diagnostics: Vec<PreprocessDiagnostic>,
-    map: Arc<SourceMap>,
+    map: Arc<SourceMap>,                 // same unit by construction
 }
 
 impl PreparedSource {
-    /// The checked Span -> PreparedSpan adapter. This is the only public
-    /// conversion between the frozen legacy `Span` and prepared coordinates.
+    /// The only public Span -> PreparedSpan adapter. It stamps this source's
+    /// unit id and validates inverted/out-of-bounds/non-UTF-8 ranges.
+    ///
+    /// A `Span` carries no source identity, so this adapter cannot prove that
+    /// the span was produced by *this* PreparedSource. It is a checked
+    /// adaptation of a trusted caller-provided span, not provenance recovery.
+    /// Engines must only be given the PreparedSource they lexed.
     pub fn prepared_span(&self, span: Span) -> Result<PreparedSpan, SpanError>;
+
+    /// A zero-length prepared span at the end of this buffer, carrying this
+    /// source's unit id. This is the input for `SourceMap::resolve_point`.
+    pub fn eof_span(&self) -> PreparedSpan;
+
+    pub fn unit(&self) -> AnalysisUnitId;
     pub fn prepared_len(&self) -> usize;
     pub fn map(&self) -> &SourceMap;
     pub fn text(&self) -> &str;
 }
 
 /// One secondary location attached to a rendered or preprocessor diagnostic.
+/// Every contained span must belong to the same AnalysisUnit as the primary;
+/// conversion validates this and returns `ForeignAnalysisUnit` otherwise.
 pub struct RelatedLocation {
-    pub span: SourceSpan,     // always an original file
+    pub span: SourceSpan,
     pub label: String,
 }
 
@@ -895,7 +990,7 @@ pub struct PreprocessDiagnostic {
     pub severity: Severity,
     pub kind: DiagnosticKind,
     pub message: String,
-    pub primary: SourceSpan,             // always an original file
+    pub primary: SourceSpan,             // always this unit's original file
     pub related: Vec<RelatedLocation>,   // macro def/invocation, include site
 }
 
@@ -921,37 +1016,48 @@ pub enum UnifiedDiagnosticInput {
 }
 
 /// The rendered form: the frozen `Diagnostic` plus file identity and notes.
+/// Fields are private; the constructors below are the only ways to build one,
+/// so a foreign span cannot bypass the ownership checks.
 pub struct RenderedDiagnostic {
-    pub diagnostic: Diagnostic,          // unchanged public shape
-    pub source: SourceId,                // original file for CLI grouping
-    pub related: Vec<RelatedLocation>,
+    diagnostic: Diagnostic,          // unchanged public shape
+    source: SourceId,                // original file, unit included
+    related: Vec<RelatedLocation>,
 }
 
 impl RenderedDiagnostic {
-    /// Direct insertion; no prepared-buffer resolution is involved.
+    pub fn diagnostic(&self) -> &Diagnostic;
+    pub fn source(&self) -> SourceId;
+    pub fn related(&self) -> &[RelatedLocation];
+
+    /// Direct insertion; primary and every related span must belong to
+    /// `map.unit()`. No prepared-buffer resolution is involved.
     pub fn from_preprocess(
         diagnostic: PreprocessDiagnostic,
         map: &SourceMap,
     ) -> Result<Self, SpanError>;
 
-    /// Explicit bridge then SourceMap resolution.
+    /// Explicit bridge then SourceMap resolution. `prepared.map()` and `map`
+    /// must be the same unit; a mismatch is `ForeignPreparedSource`.
     pub fn from_prepared(
         diagnostic: PreparedDiagnostic,
         prepared: &PreparedSource,
         map: &SourceMap,
     ) -> Result<Self, SpanError>;
 
-    /// No-op pass-through for the plain-LSL compatibility path.
+    /// No-op pass-through for the plain-LSL compatibility path. The source is
+    /// the unit's root file; no map is involved.
     pub fn from_legacy(diagnostic: Diagnostic, source: SourceId) -> Self;
 }
 ```
 
 `PreparedSpan` and `SourceSpan` are distinct types with no implicit conversion
-between them. A compiled-in mix-up is therefore a type error, not a diagnostic
-that silently points at the wrong file. `SourceSpan::source()` always returns a
-`SourceId` of a `SourceFile` registered in this unit; the prepared buffer has no
-`SourceId` at all. `PreparedSpan` fields are private, so only the checked bridge
-can create prepared coordinates.
+between them, and both carry ownership identity. A compiled-in mix-up is
+therefore a type error at best and an explicit `SpanError` at worst, never a
+silent diagnostic in another file. `SourceSpan::source()` returns a `SourceId`
+that contains the owning `AnalysisUnitId`; the prepared buffer has no
+`SourceId`, but `PreparedSpan` carries the unit and is rejected by any other
+unit's map. Fields are private, so only the checked constructors can create
+coordinates.
 
 ### 7.1.1 The `Span` bridge (frozen legacy type)
 
@@ -978,38 +1084,55 @@ Rules for the bridge:
 
 1. In the preprocessed path, `Token.span` and engine `Diagnostic.span` address
    the prepared buffer. They are never assumed to be original coordinates.
-2. `Span -> PreparedSpan` is explicit: `PreparedSource::prepared_span(span)` or
-   `PreparedSpan::try_from_lexer(span, prepared_text)`. Both return
-   `Result<PreparedSpan, SpanError>` and validate inversion, `prepared_len`, and
-   UTF-8 boundaries. There is no `From<Span>`/`Into<PreparedSpan>`.
-3. `Span.line`/`Span.column` are display metadata and are ignored by the bridge.
+2. There is exactly **one** public adapter:
+   `PreparedSource::prepared_span(span) -> Result<PreparedSpan, SpanError>`.
+   It validates inversion, `prepared_len`, and UTF-8 boundaries, and stamps the
+   owning `AnalysisUnitId`. There is no public `PreparedSpan::new`,
+   `try_from_lexer`, `From<Span>`, or `Into<PreparedSpan>`.
+3. The adapter cannot recover provenance from a `Span`, because `Span` contains
+   no source identity. It is a **checked adaptation** of a span the caller
+   asserts came from this prepared buffer. A `Span` from a different source
+   with a fitting range cannot be detected at this step; the contract is that
+   engines are only ever handed the `PreparedSource` they lexed. Identity is
+   assigned by `PreparedSource`, not verified against the `Span`.
+4. `Span.line`/`Span.column` are display metadata and are ignored by the bridge.
    Line/column for a rendered diagnostic are recomputed from the resolved
    original `SourceSpan` (`SourceMap::render_span`).
-4. `PreparedSpan -> SourceSpan` happens **only** through
-   `SourceMap::resolve_span`/`resolve_point`.
-5. `SourceSpan` can never be constructed from prepared bytes: its constructor
-   is `SourceMap::source_span(source, start, end)`, and it requires a real
-   `SourceId`.
-6. `SourceLocation` is computed only from a `SourceSpan` via
-   `SourceMap::location`.
-7. AST nodes store prepared coordinates (`Span` or `PreparedSpan`), never a
+5. `PreparedSpan -> SourceSpan` happens **only** through
+   `SourceMap::resolve_span`/`resolve_point`. The map first checks that the
+   span's unit is its own unit and returns `ForeignPreparedSource` otherwise;
+   matching `start`/`end` alone is never sufficient.
+6. `SourceSpan` can never be constructed from prepared bytes: its constructor
+   is `SourceMap::source_span(source, start, end)`, which returns
+   `ForeignAnalysisUnit` for another unit's `SourceId` and otherwise stamps the
+   map's unit.
+7. `SourceLocation` is computed only from a `SourceSpan` via
+   `SourceMap::location`; a foreign-unit span returns `ForeignAnalysisUnit`
+   before any file lookup.
+8. AST nodes store prepared coordinates (`Span` or `PreparedSpan`), never a
    `SourceSpan` for generated text. They are resolved through the same
    `SourceMap` at rendering time.
-8. In plain-LSL compatibility mode there is no map: `UnifiedDiagnosticInput::
+9. In plain-LSL compatibility mode there is no map: `UnifiedDiagnosticInput::
    Legacy` passes `Diagnostic.span` through unchanged, preserving baseline
-   output.
+   output. The unit still has a root `SourceId` for grouping, but no prepared
+   span conversion occurs.
 
 These are conceptual definitions. Phase 1 fixes the exact visibility, derives,
 constructors, and capacities; the semantics below are binding.
 
 ### 7.2 Coordinate namespaces and offsets
 
-- `SourceId` is unit-local. It must never be persisted or compared across units
-  or runs.
+- `AnalysisUnitId` is run-local and deterministic: the CLI assigns `0..N-1` in
+  collected-input order. It is not persisted and does not appear in output.
+- `SourceId` is unit-scoped and contains `{ AnalysisUnitId, file: u32 }`. Two
+  units may both have local file index 0, but those are different `SourceId`
+  values. A raw file index must never be compared across units or stored
+  without its unit.
 - Every offset is a zero-based UTF-8 byte offset. Spans are half-open
   (`start..end`) and must lie on UTF-8 character boundaries.
-- `PreparedSpan` addresses bytes **only** in the prepared buffer. It has no
-  `SourceId` and cannot be rendered directly.
+- `PreparedSpan` addresses bytes **only** in the prepared buffer of a specific
+  `AnalysisUnitId`. It has no `SourceId` (the buffer is not a file) but it does
+  carry the unit, so a map can reject a span from another unit.
 - `SourceSpan` addresses bytes **only** in an original `SourceFile`. It is the
   only span type that can be converted to `SourceLocation`.
 - A prepared buffer is not a `SourceFile`; it has no display name in `files` and
@@ -1028,7 +1151,12 @@ constructors, and capacities; the semantics below are binding.
   exists between `Span` and either span type.
 - `PreparedSpan` and `SourceSpan` fields are private; checked constructors are
   the only way to build them. This makes invalid coordinate mixes compile-time
-  errors or constructor errors, not silent off-by-file diagnostics.
+  errors or explicit `SpanError` values, not silent off-by-file diagnostics.
+- Ownership is checked before geometry. `SourceMap::location`/`source_span`
+  return `ForeignAnalysisUnit` for another unit's `SourceId`;
+  `resolve_span`/`resolve_point` return `ForeignPreparedSource` for another
+  unit's `PreparedSpan`. A coincidentally equal file index or equal
+  `start`/`end` never permits acceptance.
 
 ### 7.3 Empty input, EOF, and segment boundaries
 
@@ -1036,12 +1164,12 @@ These cases are normative; Phase 1 must test each of them.
 
 **Empty source file.** The `SourceFile` has `len() == 0`. The map has no
 segments and an `eof_anchor` that is a zero-length span at offset 0 of the root
-file. The lexer emits only
-`Eof` at byte offset 0, which the bridge turns into `PreparedSpan(0, 0)`.
-`resolve_span(PreparedSpan(0, 0))` returns
-`Ok(ResolvedSpan { primary: eof_anchor, related: [] })`. `PAR013` therefore
-resolves to the root file at line 1, column 1, exactly like today's legacy
-output.
+file, carrying the unit id. The lexer emits only `Eof` at byte offset 0;
+`PreparedSource::eof_span()` (or `prepared_span` on that `Eof` span) yields a
+zero-length `PreparedSpan` stamped with this unit.
+`resolve_span(...)` returns `Ok(ResolvedSpan { primary: eof_anchor, related:
+[] })`. `PAR013` therefore resolves to the root file at line 1, column 1,
+exactly like today's legacy output.
 
 **Empty prepared buffer from non-empty source.** Conditional compilation can
 remove all user code. The prepared buffer may be empty even though the root file
@@ -1051,41 +1179,47 @@ end of the last direct/anchor segment), or the root start if no anchor exists.
 EOF diagnostics still resolve to a real file and a real line/column.
 
 **EOF token and EOF diagnostics.** The lexer's `Eof` token always has byte
-offset `prepared_len`; the bridge yields
-`PreparedSpan(prepared_len, prepared_len)`. Parser diagnostics at end of input
-(for example `PAR013`, an incomplete block, or a missing closing brace) use the
-same zero-length prepared span. Resolution rule:
+offset `prepared_len`; `PreparedSource::eof_span()` yields the zero-length
+`PreparedSpan` at that offset stamped with this unit. Parser diagnostics at end
+of input (for example `PAR013`, an incomplete block, or a missing closing brace)
+use the same zero-length prepared span. Resolution rule:
 
-- `resolve_point(prepared_len)` returns `Ok(eof_anchor)`.
-- `resolve_span(PreparedSpan(n, n))` with `n == prepared_len` returns
-  `Ok(anchor)` with no related locations.
+- `resolve_point(source.eof_span())` returns `Ok(eof_anchor)` for the same unit.
+- `resolve_span(source.eof_span())` returns `Ok(anchor)` with no related
+  locations.
 - A zero-length prepared span that is **not** at the end resolves as a point
   (below).
 - Only well-formed EOF ranges take this path. A malformed range is `Err`, never
   the anchor.
 
 **Point resolution and segment boundaries.** Segments are half-open
-`[start, end)`. For `resolve_point(offset)`:
+`[start, end)`. `resolve_point(point: PreparedSpan)` accepts only a zero-length
+span. Resolution order:
 
-1. If `offset > prepared_len`, return `Err(SpanError::OutOfBounds)`.
-2. If `offset` is not a UTF-8 character boundary in the prepared text, return
+1. If `point.unit() != self.unit()`, return
+   `Err(SpanError::ForeignPreparedSource)`.
+2. If `point.start() != point.end()`, return `Err(SpanError::NotAPoint)`.
+3. If `point.start() > prepared_len`, return `Err(SpanError::OutOfBounds)`.
+4. If the offset is not a UTF-8 character boundary in the prepared text, return
    `Err(SpanError::NotCharBoundary)`.
-3. If `offset == prepared_len`, return `Ok(eof_anchor)`.
-4. Otherwise, return the origin of the unique segment with
-   `prepared.start <= offset < prepared.end`. An offset exactly at a boundary
-   belongs to the segment that **starts** at that offset (right-biased). This
-   makes boundary resolution deterministic.
-5. If no such segment exists, return `Err(SpanError::UnmappedPreparedRange)` or
+5. If `point.start() == prepared_len`, return `Ok(eof_anchor)`.
+6. Otherwise, return the origin of the unique segment with
+   `segment.prepared.start <= offset < segment.prepared.end`. An offset exactly
+   at a boundary belongs to the segment that **starts** at that offset
+   (right-biased). This makes boundary resolution deterministic.
+7. If no such segment exists, return `Err(SpanError::UnmappedPreparedRange)` or
    `Err(SpanError::MapInvariant)`. Never fall back to the EOF anchor and never
    panic.
 
-For a zero-length `PreparedSpan(n, n)` with `n < prepared_len`, resolution uses
-`resolve_point(n)` and returns `Ok(primary = resolve_point(n)?, related = [])`.
+For a zero-length `PreparedSpan` with `start == end < prepared_len`,
+`resolve_span` returns `Ok(primary = resolve_point(point)?, related = [])`.
 
 **Span crossing several segments.** A prepared span may cross any number of
 segment boundaries (a macro argument followed by macro body, then by direct
 code). `resolve_span` must:
 
+0. Reject a span whose unit is not this map's unit with
+   `Err(SpanError::ForeignPreparedSource)` before any geometry check.
 1. Split the prepared range at every segment boundary into 1..N contiguous
    prepared runs. A zero-length span yields one point run.
 2. Resolve every run through its segment origin to an original `SourceSpan`
@@ -1122,31 +1256,46 @@ never become a user-facing location in the wrong file. They are `Err` values.
 
 | Invalid input | Error | Detection point |
 | --- | --- | --- |
-| `start > end` in a prepared range | `SpanError::InvertedRange` | `PreparedSpan` constructor, `resolve_span` |
+| `start > end` in a prepared range | `SpanError::InvertedRange` | `PreparedSource::prepared_span`, `resolve_span` |
 | `start > end` in an original range | `SpanError::InvertedRange` | `SourceMap::source_span`, `location` |
-| `end > prepared_len` | `SpanError::OutOfBounds` | `PreparedSpan` constructor, `resolve_span` |
+| `end > prepared_len` | `SpanError::OutOfBounds` | `PreparedSource::prepared_span`, `resolve_span`, `resolve_point` |
 | `end > source_file.len()` | `SpanError::OutOfBounds` | `SourceMap::source_span`, `location` |
-| prepared offset splits UTF-8 | `SpanError::NotCharBoundary` | `PreparedSpan` bridge / `resolve_point` |
+| prepared offset splits UTF-8 | `SpanError::NotCharBoundary` | `prepared_span`, `resolve_point` |
 | original offset splits UTF-8 | `SpanError::NotCharBoundary` | `SourceMap::source_span`, `location` |
+| `SourceSpan` from another AnalysisUnit | `SpanError::ForeignAnalysisUnit` | `location`, `source_span`, `render_span`, related conversion |
+| `PreparedSpan` from another unit/source | `SpanError::ForeignPreparedSource` | `resolve_span`, `resolve_point`, `from_prepared` |
+| `resolve_point` given a non-empty span | `SpanError::NotAPoint` | `resolve_point` |
 | `SourceId` not registered in the unit | `SpanError::UnknownSourceId` | `location`, `source_span` |
 | prepared range has no segment | `SpanError::UnmappedPreparedRange` | `resolve_span`, `resolve_point` |
 | segments overlap, are unsorted, or an origin chain is broken | `SpanError::MapInvariant` | `resolve_span`, `resolve_point` |
 
 Categories:
 
-- **Correct EOF and zero-length ranges are not errors.** `PreparedSpan(len,
-  len)` and `PreparedSpan(n, n)` for `n < len` resolve to `Ok`. `SourceSpan`
-  zero-length points are valid original positions.
-- **Malformed coordinates are internal errors.** They indicate a builder,
-  adapter, or engine bug. Debug builds `debug_assert!` on the invariant; release
-  builds propagate `Err`. The unified layer records one internal-invariant
-  diagnostic (code and family fixed in Phase 1 and documented), drops only the
-  affected finding, and continues. It never panics and never substitutes the
-  EOF anchor.
+- **Correct EOF and zero-length ranges are not errors.** A zero-length
+  `PreparedSpan` at `prepared_len` and at `n < prepared_len` resolves to `Ok`.
+  `SourceSpan` zero-length points are valid original positions.
+- **Malformed coordinates always return `Err`.** Behavior is identical in debug
+  and release builds: there are **no** `debug_assert!`/`assert!` calls in the
+  `SourceMap` resolution path, the `Span` adapter, or the diagnostic conversion
+  path. Public APIs never panic on malformed coordinates, and malformed
+  coordinates never become the EOF anchor.
+- **Foreign identity is its own error class.** A span from another
+  AnalysisUnit/PreparedSource is rejected with `ForeignAnalysisUnit` or
+  `ForeignPreparedSource` before geometry or file lookup. Matching local file
+  indexes or matching `start`/`end` are irrelevant; no fallback file is used.
+- **These malformed/foreign cases are internal or API-misuse errors.** The
+  unified layer records one internal-invariant diagnostic (code and family fixed
+  in Phase 1 and documented), drops only the affected finding, and continues.
 - **User preprocessor errors are diagnostics, not `SpanError`s.** An unknown
   directive, bad `#if` expression, missing include, or recursive macro keeps a
-  valid `SourceSpan` and becomes a `PreprocessDiagnostic`. It is not an invalid
-  coordinate and does not take the `Err` path.
+  valid `SourceSpan` of its own unit and becomes a `PreprocessDiagnostic`. It is
+  not an invalid coordinate and does not take the `Err` path.
+- **Assertions, if any, must be unreachable from public input.** Optional
+  internal assertions are allowed only in pipeline constructors that cannot be
+  called with user-controlled coordinates (for example, asserting a freshly
+  built segment table is sorted). They must not be used to detect malformed
+  spans; the error path is always `Result`. The preferred design has none in the
+  resolution path.
 
 The public API is `Result`-based rather than `Option`-based on purpose: a
 caller must not be able to `unwrap` a missing location on untrusted input.
@@ -1161,10 +1310,12 @@ without a dependency.
 - Columns count Unicode scalar values from the beginning of the line, starting
   at 1, matching the lexer's current implementation.
 - The Source Manager owns each file's line index.
-  `SourceMap::location(SourceSpan)` consults that index on demand; byte offsets
-  remain the canonical identity and line/column are derived data. Invalid
-  source spans return `Err(SpanError)`, never a guessed position. Preprocessor
-  diagnostics use this path directly, without any prepared-buffer lookup.
+  `SourceMap::location(SourceSpan)` first checks that the span's
+  `AnalysisUnitId` equals the map's unit (`ForeignAnalysisUnit` otherwise), then
+  consults that index on demand; byte offsets remain the canonical identity and
+  line/column are derived data. Invalid source spans return `Err(SpanError)`,
+  never a guessed position. Preprocessor diagnostics use this path directly,
+  without any prepared-buffer lookup.
 - The lexer's `Span.line`/`Span.column` describe the prepared buffer. They are
   used for internal ordering and debugging; rendered diagnostics use the
   original file location via `SourceMap::render_span`.
@@ -1220,25 +1371,36 @@ Rules:
   directive, macro definition, or include site may have been removed from the
   prepared buffer. Resolving it through prepared coordinates would be
   impossible or wrong.
+- `PreprocessDiagnostic.primary` and every `RelatedLocation.span` must belong to
+  `map.unit()`. `RenderedDiagnostic::from_preprocess` checks this before
+  rendering and returns `ForeignAnalysisUnit` otherwise; it never falls back to
+  a same-index file of the local unit.
 - `PreparedDiagnostic.span` is exactly the frozen `Span` produced by the lexer
   or an engine over the prepared buffer. It is bridged explicitly and then
   resolved. A diagnostic that crosses several segments follows the split and
   priority rules in §7.3.
+- `RenderedDiagnostic::from_prepared` requires
+  `prepared.unit() == map.unit()`. A mismatch returns
+  `ForeignPreparedSource` before the `Span` bridge is called.
 - `Legacy` is only valid when preprocessing is disabled and the unit has no
-  map; its `span` is passed through unchanged, preserving baseline output.
+  map; its `span` is passed through unchanged, preserving baseline output. The
+  supplied `source` is that unit's root `SourceId` and is used only for CLI
+  grouping.
 - `related` is ordered from most to least relevant: macro definition, include
   site, outer invocations. Each related span is resolved by the same rule as its
   parent variant (direct `location` for `Preprocess`, prepare/resolve for
-  `Prepared`), deduplicated by `(source, start, end)`, and never replaces the
-  primary.
+  `Prepared`), must belong to the same unit, is deduplicated by
+  `(source, start, end)`, and never replaces the primary.
 - The rendered output is a `RenderedDiagnostic` in which `diagnostic.span` is
   the frozen `Span` shape in original coordinates and `source` is the original
-  file for CLI grouping. The existing `Diagnostic` type is not changed.
+  file (with its `AnalysisUnitId`) for CLI grouping. The existing `Diagnostic`
+  type is not changed.
 - JSON keeps the existing object shape for the primary location. Related
   locations are added as an optional `related` array in Phase 3 with a
   documented schema note; existing fields never change meaning.
-- An `Err` from bridging or resolution follows §7.3.1: internal diagnostic,
-  affected finding dropped, run continues, never a panic or EOF fallback.
+- An `Err` from bridging, foreign-identity checking, or resolution follows
+  §7.3.1: internal diagnostic, affected finding dropped, run continues, never a
+  panic or EOF fallback.
 
 ### 7.6.1 Worked examples: where each primary location comes from
 
@@ -1249,7 +1411,7 @@ Rules:
 | Unterminated conditional block | `PreprocessDiagnostic` | The opening `#if`/`#ifdef`/`#ifndef` directive range (the actionable place) | A zero-length point at end of the containing file | Direct `SourceSpan` |
 | Missing include, e.g. `#include "missing.lsl"` | `PreprocessDiagnostic` | The path spelling range inside the directive (`missing.lsl`) | The full directive range | Direct `SourceSpan` |
 | Recursive macro, e.g. `#define A A` then `A` | `PreprocessDiagnostic` | The invocation that recursed (the `A` occurrence) | The macro definition body; outer invocation if nested | Direct `SourceSpan` |
-| EOF diagnostic after all code was removed by `#if 0 ... #endif` | Engine `PAR013` | The map's EOF anchor: a real zero-length position at the end of the last directive/anchor (or root start) | none | `PreparedSpan(len, len)` → `resolve_span` → `eof_anchor` |
+| EOF diagnostic after all code was removed by `#if 0 ... #endif` | Engine `PAR013` | The map's EOF anchor: a real zero-length position at the end of the last directive/anchor (or root start) | none | `PreparedSource::eof_span()` → `resolve_span` → `eof_anchor` |
 
 Why the paths differ:
 
@@ -1261,7 +1423,13 @@ Why the paths differ:
   a real file position. This is the only way `PAR013` can be rendered when
   conditional compilation removed everything.
 - If the directive appears inside an include, the primary `SourceId` is that
-  included file, not the root; the include site becomes a related location.
+  included file, not the root; the include site becomes a related location. The
+  `AnalysisUnitId` is still the unit under analysis, so the span is valid for
+  that unit's map.
+- Every span in these examples belongs to exactly one unit. A `PreprocessDiagnostic`
+  built with another unit's span is rejected with `ForeignAnalysisUnit`; an
+  engine diagnostic resolved against another unit's map is rejected with
+  `ForeignPreparedSource`.
 
 ### 7.7 Why not a line map
 
@@ -1283,10 +1451,10 @@ lookup) and for future AST nodes (span lookup).
   diagnostic.
 - The map is immutable and shared with `Arc`; there is no interior mutability in
   the analysis path.
-- Resolution is total for every well-formed range in
+- Resolution is total for every well-formed range of the map's own unit in
   `[0, prepared_len]`, including empty buffers, EOF, and zero-length ranges.
-  Malformed ranges return `SpanError`, are handled once at the unified layer,
-  and never fall back to the EOF anchor.
+  Foreign, malformed, and unmapped ranges return `SpanError`, are handled once
+  at the unified layer, and never fall back to the EOF anchor.
 - `resolve_*` returns `Result`, not `Option`: callers cannot `unwrap` a missing
   location on user input. `eof_anchor()` is the only infallible resolver and is
   valid by construction.
@@ -1304,7 +1472,7 @@ lookup) and for future AST nodes (span lookup).
 | Source Manager | Include missing/unreadable/invalid UTF-8/not a file | `PreprocessDiagnostic` with a direct original `SourceSpan` at the include site; analysis continues | 1 |
 | Preprocessor | Unknown directive, malformed macro, unterminated conditional, bad `#if` expression, path rejection | `PreprocessDiagnostic`, best-effort recovery; the construct is skipped | 1 |
 | Preprocessor | Include cycle, expansion depth/size limit, diagnostic limit | `PreprocessDiagnostic` once, expansion stopped at the limit | 1 |
-| Span bridge / map | Inverted, out-of-bounds, non-UTF-8, unknown `SourceId`, map hole, broken segments | `SpanError`; internal-invariant diagnostic; only the affected finding is dropped; no panic, no EOF fallback | 1 |
+| Span bridge / map | Inverted, out-of-bounds, non-UTF-8, foreign unit/source, unknown `SourceId`, non-point, map hole, broken segments | `SpanError`; internal-invariant diagnostic; only the affected finding is dropped; no panic, no EOF fallback | 1 |
 | Lexer | Unterminated string/comment, unsupported character | `LEX` diagnostic with prepared `Span`, tokens recovered | 1 |
 | Parser | Syntax error | `PAR` diagnostic with prepared `Span`, bounded recovery | 1 |
 | Semantic | Rule violation | `SEM` diagnostic with prepared `Span` | 1 |
@@ -1323,10 +1491,12 @@ Rules:
 - Keep three failure categories separate:
   - **valid EOF/zero-length** — normal `Ok` resolution, including `PAR013` on an
     empty prepared buffer;
-  - **malformed internal coordinates** — `SpanError`, internal diagnostic,
-    affected finding dropped, run continues;
+  - **malformed or foreign coordinates** — `SpanError` (`ForeignAnalysisUnit`
+    and `ForeignPreparedSource` included), internal diagnostic, affected finding
+    dropped, run continues. Same behavior in debug and release: no assertions
+    and no panic on this path;
   - **user preprocessor errors** — `PreprocessDiagnostic` with a valid original
-    `SourceSpan`; they never take the `SpanError` path.
+    `SourceSpan` of its own unit; they never take the `SpanError` path.
 - Every new diagnostic code must be added to `docs/diagnostics.md`. The
   documentation test currently scans only `src/lexer.rs`, `src/parser.rs`, and
   `src/semantic.rs`; Phase 2 must extend its source list to the preprocessor
@@ -1372,9 +1542,15 @@ Rules:
    then both engines are supported, public, and selectable, including for
    differential testing.
 10. **`Span` keeps its dual interpretation.** Its type and fields do not change;
-    the bridge to `PreparedSpan` is explicit and checked. Existing callers of
-    `lex`/`parse` never see `PreparedSpan` unless they opt into the new API.
-11. **New diagnostic types are additive.** `PreprocessDiagnostic`,
+    the bridge to `PreparedSpan` is explicit and checked, and only reachable
+    through a `PreparedSource` (the adapter stamps that source's unit).
+    Existing callers of `lex`/`parse` never see `PreparedSpan` unless they opt
+    into the new API.
+11. **Identity-bearing types are additive.** `AnalysisUnitId`, the expanded
+    `SourceId`, `PreparedSpan` ownership, and the foreign-identity errors are new
+    APIs. They are not part of the frozen legacy surface and do not change
+    `Span`, `Token`, `Diagnostic`, or any existing function signature.
+12. **New diagnostic types are additive.** `PreprocessDiagnostic`,
     `PreparedDiagnostic`, `UnifiedDiagnosticInput`, `RenderedDiagnostic`, and
     `SpanError` are new exports. `Diagnostic` is not modified and remains the
     rendered single-location type.
@@ -1522,8 +1698,10 @@ classifications.
 - Include de-duplication uses canonical paths only for identity; display uses the
   spelling from the source.
 - Built-in metadata remains vendored and versioned in the repository.
-- Sorting of diagnostics uses a total, stable key: `(unit input order, source
+- Sorting of diagnostics uses a total, stable key: `(AnalysisUnitId, source
   load order inside the unit, start offset, end offset, code, message)`.
+- `AnalysisUnitId` assignment uses collected-input order only. It never depends
+  on map iteration, filesystem enumeration, or parallelism.
 - New tests must avoid time, randomness, and network; temporary directories
   follow the existing `temporary_directory()` pattern in the integration tests.
 
@@ -1537,6 +1715,7 @@ provisional; Phase 1/2 must fix them as constants and add tests.
 | Limit | Provisional value | Enforcement point |
 | --- | --- | --- |
 | Root file size | existing practical limits; explicit cap in Phase 1 | Source Manager |
+| Root AnalysisUnits per CLI invocation | 65,536 (`AnalysisUnitId` is `u32`) | CLI/pipeline |
 | Included file size | 4 MiB | Source Manager |
 | Source files per AnalysisUnit | 256 | Source Manager |
 | Include depth | 64 | Preprocessor include stack |
@@ -1553,6 +1732,9 @@ Requirements:
 - Exceeding a limit produces a single, specific `PRE`/`AST` diagnostic and stops
   the affected expansion; the rest of the unit continues.
 - Limits are checked before allocation where possible.
+- `AnalysisUnitId` assignment uses checked arithmetic. Exceeding the unit or
+  file-index capacity is an input error (exit 2), never a wrap, re-use, or
+  `panic`.
 - Limit tests must be part of Phase 2/3/4 acceptance.
 - No limit may depend on machine memory size.
 
@@ -1572,23 +1754,48 @@ Requirements:
    system. Mandatory cases: empty source file, empty prepared buffer,
    `Eof`/`PAR013` resolution, zero-length spans, points exactly on segment
    boundaries, and spans crossing several segments.
-2a. **Span bridge tests**: `PreparedSource::prepared_span` and
-   `PreparedSpan::try_from_lexer` accept every lexer span in a valid prepared
-   buffer and preserve byte offsets; they reject inverted ranges, ranges past
-   `prepared_len`, and offsets inside a multi-byte UTF-8 scalar with the
-   documented `SpanError`; `Span.line`/`column` are ignored by the bridge. The
-   API has no `From`/`Into` impl (confirmed by review and, where practical, a
-   compile-fail fixture without adding a dependency).
+2a. **Span bridge tests**: `PreparedSource::prepared_span` is the only bridge.
+   It accepts every lexer span in a valid prepared buffer, preserves byte
+   offsets, stamps the source's `AnalysisUnitId`, and rejects inverted ranges,
+   ranges past `prepared_len`, and offsets inside a multi-byte UTF-8 scalar with
+   the documented `SpanError`. `Span.line`/`column` are ignored. There is no
+   public `PreparedSpan` constructor and no `From`/`Into` impl (confirmed by
+   review and, where practical, a compile-fail fixture without adding a
+   dependency).
 2b. **Invalid-coordinate tests**: the §7.3.1 matrix is exercised directly:
    inverted prepared/original ranges, out-of-bounds prepared/original ranges,
-   non-boundary offsets, unknown `SourceId`, unmapped prepared ranges, and
-   deliberately corrupted segment tables. Every case returns the expected
-   `SpanError`, never panics, and never returns the EOF anchor. Valid EOF,
-   zero-length, and empty-buffer cases return `Ok`.
+   non-boundary offsets, foreign unit/source, unknown `SourceId`, non-point
+   input to `resolve_point`, unmapped prepared ranges, and deliberately
+   corrupted segment tables. Every case returns the expected `SpanError`, never
+   panics, and never returns the EOF anchor. Valid EOF, zero-length, and
+   empty-buffer cases return `Ok`.
+2c. **Unit-identity isolation suite (Phase 1, mandatory; TEST A–G)**:
+   - **TEST A:** two AnalysisUnits whose roots both have local file index 0.
+     Passing a `SourceSpan` from A to B's `SourceMap::location`/`render_span`
+     returns `ForeignAnalysisUnit`; no B coordinate is produced.
+   - **TEST B:** two `PreparedSource`s with equal text length. Passing a
+     `PreparedSpan` from A to B's `resolve_span` returns
+     `ForeignPreparedSource`; equal `start`/`end` is not accepted.
+   - **TEST C:** A's `eof_anchor()` passed to B's `location` returns
+     `ForeignAnalysisUnit`; A's `eof_span()` passed to B's `resolve_point`
+     returns `ForeignPreparedSource`.
+   - **TEST D:** an invalid range in a debug build returns `SpanError` and does
+     not panic.
+   - **TEST E:** the same invalid-range tests in a release build produce
+     identical `Err` variants and messages; no behavior depends on
+     `debug_assertions`.
+   - **TEST F:** valid EOF and zero-length spans resolve to `Ok` in both debug
+     and release builds.
+   - **TEST G:** a `RelatedLocation` whose `SourceSpan` belongs to another unit
+     causes `RenderedDiagnostic::from_preprocess` to return
+     `ForeignAnalysisUnit`; the diagnostic is not attributed to a local file.
+   These tests run as `cargo test` **and** `cargo test --release` in Phase 1 CI;
+   assertions must hold identically in both profiles.
 3. **AnalysisUnit isolation tests**: two roots in one CLI invocation must not
    share macros, conditional-stack state, include guards, `SourceId` namespaces,
-   or diagnostics; changing one file's `#define` must not change the other
-   file's output; order of units must not change results.
+   `PreparedSpan` identities, or diagnostics; changing one file's `#define`
+   must not change the other file's output; order of units must not change
+   results. Cross-unit coordinates must fail with the identity errors above.
 4. **Preprocessor tests** (Phases 2–3): one fixture per directive and per macro
    form, plus malformed and adversarial inputs (unterminated conditionals,
    recursive macros, paste bombs, include cycles, missing includes, path
@@ -1622,6 +1829,9 @@ Requirements:
 
 - Every new diagnostic code has at least one positive and one boundary test.
 - Every phase adds tests for its resource limits and malformed-input behavior.
+- Phase 1 runs the TEST A–G identity suite under both `cargo test` and
+  `cargo test --release`; results must be identical, with no panic in either
+  profile.
 - No test uses the network, sleeps, or depends on host locale/time zone.
 - Tests must pass on MSRV 1.75; Phase 1+ should add an MSRV check step to the
   experimental workflow (separate from the required quality steps).
@@ -1746,21 +1956,45 @@ implementations, not stages of the same code.
 - **Acceptance criteria:** all criteria in the Phase 0.2 task statement, no
   runtime code changes, full CI gate passes.
 
+#### Phase 0.3 — Coordinate namespace isolation and panic-free contract (this revision)
+
+- **Goal:** make cross-unit/cross-source coordinate mixing impossible to accept
+  silently and remove assertions from the malformed-coordinate path.
+- **Corrections:**
+  - add `AnalysisUnitId` and make `SourceId` contain `{ unit, file }`;
+  - stamp `PreparedSpan` with the owning unit and reject foreign spans in
+    `resolve_span`/`resolve_point` with `ForeignPreparedSource`;
+  - reject foreign `SourceSpan`/`RelatedLocation`/EOF anchors with
+    `ForeignAnalysisUnit`;
+  - require point resolution to take a zero-length `PreparedSpan`, add
+    `PreparedSource::eof_span`, and return `NotAPoint` otherwise;
+  - reduce the `Span` bridge to the single public
+    `PreparedSource::prepared_span` adapter and document that it assigns
+    identity but cannot recover provenance from `Span`;
+  - remove `debug_assert!` from the malformed-coordinate path; behavior is
+    identical in debug and release and always `Result::Err`.
+- **Acceptance criteria:** all criteria in the Phase 0.3 task statement, TEST A–G
+  recorded in the Phase 1 plan, no runtime code changes, full CI gate passes.
+
 ### Phase 1 — Source Manager, Source Map, Identity Preprocessor
 
 - **Goal:** make multi-file provenance and line resolution real without changing
   analysis.
 - **Functionality:**
-  - `SourceId`, `SourceFile`, `PreparedSpan`, `SourceSpan`, `SourceLocation`,
-    `SourceOrigin`, `SourceMap` with `Result`-based `resolve_span`,
-    `resolve_point`, `location`, `render_span`, `source_span`, and
-    `eof_anchor`; `SpanError` with the §7.3.1 variants;
-  - `PreparedSource::prepared_span` and `PreparedSpan::try_from_lexer` as the
-    only `Span -> PreparedSpan` bridge;
+  - `AnalysisUnitId`, `SourceId { unit, file }`, `SourceFile`, `PreparedSpan`
+    (unit-stamped), `SourceSpan`, `SourceLocation`, `SourceOrigin`, `SourceMap`
+    with `Result`-based `resolve_span`, `resolve_point` (point span input),
+    `location`, `render_span`, `source_span`, `eof_anchor`, and `unit`;
+    `SpanError` with the §7.3.1 variants, including `ForeignAnalysisUnit`,
+    `ForeignPreparedSource`, and `NotAPoint`;
+  - `PreparedSource::prepared_span` as the **only** public `Span ->
+    PreparedSpan` adapter, plus `PreparedSource::eof_span`; no public
+    `PreparedSpan` constructor;
   - additive diagnostic types (`PreprocessDiagnostic`, `PreparedDiagnostic`,
     `UnifiedDiagnosticInput`, `RenderedDiagnostic`) and their resolution rules,
     even though real `PRE` findings start in Phase 2;
-  - `AnalysisUnit` with unit-local `SourceId` namespace, map, diagnostics, and
+  - `AnalysisUnit` with a deterministic `AnalysisUnitId`, a unit-scoped
+    `SourceId` namespace, exactly one `PreparedSource`, a map, diagnostics, and
     preprocessor state placeholders (macro table/conditional stack are empty
     until Phase 2);
   - per-file line index with lexer-compatible columns;
@@ -1772,16 +2006,23 @@ implementations, not stages of the same code.
 - **Modules:** `src/source/{mod.rs,file.rs,line_index.rs,map.rs,manager.rs,unit.rs}`,
   `src/preprocessor/{mod.rs,identity.rs,config.rs,diagnostics.rs}`,
   `src/diagnostic/resolve.rs`, `src/pipeline.rs` (unit orchestration).
-- **Dependencies:** Phase 0/0.1/0.2 contracts.
+- **Dependencies:** Phase 0/0.1/0.2/0.3 contracts.
 - **Acceptance criteria:**
   - identity prepared text equals input bytes for all fixtures;
   - map covers `[0, prepared_len)`, segments sorted and non-overlapping;
-  - `resolve_span`/`resolve_point` return `Ok` for every well-formed range,
-    including empty buffers, EOF (`prepared_len`), zero-length ranges, boundary
-    offsets, and cross-segment ranges; malformed ranges return the documented
-    `SpanError` and never fall back to the EOF anchor;
-  - the `Span -> PreparedSpan` bridge rejects inverted, out-of-bounds, and
-    non-UTF-8-boundary spans; there is no implicit conversion;
+  - `resolve_span`/`resolve_point` return `Ok` for every well-formed range of
+    their own unit, including empty buffers, EOF (`prepared_len`), zero-length
+    ranges, boundary offsets, and cross-segment ranges; malformed ranges return
+    the documented `SpanError` and never fall back to the EOF anchor;
+  - a `SourceSpan` from another unit returns `ForeignAnalysisUnit`; a
+    `PreparedSpan` from another unit/source returns `ForeignPreparedSource`;
+    equal local file indexes or equal offsets never permit acceptance;
+  - the single `PreparedSource::prepared_span` bridge rejects inverted,
+    out-of-bounds, and non-UTF-8-boundary spans, stamps the unit, and is the
+    only public constructor path for `PreparedSpan`;
+  - the full TEST A–G suite from §13 passes identically under `cargo test` and
+    `cargo test --release`; no resolution-path assertion or panic exists in
+    either profile;
   - `UnifiedDiagnosticInput` accepts a synthetic `PreprocessDiagnostic` with an
     original `SourceSpan`, a `PreparedDiagnostic` bridged through the map, and a
     `Legacy(Diagnostic)` passed through unchanged;
@@ -1790,16 +2031,18 @@ implementations, not stages of the same code.
     original `SourceSpan` (verified with the §7.6.1 example shapes);
   - every offset resolves to the same line/column as the current lexer for
     ASCII, UTF-8, CRLF, and empty files;
-  - creating two AnalysisUnits in one run keeps their `SourceId` namespaces and
-    diagnostics isolated;
+  - creating two AnalysisUnits in one run assigns different
+    `AnalysisUnitId`s, keeps their `SourceId`/`PreparedSpan` identities and
+    diagnostics isolated, and rejects every cross-unit coordinate;
   - no public legacy API change; `parse_legacy` exists as a thin explicit
     wrapper while `parse` keeps its exact behavior;
   - no new dependencies; MSRV 1.75.
 - **Tests:** unit tests for map construction/lookup, identity round-trip,
   UTF-8/CRLF columns, empty source, empty buffer, EOF/PAR013, zero-length and
-  cross-segment spans, boundary points, multi-unit isolation, the full
-  malformed-coordinate matrix from §7.3.1, the `Span` bridge, and mixed
-  `UnifiedDiagnosticInput` handling (must not panic).
+  cross-segment spans, boundary points, multi-unit isolation, TEST A–G, the full
+  malformed-coordinate matrix from §7.3.1, the single `Span` adapter, and mixed
+  `UnifiedDiagnosticInput` handling. Run in both debug and release profiles;
+  must not panic in either.
 - **Done when:** the full suite passes and identity/EOF/unit-isolation paths are
   covered by contract tests.
 
@@ -1811,8 +2054,9 @@ implementations, not stages of the same code.
   `#else`, `#endif`; object-like and function-like macros; macro invocation
   with arguments; integer expression evaluator with defined precedence and
   overflow behavior; `PreprocessDiagnostic` for every `PRE` finding with direct
-  original `SourceSpan`s; expansion limits; source map segments for invocations,
-  definitions, and arguments.
+  original `SourceSpan`s of the same unit and `RelatedLocation`s of the same
+  unit; expansion limits; source map segments for invocations, definitions, and
+  arguments.
 - **Modules:** `src/preprocessor/{directive.rs,macros.rs,expr.rs,expand.rs,
   diagnostics.rs}`.
 - **Dependencies:** Phase 1 (source map, prepared source).
@@ -1855,6 +2099,8 @@ implementations, not stages of the same code.
     is the path spelling in the including file, with the directive as related;
   - preprocessor findings bypass `resolve_span`; engine findings are bridged and
     resolved; plain-LSL findings pass through unchanged;
+  - every rendered diagnostic and note belongs to one unit; cross-unit spans
+    are rejected by the identity checks, never rendered against a local file;
   - the same include included twice behaves per documented guard rules;
   - `#pragma once` behavior is covered by its own suite and is not presented as
     verified Firestorm compatibility;
@@ -1966,16 +2212,18 @@ src/
 
   source/
     mod.rs                re-exports
-    file.rs               SourceId, SourceFile, kinds, text ownership
+    file.rs               SourceId { unit, file }, SourceFile, kinds, text
     line_index.rs         byte offset -> line/column (lexer-compatible)
-    map.rs                PreparedSpan, SourceSpan, SourceOrigin, SourceMap,
-                          SpanError, segments, EOF anchor, checked resolve_*
+    map.rs                unit-bound SourceMap, PreparedSpan, SourceSpan,
+                          SourceOrigin, SpanError, segments, EOF anchor,
+                          checked resolve_* with foreign-identity rejection
     manager.rs            per-unit loading, path policy, cycles, limits
-    unit.rs               AnalysisUnit: per-root namespace, map, diagnostics
+    unit.rs               AnalysisUnitId assignment, AnalysisUnit: source
+                          namespace, exactly one PreparedSource, map, diagnostics
 
   preprocessor/
-    mod.rs                prepare(), PreprocessConfig, PreparedSource,
-                          prepared_span Span bridge
+    mod.rs                prepare(), PreprocessConfig, PreparedSource with
+                          unit id, prepared_span (only bridge), eof_span
     identity.rs           Phase 1 identity pass-through
     directive.rs          Phase 2 raw-text directive scanner
     macros.rs             macro table, definitions, expansion
@@ -2026,8 +2274,11 @@ Rules for the structure:
   `Prepared`, and pass-through for `Legacy`. It is the only place that builds
   `RenderedDiagnostic`.
 - **`Span` bridge** lives with `PreparedSource` (it needs the prepared text for
-  UTF-8 validation) and returns `PreparedSpan`; no other module may convert
-  `Span` to prepared coordinates.
+  UTF-8 validation) and returns a unit-stamped `PreparedSpan`; no other module
+  may convert `Span` to prepared coordinates.
+- **Unit identity** is created in `src/source/unit.rs` and embedded in every
+  `SourceId`/`PreparedSpan`/`SourceSpan`. `SourceMap` checks ownership before
+  geometry; no other module may mint ids or spans.
 
 Modules are created only when their phase starts. Phase 0 does not create empty
 placeholder modules.
@@ -2087,6 +2338,17 @@ Risks tracked from the baseline analysis:
 18. `PreprocessDiagnostic` must capture its `SourceSpan` while scanning the
     original bytes. Reconstructing it later from the prepared buffer is
     impossible when a directive or macro definition was removed.
+19. Unit-local ids are not enough: without the embedded `AnalysisUnitId`, a
+    `SourceId(0)` from A would be indistinguishable from `SourceId(0)` from B and
+    could silently render B's file. The unit must be part of `SourceId` and of
+    `PreparedSpan`, and checked before geometry.
+20. `Span` carries no provenance. The adapter can validate a range and assign
+    the current source's identity, but it cannot prove the span came from that
+    source. Do not claim such verification; enforce the calling convention that
+    engines receive only their own `PreparedSource`.
+21. `debug_assert!` is not an acceptable malformed-input policy. Debug and
+    release must return the same `Result`; assertions in the resolution path
+    would make behavior build-dependent and violate panic-free handling.
 
 Open questions to resolve during implementation (with an update to this
 document):
@@ -2107,8 +2369,8 @@ document):
 ## 18. Glossary
 
 - **Span bridge:** the explicit, checked `Span -> PreparedSpan` conversion
-  (`PreparedSource::prepared_span`), valid only for spans produced from the
-  prepared buffer.
+  (`PreparedSource::prepared_span`). It validates the range and assigns the
+  source's unit; it cannot recover provenance that `Span` does not carry.
 - **PreparedDiagnostic:** lexer/parser/semantic finding carrying a frozen `Span`
   in prepared coordinates.
 - **PreprocessDiagnostic:** preprocessor finding carrying a direct original
@@ -2119,17 +2381,25 @@ document):
   original `SourceId`, and related locations.
 - **SpanError:** explicit error for malformed/invalid coordinates; never a
   silent fallback.
+- **AnalysisUnitId:** deterministic run-local unit identity assigned by the CLI
+  in input order; not user-facing.
 - **AnalysisUnit:** the independent analysis of one root file or stdin stream;
-  owns its `SourceId` namespace, macro table, conditional stack, include graph,
-  `SourceMap`, and diagnostics.
+  owns its `AnalysisUnitId`, `SourceId` namespace, exactly one `PreparedSource`,
+  macro table, conditional stack, include graph, `SourceMap`, and diagnostics.
+- **ForeignAnalysisUnit:** `SpanError` for a `SourceSpan`/`RelatedLocation`/
+  EOF anchor used against another unit's map.
+- **ForeignPreparedSource:** `SpanError` for a `PreparedSpan` used against
+  another unit's `SourceMap`.
+- **EOF span:** the unit-stamped zero-length `PreparedSpan` returned by
+  `PreparedSource::eof_span`, used for EOF point resolution.
 - **Prepared source / prepared buffer:** the single UTF-8 text produced by the
   preprocessor and consumed by the lexer. It is not a `SourceFile`.
-- **Prepared span (`PreparedSpan`):** a byte range in the prepared buffer,
-  with no `SourceId`.
+- **Prepared span (`PreparedSpan`):** a byte range in one unit's prepared
+  buffer, carrying the owning `AnalysisUnitId` but no `SourceId`.
 - **Source span (`SourceSpan`):** a byte range in an original root/include file,
-  always with a real `SourceId`.
-- **EOF anchor:** a real original-file `SourceSpan` used for empty prepared
-  buffers and zero-length spans at the end of input.
+  with a `SourceId` that embeds the owning `AnalysisUnitId`.
+- **EOF anchor:** a unit-owned, real original-file `SourceSpan` used for empty
+  prepared buffers and zero-length spans at the end of input.
 - **Origin:** one link describing where prepared bytes came from.
 - **Origin chain:** the ordered list of origins from prepared bytes back to the
   root file.
