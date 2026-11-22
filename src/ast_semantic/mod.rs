@@ -63,6 +63,14 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
         &scopes,
         &functions,
     ));
+    diagnostics.extend(rules::unresolved_variables::check(
+        ast,
+        &expressions.expressions,
+        &calls,
+        &scopes,
+        &functions,
+    ));
+    diagnostics.extend(rules::deprecated_calls::check(&calls, &functions));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);
