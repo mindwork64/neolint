@@ -347,9 +347,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if has_body {
-            self.expect(TokenKind::RBrace, "expected '}' after state body");
-        }
+        let body_closed = if has_body {
+            self.expect(TokenKind::RBrace, "expected '}' after state body")
+        } else {
+            false
+        };
         let name_missing = name.is_empty();
         StateDeclaration {
             span: self.span_from(start, self.current),
@@ -358,6 +360,7 @@ impl<'a> Parser<'a> {
             name_missing,
             is_default,
             body_missing: !has_body,
+            body_closed,
             events,
         }
     }
@@ -377,9 +380,10 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
-        self.expect(TokenKind::RBrace, "expected '}' after block");
+        let closed = self.expect(TokenKind::RBrace, "expected '}' after block");
         Some(Block {
             span: self.span_from(start, self.current),
+            closed,
             statements,
         })
     }

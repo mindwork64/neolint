@@ -100,6 +100,8 @@ pub struct StateDeclaration {
     pub is_default: bool,
     /// Whether the opening state-body brace was missing.
     pub body_missing: bool,
+    /// Whether the closing state-body brace was present.
+    pub body_closed: bool,
     /// Event handlers in source order.
     pub events: Vec<EventHandler>,
 }
@@ -122,8 +124,10 @@ pub struct EventHandler {
 /// Braced statement block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    /// Span from `{` through `}`.
+    /// Span from `{` through `}` (or through the recovery point).
     pub span: Span,
+    /// Whether the closing brace was present.
+    pub closed: bool,
     /// Statements in source order.
     pub statements: Vec<Statement>,
 }
