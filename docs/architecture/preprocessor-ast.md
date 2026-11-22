@@ -1509,9 +1509,10 @@ without a dependency.
 
 ### 7.4 Lines and columns
 
-- Line indices are built per file from the file's own bytes. `\n` increments the
-  line; `\r` is ignored for line counting, matching the lexer's current
-  behavior.
+- Line indices are built per file from the file's own bytes and match the
+  existing lexer exactly: `\n` increments the line; `\r` also increments the
+  line and consumes an immediately following `\n` as the same logical newline.
+  A lone `\r` is therefore a line break, not an ignored byte.
 - Columns count Unicode scalar values from the beginning of the line, starting
   at 1, matching the lexer's current implementation.
 - The Source Manager owns each file's line index.
@@ -2339,7 +2340,7 @@ implementations, not stages of the same code.
   - a `PreprocessDiagnostic` never calls `resolve_span`; its primary is the
     original `SourceSpan` (verified with the §7.6.1 example shapes);
   - every offset resolves to the same line/column as the current lexer for
-    ASCII, UTF-8, CRLF, and empty files;
+    ASCII, UTF-8, LF, lone CR, CRLF, and empty files;
   - creating two AnalysisUnits in one run assigns different
     `AnalysisUnitId`s, keeps their `SourceId`/`PreparedSpan` identities and
     diagnostics isolated, and rejects every cross-unit coordinate;
