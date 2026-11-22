@@ -112,8 +112,9 @@ not added to the type system.
 ### Enabling gates
 
 The preprocessing API exposes independent `switches` and `lazy_lists` settings,
-and Firestorm's `USE_SWITCHES`/`USE_LAZY_LISTS` macros are detected from the real
-active macro state (including includes) and latch once defined. The
+and Firestorm's `USE_SWITCHES`/`USE_LAZY_LISTS` macros are detected after
+emitted preprocessing tokens from the real active macro state (including
+includes); once observed, a later `#undef` does not disable the extension. The
 `//fspreprocessor off` kill switch disables preprocessing and both extensions.
 `PreparedSource` exposes the effective gates; pass them to
 `AstParseOptions`/`parse_ast_with_options`. The CLI still runs the Legacy engine

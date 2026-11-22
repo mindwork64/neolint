@@ -2831,10 +2831,12 @@ switches  = Firestorm dialect && (setting || USE_SWITCHES latched)
 lazy list = Firestorm dialect && (setting || USE_LAZY_LISTS latched)
 ```
 
-LSL mode forces both off. A `USE_*` macro is latched when it is actively defined
-by `#define`, including definitions from includes; inactive conditional
-branches, comments and strings do not trigger it. `#undef` does not clear a
-latched discovery. `//fspreprocessor off` returns identity text with both gates
+LSL mode forces both off. After each emitted preprocessing token, the
+preprocessor checks whether the corresponding `USE_*` macro is currently
+defined. The first such observation latches that feature, including definitions
+from includes; inactive conditional branches, comments and strings do not
+trigger it. A later `#undef` does not clear an already latched discovery.
+`//fspreprocessor off` returns identity text with both gates
 off, overriding settings and macros.
 
 **AST API.** `PreparedSource::switches_enabled()`/`lazy_lists_enabled()` expose

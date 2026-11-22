@@ -639,10 +639,9 @@ impl<'a> Parser<'a> {
         if self.matches(TokenKind::Colon) {
             // Colon form: collect fallthrough statements below.
         } else if self.check(TokenKind::LBrace) {
+            let block_start = self.current;
             if let Some(block) = self.parse_block() {
-                statements.push(
-                    self.statement(self.current.saturating_sub(1), StatementKind::Block(block)),
-                );
+                statements.push(self.statement(block_start, StatementKind::Block(block)));
             }
         } else {
             self.error_here("PAR007", "expected ':' or '{' after switch case label");
@@ -894,7 +893,118 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self, min_precedence: u8) -> Option<Expression> {
-        self.parse_expression_at(min_precedence, 0)
+        let expression = self.parse_expression_at(min_precedence, 0)?;
+        if self.options.lazy_lists_enabled() {
+            self.validate_lazy_expression(&expression);
+        }
+        Some(expression)
+    }
+
+    /// Validate lazy-list nodes against the forms actually transformed by
+    /// Firestorm: typed extraction (with an optional single parenthesis pair)
+    /// and single-index assignment. A bare indexed read is not a valid form.
+    fn validate_lazy_expression(&mut self, expression: &Expression) {
+        match &expression.kind {
+            ExpressionKind::LazyIndex(lazy) => {
+                self.push_error(
+                    "PAR007",
+                    "lazy-list indexing requires a supported typed cast or simple indexed assignment",
+                    lazy.span,
+                );
+                self.validate_lazy_index_children(lazy);
+            }
+            ExpressionKind::Assignment(assignment) => {
+                if let ExpressionKind::LazyIndex(lazy) = &assignment.target.kind {
+                    if lazy.indices.len() != 1 {
+                        self.push_error(
+                            "PAR007",
+                            "lazy-list indexed assignment requires exactly one index",
+                            lazy.span,
+                        );
+                    }
+                    if assignment.operator != AssignmentOperator::Assign {
+                        self.push_error(
+                            "PAR010",
+                            "compound assignment is not supported for lazy-list indexing",
+                            assignment.operator_span,
+                        );
+                    }
+                    self.validate_lazy_index_children(lazy);
+                } else {
+                    self.validate_lazy_expression(&assignment.target);
+                }
+                self.validate_lazy_expression(&assignment.value);
+            }
+            ExpressionKind::Cast(cast) => {
+                // Firestorm's typed-reference regex allows one optional pair of
+                // parentheses around the identifier/index expression.
+                let operand = match &cast.operand.kind {
+                    ExpressionKind::Parenthesized(inner) => inner.as_ref(),
+                    _ => cast.operand.as_ref(),
+                };
+                if let ExpressionKind::LazyIndex(lazy) = &operand.kind {
+                    let valid_count = if cast.ty.kind == TypeKind::List {
+                        (1..=2).contains(&lazy.indices.len())
+                    } else {
+                        lazy.indices.len() == 1
+                    };
+                    if !valid_count {
+                        self.push_error(
+                            "PAR007",
+                            "lazy-list cast requires one index, or two for a list range",
+                            lazy.span,
+                        );
+                    }
+                    self.validate_lazy_index_children(lazy);
+                } else {
+                    self.validate_lazy_expression(&cast.operand);
+                }
+            }
+            ExpressionKind::Parenthesized(inner) => self.validate_lazy_expression(inner),
+            ExpressionKind::List(list) => {
+                for element in &list.elements {
+                    self.validate_lazy_expression(element);
+                }
+            }
+            ExpressionKind::Vector(vector) => {
+                for component in &vector.components {
+                    self.validate_lazy_expression(component);
+                }
+            }
+            ExpressionKind::Rotation(rotation) => {
+                for component in &rotation.components {
+                    self.validate_lazy_expression(component);
+                }
+            }
+            ExpressionKind::Call(call) => {
+                self.validate_lazy_expression(&call.callee);
+                for argument in &call.arguments {
+                    self.validate_lazy_expression(argument);
+                }
+            }
+            ExpressionKind::Component(component) => {
+                self.validate_lazy_expression(&component.base);
+            }
+            ExpressionKind::Unary(unary) => self.validate_lazy_expression(&unary.operand),
+            ExpressionKind::Binary(binary) => {
+                self.validate_lazy_expression(&binary.left);
+                self.validate_lazy_expression(&binary.right);
+            }
+            ExpressionKind::Increment(increment) => {
+                self.validate_lazy_expression(&increment.operand);
+            }
+            ExpressionKind::Identifier(_)
+            | ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::String(_)
+            | ExpressionKind::Error(_) => {}
+        }
+    }
+
+    fn validate_lazy_index_children(&mut self, lazy: &LazyIndexExpression) {
+        for index in &lazy.indices {
+            self.validate_lazy_expression(index);
+        }
     }
 
     fn parse_expression_at(&mut self, min_precedence: u8, depth: usize) -> Option<Expression> {
@@ -948,22 +1058,6 @@ impl<'a> Parser<'a> {
             };
             let span = join_spans(left.span, right.span);
             let kind = if let Some(operator) = assignment_operator(operator_kind) {
-                if let ExpressionKind::LazyIndex(lazy) = &left.kind {
-                    if lazy.indices.len() != 1 {
-                        self.push_error(
-                            "PAR007",
-                            "lazy-list indexed assignment requires exactly one index",
-                            left.span,
-                        );
-                    }
-                    if operator != AssignmentOperator::Assign {
-                        self.push_error(
-                            "PAR010",
-                            "compound assignment is not supported for lazy-list indexing",
-                            operator_span,
-                        );
-                    }
-                }
                 ExpressionKind::Assignment(AssignmentExpression {
                     span,
                     target: Box::new(left),
@@ -1046,20 +1140,6 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type()?;
             self.advance(); // ')'
             let operand = self.parse_prefix(depth + 1)?;
-            if let ExpressionKind::LazyIndex(lazy) = &operand.kind {
-                let valid_count = if ty.kind == TypeKind::List {
-                    (1..=2).contains(&lazy.indices.len())
-                } else {
-                    lazy.indices.len() == 1
-                };
-                if !valid_count {
-                    self.push_error(
-                        "PAR007",
-                        "lazy-list cast requires one index, or two for a list range",
-                        operand.span,
-                    );
-                }
-            }
             let span = join_spans(start_span, operand.span);
             let _ = ty_token;
             return Some(Expression {

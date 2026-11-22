@@ -151,8 +151,19 @@ fn use_macros_latch_only_in_firestorm_and_only_their_own_extension() {
     );
     assert!(!switches && !lazy);
 
+    // The directive newline is emitted while the macro is defined, so
+    // Firestorm's per-token check latches the feature before the following undef.
     let (_, _, switches, lazy) = analyze(
         "#define USE_SWITCHES\n#undef USE_SWITCHES\ndefault { state_entry() { } }",
+        PreprocessSettings::firestorm(),
+    );
+    assert!(switches);
+    assert!(!lazy);
+
+    // Once an emitted token observes the definition, the extension remains
+    // enabled even after a later #undef.
+    let (_, _, switches, lazy) = analyze(
+        "#define USE_SWITCHES\ninteger reached;\n#undef USE_SWITCHES\ndefault { state_entry() { } }",
         PreprocessSettings::firestorm(),
     );
     assert!(switches);
@@ -408,8 +419,9 @@ fn lazy_index_access_assignment_and_cast_types_are_typed() {
 
 #[test]
 fn lazy_index_expressions_preserve_calls_nesting_and_rhs() {
-    let source =
-        switch_program("myList[getIndex() + 1] = makeValue(other[0]); (integer)((myList[2]));");
+    let source = switch_program(
+        "myList[getIndex() + 1] = makeValue((integer)other[0]); (integer)(myList[2]);",
+    );
     let (ast, diagnostics) = parse_lazy(&source);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let body = event_body(&ast);
@@ -430,6 +442,9 @@ fn lazy_index_expressions_preserve_calls_nesting_and_rhs() {
 #[test]
 fn malformed_lazy_constructs_diagnose_and_recover() {
     for source in [
+        switch_program("myList[0]; integer later;"),
+        switch_program("consume(myList[0]); integer later;"),
+        switch_program("myList[other[0]] = 1; integer later;"),
         switch_program("myList[]; integer later;"),
         switch_program("myList[1; integer later;"),
         switch_program("myList[1,2,3]; integer later;"),
@@ -446,6 +461,39 @@ fn malformed_lazy_constructs_diagnose_and_recover() {
                 matches!(&statement.kind, StatementKind::Local(local) if local.declarators[0].name == "later")
             }),
             "later statement lost for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn lazy_index_reads_require_a_firestorm_typed_cast() {
+    for source in [
+        switch_program("myList[0]; integer later;"),
+        switch_program("consume(myList[index]); integer later;"),
+        switch_program("myList[index] + 1; integer later;"),
+    ] {
+        let (ast, diagnostics) = parse_lazy(&source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR007"),
+            "bare lazy-list read was accepted: {source:?}"
+        );
+        assert!(event_body(&ast).statements.iter().any(|statement| {
+            matches!(&statement.kind, StatementKind::Local(local) if local.declarators[0].name == "later")
+        }));
+    }
+
+    for source in [
+        switch_program("(integer)myList[0];"),
+        switch_program("(integer)(myList[0]);"),
+        switch_program("(list)myList[first,last];"),
+        switch_program("myList[0] = value;"),
+    ] {
+        let (_, diagnostics) = parse_lazy(&source);
+        assert!(
+            diagnostics.is_empty(),
+            "supported Firestorm lazy-list form was rejected: {source:?}: {diagnostics:?}"
         );
     }
 }
@@ -594,6 +642,10 @@ fn switch_break_inside_nested_block_and_default_block_work() {
     let StatementKind::Block(case_block) = &arms[0].statements[0].kind else {
         panic!("case block")
     };
+    assert_eq!(
+        &source[arms[0].statements[0].span.start..arms[0].statements[0].span.end],
+        "{ break; }"
+    );
     assert!(matches!(
         case_block.statements[0].kind,
         StatementKind::Break(_)

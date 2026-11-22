@@ -257,6 +257,15 @@ impl<'a> Preprocessor<'a> {
             if item.text.is_empty() {
                 continue;
             }
+            // Firestorm checks USE_* after each emitted preprocessing token,
+            // not when the macro is defined. This matters when a script defines
+            // and undefines a feature macro before emitting any source token.
+            if self.macros.get("USE_SWITCHES").is_some() {
+                self.switches_latched = true;
+            }
+            if self.macros.get("USE_LAZY_LISTS").is_some() {
+                self.lazy_lists_latched = true;
+            }
             let direct = matches!(item.origin, WorkOrigin::Direct);
             if direct {
                 if let Some(context) = self.include_context {
@@ -717,11 +726,6 @@ impl<'a> Preprocessor<'a> {
             replacement: pieces,
             definition_span: directive_span,
         };
-        if definition.name == "USE_SWITCHES" {
-            self.switches_latched = true;
-        } else if definition.name == "USE_LAZY_LISTS" {
-            self.lazy_lists_latched = true;
-        }
         let existing_span = self
             .macros
             .get(&definition.name)
