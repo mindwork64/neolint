@@ -13,7 +13,9 @@
 //! accepted regardless of extension; stdin (`-`) may appear only once.
 use neolint::config::LintConfig;
 use neolint::semantic::analyze_with_syntax_diagnostics;
-use neolint::{lex, parse, Diagnostic, Severity};
+use neolint::{
+    lex, parse, AnalysisRun, Diagnostic, PreprocessDialect, PreprocessSettings, Severity,
+};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -46,6 +48,9 @@ fn run() -> i32 {
     let mut config_path = None;
     let mut disabled_rules = Vec::new();
     let mut severity_overrides = Vec::new();
+    let mut preprocess_flag = false;
+    let mut dialect_override = None;
+    let mut include_dirs_cli = Vec::new();
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -59,6 +64,50 @@ fn run() -> i32 {
                 return 0;
             }
             "--tokens" => show_tokens = true,
+            "--preprocess" => preprocess_flag = true,
+            "--dialect" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: --dialect requires 'lsl' or 'firestorm'");
+                    return 2;
+                };
+                dialect_override = match value.as_str() {
+                    "lsl" => Some(PreprocessDialect::Lsl),
+                    "firestorm" => Some(PreprocessDialect::Firestorm),
+                    _ => {
+                        eprintln!("neolint: invalid dialect '{value}' (expected lsl or firestorm)");
+                        return 2;
+                    }
+                };
+            }
+            "-I" | "--include-dir" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: {arg} requires a directory path");
+                    return 2;
+                };
+                include_dirs_cli.push(PathBuf::from(value));
+            }
+            _ if arg.starts_with("-I") && arg.len() > 2 => {
+                include_dirs_cli.push(PathBuf::from(&arg[2..]));
+            }
+            _ if arg.starts_with("--include-dir=") => {
+                let value = &arg["--include-dir=".len()..];
+                if value.is_empty() {
+                    eprintln!("neolint: --include-dir requires a directory path");
+                    return 2;
+                }
+                include_dirs_cli.push(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--dialect=") => {
+                let value = &arg["--dialect=".len()..];
+                dialect_override = match value {
+                    "lsl" => Some(PreprocessDialect::Lsl),
+                    "firestorm" => Some(PreprocessDialect::Firestorm),
+                    _ => {
+                        eprintln!("neolint: invalid dialect '{value}' (expected lsl or firestorm)");
+                        return 2;
+                    }
+                };
+            }
             "--format" => {
                 let Some(value) = args.next() else {
                     eprintln!("neolint: --format requires 'human' or 'json'");
@@ -161,6 +210,39 @@ fn run() -> i32 {
         }
     }
 
+    if preprocess_flag {
+        config.set_preprocess(true);
+    }
+    if let Some(dialect) = dialect_override {
+        config.set_dialect(dialect);
+    }
+    if !include_dirs_cli.is_empty() {
+        config.set_include_dirs(include_dirs_cli);
+    }
+    if !config.preprocess_enabled() && !config.include_dirs().is_empty() {
+        eprintln!("neolint: include directories require --preprocess or --dialect firestorm");
+        return 2;
+    }
+    for directory in config.include_dirs() {
+        match fs::metadata(directory) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                eprintln!(
+                    "neolint: include path '{}' is not a directory",
+                    directory.display()
+                );
+                return 2;
+            }
+            Err(error) => {
+                eprintln!(
+                    "neolint: cannot access include directory '{}': {error}",
+                    directory.display()
+                );
+                return 2;
+            }
+        }
+    }
+
     let paths = match collect_input_paths(&input_args) {
         Ok(paths) => paths,
         Err(error) => {
@@ -168,6 +250,10 @@ fn run() -> i32 {
             return 2;
         }
     };
+
+    if config.preprocess_enabled() {
+        return run_preprocessed(&paths, &config, format, show_tokens);
+    }
 
     let mut results = Vec::new();
     let mut input_failed = false;
@@ -232,6 +318,180 @@ fn run() -> i32 {
     } else {
         0
     }
+}
+
+fn run_preprocessed(
+    paths: &[String],
+    config: &LintConfig,
+    format: OutputFormat,
+    show_tokens: bool,
+) -> i32 {
+    let options = PreprocessSettings::full()
+        .with_dialect(config.dialect())
+        .with_include_dirs(config.include_dirs().to_vec());
+    let mut run = match AnalysisRun::new() {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("neolint: cannot initialize analysis run: {error}");
+            return 2;
+        }
+    };
+    let mut unit_indexes = Vec::new();
+    let mut input_failed = false;
+    let mut stdin_used = false;
+    for path in paths {
+        let result = if path == "-" {
+            if stdin_used {
+                eprintln!("neolint: stdin ('-') may only be specified once");
+                input_failed = true;
+                continue;
+            }
+            stdin_used = true;
+            let mut input = String::new();
+            if let Err(error) = io::stdin().read_to_string(&mut input) {
+                eprintln!("neolint: cannot read stdin: {error}");
+                input_failed = true;
+                continue;
+            }
+            run.add_preprocessed_text("<stdin>", &input, options.clone())
+        } else {
+            run.add_preprocessed_file(path, options.clone())
+        };
+        match result {
+            Ok(index) => unit_indexes.push(index),
+            Err(error) => {
+                eprintln!("neolint: cannot prepare '{path}': {error}");
+                input_failed = true;
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for index in unit_indexes {
+        let Some(unit) = run.unit(index) else {
+            continue;
+        };
+        let prepared = match unit.prepared_source() {
+            Some(prepared) => prepared,
+            None => continue,
+        };
+        let rendered = match unit.analyze() {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                eprintln!("neolint: cannot analyze unit {}: {error}", index);
+                input_failed = true;
+                continue;
+            }
+        };
+        let mut groups: Vec<(neolint::SourceId, Vec<Diagnostic>)> = Vec::new();
+        for diagnostic in rendered {
+            let source = diagnostic.source();
+            if let Some((_, items)) = groups.iter_mut().find(|(id, _)| *id == source) {
+                items.push(diagnostic.diagnostic().clone());
+            } else {
+                groups.push((source, vec![diagnostic.diagnostic().clone()]));
+            }
+        }
+        let root = unit.root();
+        let prepared_tokens = if show_tokens {
+            lex(prepared.text()).0
+        } else {
+            Vec::new()
+        };
+        let nodes: Vec<(neolint::SourceId, String)> = prepared
+            .include_graph()
+            .nodes()
+            .iter()
+            .map(|node| (node.source(), node.display_name().to_owned()))
+            .collect();
+        for (source, path) in nodes {
+            let mut diagnostics = groups
+                .iter()
+                .position(|(id, _)| *id == source)
+                .map(|position| groups.remove(position).1)
+                .unwrap_or_default();
+            if Some(source) != root && diagnostics.is_empty() {
+                continue;
+            }
+            config.apply(&mut diagnostics);
+            results.push(FileResult {
+                path,
+                tokens: if Some(source) == root {
+                    prepared_tokens.clone()
+                } else {
+                    Vec::new()
+                },
+                diagnostics,
+            });
+        }
+        for (source, mut diagnostics) in groups {
+            config.apply(&mut diagnostics);
+            let path = unit
+                .source_map()
+                .and_then(|map| map.file(source))
+                .map(|file| file.display_name().to_owned())
+                .unwrap_or_else(|| prepared_path(unit));
+            results.push(FileResult {
+                path,
+                tokens: Vec::new(),
+                diagnostics,
+            });
+        }
+    }
+
+    let total: usize = results.iter().map(|result| result.diagnostics.len()).sum();
+    if total > neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS {
+        let mut remaining = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS - 1;
+        for result in &mut results {
+            // A unit-level cap may already have appended a terminal diagnostic.
+            // The CLI-level overflow must leave exactly one terminal diagnostic.
+            result
+                .diagnostics
+                .retain(|diagnostic| diagnostic.code != "PRE039");
+            if result.diagnostics.len() > remaining {
+                result.diagnostics.truncate(remaining);
+            }
+            remaining -= result.diagnostics.len();
+        }
+        if let Some(first) = results.first_mut() {
+            first.diagnostics.push(Diagnostic {
+                code: "PRE039",
+                severity: Severity::Error,
+                kind: neolint::DiagnosticKind::Syntax,
+                message: "total diagnostic limit (10000) reached".to_owned(),
+                span: neolint::Span {
+                    start: 0,
+                    end: 0,
+                    line: 1,
+                    column: 1,
+                    end_line: 1,
+                    end_column: 1,
+                },
+            });
+        }
+    }
+    match format {
+        OutputFormat::Human => print_human(&results, show_tokens),
+        OutputFormat::Json => print_json(&results),
+    }
+    let has_errors = results
+        .iter()
+        .flat_map(|result| &result.diagnostics)
+        .any(|diagnostic| diagnostic.severity == Severity::Error);
+    if input_failed {
+        2
+    } else if has_errors {
+        1
+    } else {
+        0
+    }
+}
+
+fn prepared_path(unit: &neolint::AnalysisUnit) -> String {
+    unit.root()
+        .and_then(|root| unit.manager().file(root))
+        .map(|file| file.display_name().to_owned())
+        .unwrap_or_else(|| "<prepared>".to_owned())
 }
 
 fn parse_severity(value: &str) -> Option<Severity> {

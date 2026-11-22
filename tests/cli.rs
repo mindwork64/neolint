@@ -477,3 +477,348 @@ fn documented_tokens_flag_clean_file_suppresses_no_diagnostics_line() {
     assert!(stdout.contains("Identifier"), "{stdout}");
     assert!(!stdout.contains("no diagnostics"), "{stdout}");
 }
+
+#[test]
+fn plain_invocation_stays_unpreprocessed() {
+    let directory = temporary_directory();
+    let source = directory.join("plain.lsl");
+    fs::write(
+        &source,
+        "#define X 1\ninteger x = X;\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint().arg(&source).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("LEX000"), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn preprocess_flag_expands_macros_without_lexical_hash_errors() {
+    let directory = temporary_directory();
+    let source = directory.join("pre.lsl");
+    fs::write(
+        &source,
+        "#define X 1\ninteger x = X;\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint().arg("--preprocess").arg(&source).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("LEX000"), "{stdout}");
+    assert!(!stdout.contains("PAR013"), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn firestorm_kill_switch_is_info_and_does_not_fail() {
+    let directory = temporary_directory();
+    let source = directory.join("off.lsl");
+    fs::write(
+        &source,
+        "//fspreprocessor off\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--dialect")
+        .arg("firestorm")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("info[PRE037]"), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn include_directory_flags_and_json_shape_work() {
+    let directory = temporary_directory();
+    let includes = directory.join("includes");
+    fs::create_dir_all(&includes).unwrap();
+    fs::write(includes.join("shared.lsl"), "integer shared = 1;\n").unwrap();
+    let source = directory.join("root.lsl");
+    fs::write(
+        &source,
+        "#include <shared.lsl>\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("-I")
+        .arg(&includes)
+        .arg("--include-dir")
+        .arg(&includes)
+        .arg("--format")
+        .arg("json")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with('['), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn config_preprocess_dialect_and_include_dir_are_supported() {
+    let directory = temporary_directory();
+    let includes = directory.join("includes");
+    fs::create_dir_all(&includes).unwrap();
+    fs::write(includes.join("shared.lsl"), "integer shared = 1;\n").unwrap();
+    let source = directory.join("root.lsl");
+    fs::write(
+        &source,
+        "#include \"shared.lsl\"\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let config = directory.join("neolint.conf");
+    fs::write(
+        &config,
+        format!(
+            "preprocess = true\ndialect = lsl\ninclude_dir = {}\n",
+            includes.display()
+        ),
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--config")
+        .arg(&config)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn invalid_preprocess_cli_combinations_exit_two() {
+    for arguments in [
+        vec!["--dialect", "bogus"],
+        vec!["--include-dir"],
+        vec!["-I"],
+    ] {
+        let output = neolint().args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{:?}", output);
+    }
+    let directory = temporary_directory();
+    let source = directory.join("a.lsl");
+    fs::write(&source, "default { state_entry() { } }\n").unwrap();
+    let output = neolint()
+        .arg("-I")
+        .arg(&directory)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("include directories require"));
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("-I")
+        .arg(directory.join("does-not-exist"))
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn stdin_include_requires_explicit_include_directory() {
+    let directory = temporary_directory();
+    fs::write(directory.join("shared.lsl"), "integer shared = 1;\n").unwrap();
+    let mut child = neolint()
+        .arg("--preprocess")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"#include \"shared.lsl\"\ndefault { state_entry() { } }\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stdout).unwrap().contains("PRE032"));
+
+    let mut child = neolint()
+        .arg("--preprocess")
+        .arg("-I")
+        .arg(&directory)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"#include \"shared.lsl\"\ndefault { state_entry() { } }\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_include_dirs_override_config_and_preprocess_flag_overrides_false() {
+    let directory = temporary_directory();
+    let right = directory.join("right");
+    let wrong = directory.join("wrong");
+    fs::create_dir_all(&right).unwrap();
+    fs::create_dir_all(&wrong).unwrap();
+    fs::write(right.join("shared.lsl"), "integer shared = 1;\n").unwrap();
+    let source = directory.join("root.lsl");
+    fs::write(
+        &source,
+        "#include \"shared.lsl\"\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let config = directory.join("neolint.conf");
+    fs::write(
+        &config,
+        format!("preprocess = false\ninclude_dir = {}\n", wrong.display()),
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--config")
+        .arg(&config)
+        .arg("--preprocess")
+        .arg("-I")
+        .arg(&right)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn tokens_flag_works_with_preprocessing() {
+    let directory = temporary_directory();
+    let source = directory.join("tokens.lsl");
+    fs::write(
+        &source,
+        "#define X 1\ninteger x = X;\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("--tokens")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Identifier"), "{stdout}");
+    assert!(!stdout.contains("no diagnostics"), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn included_file_diagnostics_use_the_included_path_and_keep_json_shape() {
+    let directory = temporary_directory();
+    fs::write(directory.join("inc.lsl"), "bad !!!\n").unwrap();
+    let source = directory.join("root.lsl");
+    fs::write(
+        &source,
+        "#include \"inc.lsl\"\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("--format")
+        .arg("json")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("inc.lsl"), "{stdout}");
+    assert!(stdout.contains("\"code\":\"PAR001\""), "{stdout}");
+    assert!(!stdout.contains("\"notes\""), "{stdout}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+fn json_array_is_structurally_valid(text: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            } else if ch.is_control() {
+                return false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' => stack.push(ch),
+            ']' => {
+                if stack.pop() != Some('[') {
+                    return false;
+                }
+            }
+            '}' if stack.pop() != Some('{') => return false,
+            '}' => {}
+            _ => {}
+        }
+    }
+    !in_string
+        && stack.is_empty()
+        && text.trim_start().starts_with('[')
+        && text.trim_end().ends_with(']')
+}
+
+#[test]
+fn global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039() {
+    let directory = temporary_directory();
+    let first = directory.join("a.lsl");
+    let second = directory.join("b.lsl");
+    let mut source = String::new();
+    for _ in 0..10_100 {
+        source.push_str("integer duplicate;\n");
+    }
+    fs::write(&first, &source).unwrap();
+    fs::write(&second, &source).unwrap();
+    let output = neolint()
+        .arg("--preprocess")
+        .arg("--format")
+        .arg("json")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        json_array_is_structurally_valid(&stdout),
+        "invalid JSON output"
+    );
+    let diagnostic_count = stdout.matches("\"code\":\"").count();
+    assert!(
+        diagnostic_count <= 10_000,
+        "diagnostics: {diagnostic_count}"
+    );
+    assert_eq!(stdout.matches("PRE039").count(), 1);
+    assert!(
+        !stdout.contains("b.lsl"),
+        "later file retained diagnostics beyond the budget"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

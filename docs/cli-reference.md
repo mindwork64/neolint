@@ -17,11 +17,31 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--config FILE` | Load rule settings from a configuration file. |
 | `--disable RULES` | Disable comma-separated rule codes. |
 | `--severity RULE=LEVEL` | Override severity for a rule; `LEVEL` is `error`, `warning`, or `info`. |
-| `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. |
+| `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
+| `--preprocess` | Enable the standard LSL preprocessor. |
+| `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
+| `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
+| `--include-dir=DIR`, `--dialect=DIALECT` | Equals forms of the corresponding options. |
 
-Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule.
+Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, and a non-empty CLI include-directory list replaces the configured list.
+
+Without preprocessing flags, plain-LSL behavior is unchanged. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
 
 `--tokens` cannot be combined with `--format json`; that combination exits with code 2.
+
+## Preprocessing and configuration
+
+```text
+preprocess = true
+dialect = firestorm
+include_dir = ./includes
+```
+
+- `preprocess` is `true` or `false`.
+- `dialect` is `lsl` or `firestorm`; `firestorm` enables preprocessing.
+- `include_dir` may appear repeatedly and preserves file order.
+
+Quoted includes search the including file's directory first, then the include directories in order; angle includes search only the include directories. URL, `http(s)`, `ftp`, and UNC/network paths are rejected. `#pragma once` is a documented neolint convenience, not a guaranteed Firestorm capability. `//fspreprocessor off` is a Firestorm-only script-wide kill switch and emits an informational `PRE037`; it does not affect the exit code.
 
 ## Inputs
 
@@ -79,6 +99,8 @@ neolint --format json corpus/invalid/duplicate_event.lsl
 
 `start`/`end` are byte offsets, not display columns. Columns are one-based character positions as reported by the lexer.
 
+The CLI retains at most 10,000 diagnostics across all inputs. On overflow it removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity, exit code 1 unless an input error already requires 2).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -101,6 +123,8 @@ neolint --disable SEM001,SEM004 ./scripts/
 neolint --severity SEM004=warning hello.lsl
 cat hello.lsl | neolint -
 neolint --tokens hello.lsl
+neolint --preprocess -I ./includes script.lsl
+neolint --dialect firestorm script.lsl
 ```
 
-See [configuration.md](configuration.md) and [diagnostics.md](diagnostics.md).
+See [configuration.md](configuration.md), [diagnostics.md](diagnostics.md), and [firestorm-preprocessor.md](firestorm-preprocessor.md).

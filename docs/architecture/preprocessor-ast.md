@@ -1,12 +1,12 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1 and 2 implemented on the experimental branch**; this document
-remains the normative contract for Phases 3–6.
+Status: **Phases 1–3 implemented on the experimental branch**; this document
+remains the normative contract for Phases 4–6.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
-Scope: source ownership, identity preprocessing, diagnostic resolution, and the
-Phase 2 directive/macro core are implemented; includes, advanced macros, the
-Firestorm extensions, CLI integration, and the AST remain future work.
-Audience: maintainers and contributors working on Phases 3–6.
+Scope: source ownership, identity/full preprocessing, includes, advanced macros,
+the Firestorm preprocessing profile, unified diagnostics, and CLI integration are
+implemented; AST and switch/lazy-list syntax remain future work.
+Audience: maintainers and contributors working on Phases 4–6.
 
 This document is the normative source of context for the preprocessor and AST
 work. It records the current pipeline, the target pipeline, the contracts between
@@ -2011,6 +2011,7 @@ are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 | Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor output budget |
 | Origin chain depth | 64 | Source Map |
 | Preprocessor diagnostics | 1,000 | Preprocessor diagnostic sink |
+| Total rendered diagnostics per unit | 10,000 | Unified analysis result |
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
 | AST recursion depth | 256 nodes (with explicit guard) | AST parser |
 | Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
@@ -2514,13 +2515,16 @@ implementations, not stages of the same code.
 expr,token,diagnostics}.rs`. Phase 1 types and the identity pass-through are
 unchanged.
 
-**Entry point.** `preprocess(manager, root, options)` dispatches on
-`PreprocessOptions::mode()`. `PreprocessConfig` remains a unit value and
+**Entry point.** `preprocess(manager, root, options)` dispatches on the compact
+`Copy` `PreprocessOptions::mode()`. `PreprocessConfig` remains a unit value and
 converts to identity options, so existing callers compile unchanged;
 `PreprocessConfig::full()` and `PreprocessOptions::full()` opt into Phase 2.
 `Identity` calls `preprocess_identity` unchanged and `Default` remains identity,
-so plain-LSL callers do not opt in accidentally. `AnalysisRun::add_prepared_*`
-still creates identity units; CLI integration is Phase 3.
+so plain-LSL callers do not opt in accidentally. Phase 3 extensions are carried
+by `PreprocessSettings { options, dialect, include_dirs }`; the read-only
+`preprocess_with_settings` and mutable `preprocess_with_includes` entry points
+accept it. `AnalysisRun::add_prepared_*` still creates identity units; the
+Phase 3 `add_preprocessed_*` methods use the extended settings.
 
 **Scanner and directives.** The scanner works on original bytes, not regular
 expressions or the LSL lexer. It tracks strings, `//` comments, `/* ... */`
@@ -2595,7 +2599,7 @@ malformed input, provenance and every-byte map coverage, UTF-8/CRLF, depth and
 diagnostic limits, and exact diagnostic primary/related locations. The full
 Phase 1 suite remains unchanged.
 
-### Phase 3 — Includes, advanced macros, Firestorm built-ins, CLI integration
+### Phase 3 — Includes, advanced macros, Firestorm built-ins, CLI integration (implemented)
 
 - **Goal:** complete the preprocessor and connect it to the legacy pipeline
   behind an explicit opt-in.
@@ -2638,6 +2642,69 @@ Phase 1 suite remains unchanged.
   comparison.
 - **Done when:** the preprocessor is usable end-to-end behind a flag, documented,
   and covered by integration tests.
+
+#### Phase 3 implementation record
+
+**Status:** implemented in `src/preprocessor/{include,builtins,macros,expand,
+directive}.rs`, `src/source/{manager,file,unit}.rs`, `src/pipeline.rs`,
+`src/diagnostic/resolve.rs`, `src/config.rs`, and `src/main.rs`.
+
+**Includes.** `SourceManager::load_included_file` performs bounded 4 MiB reads,
+regular-file/UTF-8 validation, canonical-path de-duplication, source-count checks,
+and deterministic `SourceId` registration. A file is loaded once and reused for
+repeated textual expansion. Quoted includes search the including file's display
+directory first and then include directories in caller order; angle includes
+search only include directories. Absolute local paths are accepted; URL, FTP,
+UNC, and other remote spellings are rejected before filesystem access. Stdin has
+no relative directory, so quoted includes from stdin require an explicit include
+directory. Include cycles are detected by canonical path on the active stack;
+depth 64 is allowed and 65 is rejected. Classic include guards use the shared
+macro table. `#pragma once` is a per-unit canonical-path convenience; unknown
+pragmas produce `PRE036`. The include graph records nodes in load order and
+textual edges in expansion order. Included direct and macro origins point at the
+included `SourceId`, include-site invocation, and parent include context.
+
+**Advanced macros.** Function-like replacement lists support `#`, `##`, and C
+variadic parameters ending in `...` with `__VA_ARGS__`. Stringification uses the
+raw (unexpanded) argument, normalizes whitespace/comments, escapes `\` and `"`,
+and preserves an empty argument as `""`. Token pasting uses raw operands,
+supports chains and empty operands, joins only the adjacent boundary token of
+each sequence while preserving the argument's remaining tokens, validates that
+the result is exactly one preprocessing token, and diagnoses invalid pastes with
+`PRE038`. Pasted and
+stringified bytes use `OriginKind::TokenPaste`/`Stringify` with the invocation as
+primary and definition/invocation/argument parent context as related. Variadic
+fixed arguments are validated; `__VA_ARGS__` substitutes the remaining arguments
+with generated commas. GNU comma-swallowing and `__VA_OPT__` are not implemented.
+
+**Firestorm profile and built-ins.** In `Firestorm` dialect, a raw substring search
+of the original root for `//fspreprocessor off` disables all preprocessing for
+the whole script and returns the identity-prepared text plus one informational
+`PRE037` diagnostic at the exact marker range. Occurrences in strings or block
+comments count; standard LSL mode ignores the marker. `__FILE__` and `__LINE__`
+are the only predefined macros. They are computed from the owning `SourceFile`
+and `LineIndex`, including inside includes and macro replacement rescans; dynamic
+values such as `__DATE__`, `__TIME__`, `__COUNTER__`, and `__TIMESTAMP__` remain
+unresolved identifiers. Switch and lazy-list syntax remain Phase 5.
+
+**CLI/diagnostics.** `--preprocess`, `--dialect`, and repeated `-I`/`--include-dir`
+are supported; the config file accepts `preprocess`, `dialect`, and repeated
+`include_dir`. The compact Phase 2 `PreprocessOptions` stays `Copy` and `const`;
+Phase 3 options live in `PreprocessSettings`. CLI dialect/include settings override config. Plain invocation
+without preprocessing flags keeps the frozen legacy pipeline. Prepared units use
+one `PreparedSource`/`SourceMap`, convert preprocess diagnostics directly and
+engine diagnostics through the map, group rendered diagnostics by source load
+order, and preserve existing human/JSON schema and exit code semantics. A
+per-unit total-diagnostic cap of 10,000 appends one terminal `PRE039`; the CLI
+applies the same 10,000 limit across all `FileResult`s, truncates every excess
+result and appends exactly one invocation-terminal `PRE039`.
+
+**Tests.** Permanent suites cover quoted/angle/nested/duplicate includes, guards,
+pragma once, cycles, depth 64/65, missing/malformed/remote paths, Unicode/spaces,
+stdin policy, size/count limits, include graph order, included-file diagnostics
+and every-byte map coverage, stringification, token pasting, variadics,
+provenance, Firestorm kill-switch fixtures, built-ins, CLI/config flags and exit
+codes, and unchanged plain-LSL behavior.
 
 ### Phase 4 — AST parser
 
@@ -2750,8 +2817,8 @@ src/
     directive.rs          Phase 2 raw-text directive scanner
     macros.rs             macro table, definitions, expansion
     expr.rs               #if expression evaluator
-    include.rs            Phase 3 include expansion
-    builtins.rs           Phase 3 predefined macros / profile built-ins
+    include.rs            include graph, path parsing/resolution
+    builtins.rs           confirmed __FILE__/__LINE__ predefined macros
     diagnostics.rs        PreprocessDiagnostic constructors, PRE codes
 
   ast/

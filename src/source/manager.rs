@@ -14,7 +14,7 @@ use crate::source::file::{AnalysisUnitId, SourceFile, SourceFileKind, SourceId};
 
 /// Maximum size of one root source in bytes.
 pub const MAX_ROOT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
-/// Future include-phase limit for one included source.
+/// Maximum size of one included source.
 pub const MAX_INCLUDED_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum original source files per AnalysisUnit.
 pub const MAX_SOURCE_FILES_PER_UNIT: usize = 256;
@@ -94,7 +94,7 @@ impl From<io::Error> for SourceLoadError {
 }
 
 /// Owner of the original sources for one AnalysisUnit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceManager {
     unit: AnalysisUnitId,
     files: Vec<Arc<SourceFile>>,
@@ -211,6 +211,49 @@ impl SourceManager {
             display_name.to_owned(),
             None,
             SourceFileKind::Stdin,
+            Arc::from(text),
+        )
+    }
+
+    /// Load an included local source, reusing an existing `SourceId` for the
+    /// same canonical path. The caller supplies the display spelling so the
+    /// original relative name is preserved.
+    pub fn load_included_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        display_name: &str,
+    ) -> Result<SourceId, SourceLoadError> {
+        let path = path.as_ref();
+        reject_remote(display_name)?;
+        let display = path
+            .to_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        reject_remote(&display)?;
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(SourceLoadError::NotRegularFile {
+                path: display_name.to_owned(),
+            });
+        }
+        let canonical = fs::canonicalize(path).ok();
+        if let Some(canonical) = &canonical {
+            if let Some(file) = self
+                .files
+                .iter()
+                .find(|file| file.canonical_path() == Some(canonical))
+            {
+                return Ok(file.id());
+            }
+        }
+        self.check_capacity()?;
+        let file = fs::File::open(path)?;
+        let bytes = read_bounded(file, MAX_INCLUDED_SOURCE_BYTES)?;
+        let text = String::from_utf8(bytes).map_err(|_| SourceLoadError::InvalidUtf8)?;
+        self.register(
+            display_name.to_owned(),
+            canonical,
+            SourceFileKind::Included,
             Arc::from(text),
         )
     }

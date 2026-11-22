@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::preprocessor::PreparedSource;
+use crate::preprocessor::{IncludeGraph, IncludeNode, PreparedSource};
 use crate::source::manager::SourceManager;
 use crate::source::map::{PreparedSpan, SourceMapBuilder, SourceSpan, SpanError};
 use crate::source::OriginKind;
@@ -36,5 +36,23 @@ pub fn preprocess_identity(
     let anchor = builder.source_span(root, len, len)?;
     builder.set_eof_anchor(anchor)?;
     let map = builder.build()?;
-    Ok(PreparedSource::new(unit, text, Arc::new(map), Vec::new()))
+    let nodes = manager
+        .files()
+        .iter()
+        .map(|file| {
+            IncludeNode::new(
+                file.id(),
+                file.display_name().to_owned(),
+                file.canonical_path().cloned(),
+            )
+        })
+        .collect();
+    let graph = Arc::new(IncludeGraph::new(nodes, Vec::new()));
+    Ok(PreparedSource::new(
+        unit,
+        text,
+        Arc::new(map),
+        Vec::new(),
+        graph,
+    ))
 }

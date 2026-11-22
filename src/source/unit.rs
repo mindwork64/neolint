@@ -10,6 +10,7 @@ use crate::semantic::analyze_with_syntax_diagnostics;
 use crate::source::file::{AnalysisUnitId, SourceFileKind, SourceId};
 use crate::source::manager::SourceManager;
 use crate::source::map::SpanError;
+use std::sync::Arc;
 
 /// One independent analysis of a single root source.
 #[derive(Debug)]
@@ -113,6 +114,7 @@ impl AnalysisUnit {
                     prepared,
                 )?);
             }
+            crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
             return Ok(rendered);
         }
 
@@ -123,6 +125,35 @@ impl AnalysisUnit {
         let semantic = analyze_with_syntax_diagnostics(&tokens, &syntax);
         let mut rendered = Vec::new();
         for diagnostic in lexical.into_iter().chain(syntax).chain(semantic) {
+            let tagged = self.legacy_diagnostic(diagnostic)?;
+            rendered.push(RenderedDiagnostic::from_legacy(tagged, self)?);
+        }
+        let limit = crate::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+        if rendered.len() > limit {
+            rendered.truncate(limit - 1);
+            let index = crate::source::line_index::LineIndex::new(Arc::from(text));
+            let position =
+                index
+                    .location(text.len())
+                    .unwrap_or(crate::source::line_index::SourcePosition {
+                        offset: text.len(),
+                        line: 1,
+                        column: 1,
+                    });
+            let diagnostic = Diagnostic {
+                code: "PRE039",
+                severity: crate::diagnostic::Severity::Error,
+                kind: crate::diagnostic::DiagnosticKind::Syntax,
+                message: format!("total diagnostic limit ({limit}) reached"),
+                span: crate::diagnostic::Span {
+                    start: text.len(),
+                    end: text.len(),
+                    line: position.line,
+                    column: position.column,
+                    end_line: position.line,
+                    end_column: position.column,
+                },
+            };
             let tagged = self.legacy_diagnostic(diagnostic)?;
             rendered.push(RenderedDiagnostic::from_legacy(tagged, self)?);
         }
