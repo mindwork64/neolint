@@ -1,9 +1,11 @@
 # Preprocessor and AST Architecture
 
-Status: **architecture contract for the experimental `exp/preprocessor-ast` branch**.
-Baseline: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
-Scope: Phase 0. No runtime behavior changes are included in this document.
-Audience: maintainers and contributors who will implement Phases 1–6.
+Status: **Phase 1 implemented on the experimental branch**; this document
+remains the normative contract for Phases 2–6.
+Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
+Scope: source ownership, identity preprocessing, and diagnostic resolution are
+implemented; directive/macro/include processing and the AST remain future work.
+Audience: maintainers and contributors working on Phases 2–6.
 
 This document is the normative source of context for the preprocessor and AST
 work. It records the current pipeline, the target pipeline, the contracts between
@@ -1445,9 +1447,10 @@ code). `resolve_span` must:
    `TokenPaste`, and `Stringify` links).
 3. Choose `primary` by origin priority: `Direct` > `MacroArgument` >
    `MacroDefinition` > `Include` > `TokenPaste`/`Stringify` > `Generated`.
-   Ties are broken by the leftmost prepared run. This ensures a diagnostic that
-   starts in pasted text but continues into direct code still points at the
-   user-written code when one exists.
+   `MacroInvocation` shares the `MacroArgument` user-code tier (it is not used
+   as a segment origin in Phase 1). Ties are broken by the leftmost prepared
+   run. This ensures a diagnostic that starts in pasted text but continues into
+   direct code still points at the user-written code when one exists.
 4. Put the remaining distinct spans into `related`, ordered left-to-right by
    their prepared run and deduplicated by `(source, start, end)`.
 5. Never return a prepared coordinate or a synthetic file. If every run is
@@ -1968,15 +1971,15 @@ classifications.
 
 ## 12. Resource limits (L)
 
-Limits are mandatory because preprocessor input is untrusted. Values are
-provisional; Phase 1/2 must fix them as constants and add tests.
+Limits are mandatory because preprocessor input is untrusted. Phase 1 values are
+implemented as public constants in `src/source/manager.rs`.
 
-| Limit | Provisional value | Enforcement point |
+| Limit | Implemented value | Enforcement point |
 | --- | --- | --- |
-| Root file size | existing practical limits; explicit cap in Phase 1 | Source Manager |
-| Root AnalysisUnits per CLI invocation | 65,536 (independent resource cap; `AnalysisUnitId.index` is `u32`) | CLI/pipeline |
-| Included file size | 4 MiB | Source Manager |
-| Source files per AnalysisUnit | 256 | Source Manager |
+| Root file size | 8 MiB (`MAX_ROOT_SOURCE_BYTES`) | Source Manager |
+| Root AnalysisUnits per CLI invocation | 65,536 (`MAX_ANALYSIS_UNITS_PER_INVOCATION`) | Pipeline |
+| Included file size | 4 MiB (`MAX_INCLUDED_SOURCE_BYTES`, future include phase) | Source Manager |
+| Source files per AnalysisUnit | 256 (`MAX_SOURCE_FILES_PER_UNIT`) | Source Manager |
 | Include depth | 64 | Preprocessor include stack |
 | Macro expansion depth | 64 | Preprocessor expander |
 | Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor |
@@ -1994,7 +1997,8 @@ Requirements:
 - `AnalysisUnitId` and `RunId` assignment uses checked arithmetic. Exceeding
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
   re-use, or `panic`. `RunId` is process-local and never emitted.
-- Limit tests must be part of Phase 2/3/4 acceptance.
+- Phase 1 tests cover root size boundary/+1, source count capacity, and unit
+  count arithmetic. Expansion and include limits are enforced in Phases 2/3.
 - No limit may depend on machine memory size.
 
 ---
@@ -2129,12 +2133,15 @@ Requirements:
 
 - Every new diagnostic code has at least one positive and one boundary test.
 - Every phase adds tests for its resource limits and malformed-input behavior.
-- Phase 1 runs the TEST A–Q identity suite under both `cargo test` and
-  `cargo test --release`; results must be identical, with no panic in either
-  profile.
+- Phase 1 implements the TEST A–Q identity suite and runs it under both
+  `cargo test` and `cargo test --release`; results are identical, with no panic
+  in either profile.
+- Phase 1 also covers root size boundary/+1, source count capacity, deterministic
+  ids, line-index/lexer parity, identity round-trip, EOF/zero-length, origin
+  corruption, Legacy ownership, and concurrent `RunId` allocation.
 - No test uses the network, sleeps, or depends on host locale/time zone.
-- Tests must pass on MSRV 1.75; Phase 1+ should add an MSRV check step to the
-  experimental workflow (separate from the required quality steps).
+- Tests must pass on MSRV 1.75; the experimental workflow installs Rust 1.75.0
+  and runs `cargo +1.75.0 test --all-targets --all-features`.
 - CI: `experimental-ci.yml` runs on pushes to `exp/preprocessor-ast` and to flat
   `exp-preprocessor-ast-phase-*` branches, and on PRs targeting
   `exp/preprocessor-ast`. It has no `workflow_dispatch`, because the file is not
@@ -2292,6 +2299,8 @@ implementations, not stages of the same code.
 
 ### Phase 1 — Source Manager, Source Map, Identity Preprocessor
 
+- **Status:** implemented on `exp-preprocessor-ast-phase-01-source-foundation`
+  (documentation-only Phase 0 contracts are merged into the integration branch).
 - **Goal:** make multi-file provenance and line resolution real without changing
   analysis.
 - **Functionality:**
@@ -2382,6 +2391,50 @@ implementations, not stages of the same code.
   must not panic in either.
 - **Done when:** the full suite passes and identity/EOF/unit-isolation paths are
   covered by contract tests.
+
+#### Phase 1 implemented surface
+
+- Modules: `src/source/{mod,file,line_index,map,manager,unit}.rs`,
+  `src/preprocessor/{mod,identity,config,diagnostics}.rs`,
+  `src/diagnostic/resolve.rs`, `src/pipeline.rs`; `src/lib.rs` re-exports the
+  additive API. `src/lexer.rs`, `src/parser.rs`, `src/semantic.rs`, and
+  `src/diagnostic.rs`'s frozen types are unchanged except for the additive
+  `pub mod resolve;` declaration and `parse_legacy`/`parse` wiring.
+- Identity: `RunIdAllocator` uses `Mutex<u64>` and cannot panic, wrap, or reuse;
+  `AnalysisRun::new()` allocates before creating units; unit indexes are
+  deterministic `0..N-1`.
+- Sources: `SourceManager` loads one root from a regular file or supplied
+  reader/text, preserves display spelling, stores an optional canonical path,
+  bounds reads to 8 MiB, rejects invalid UTF-8, non-regular roots, and remote
+  UNC/URL spellings.
+- Lines: `LineIndex` matches lexer semantics for LF, lone CR, CRLF, UTF-8
+  columns, EOF, and trailing newlines; it rejects offsets inside a UTF-8 scalar.
+- Maps: `SourceMapBuilder` validates files, origins, segments, EOF anchor, and
+  origin chains; `SourceMap` exposes `resolve_span`, `resolve_point`,
+  `location`, `render_span`, `source_span`, `eof_anchor`, `origin`, and `unit`.
+  The identity map has one `Direct` segment (non-empty) or no segment (empty)
+  plus a real root EOF anchor.
+- Diagnostics: `LegacyDiagnostic` is pipeline-tagged; `from_legacy` takes only
+  `&AnalysisUnit` and uses `legacy_root()`. `PreprocessDiagnostic` is converted
+  directly; `PreparedDiagnostic` is bridged and resolved. `RenderedDiagnostic`
+  private fields and constructors enforce ownership.
+- Library orchestration: `AnalysisRun::new/add_legacy_file/add_legacy_text/
+  add_legacy_reader/add_prepared_file/add_prepared_text/add_prepared_reader/
+  analyze` and `AnalysisUnit::analyze` run the existing lexer, `parse_legacy`,
+  and semantic analyzer and return rendered diagnostics. Legacy units bypass the
+  map; prepared units bridge and resolve. The CLI does not call these entry
+  points in Phase 1, so existing CLI output is unchanged.
+- `SourceMapBuilder` rejects zero-length segments, holes, overlaps, foreign
+  spans/ids, missing parents, chains deeper than 64, and non-zero-length EOF
+  anchors. `SourceMap` revalidates origin chains during traversal.
+- Errors: `SpanError` is the stable internal resolution error. Malformed or
+  foreign coordinates return `Err`, are never silently dropped, and are never
+  replaced by the EOF anchor or a local file.
+- CI: debug tests, release tests, rustdoc, Clippy, Python metadata tests, and an
+  explicit `cargo +1.75.0 test --all-targets --all-features` MSRV step.
+- Deferred: directives, macros, includes, Firestorm switches, Lazy Lists, AST,
+  AST semantics, and CLI behavior. `SourceFileKind::Included` exists but nothing
+  loads it in Phase 1.
 
 ### Phase 2 — Preprocessor core
 

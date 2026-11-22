@@ -18,9 +18,24 @@ pub mod config;
 pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
+pub mod pipeline;
+pub mod preprocessor;
 pub mod semantic;
+pub mod source;
 
+pub use diagnostic::resolve::{
+    LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
+};
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 pub use lexer::{lex, Token, TokenKind};
-pub use parser::parse;
+pub use parser::{parse, parse_legacy};
+pub use pipeline::{allocate_run_id, AnalysisRun, RunIdAllocationError, SetupError};
+pub use preprocessor::{
+    preprocess_identity, PreparedSource, PreprocessConfig, PreprocessDiagnostic, RelatedLocation,
+};
 pub use semantic::analyze;
+pub use source::{
+    AnalysisUnit, AnalysisUnitId, LineIndex, MapSegment, OriginId, OriginKind, PreparedSpan,
+    ResolvedSpan, RunId, SourceFile, SourceFileKind, SourceId, SourceLoadError, SourceLocation,
+    SourceManager, SourceMap, SourceMapBuilder, SourceOrigin, SourceSpan, SpanError,
+};
