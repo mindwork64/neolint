@@ -5,7 +5,9 @@ use neolint::{lex, parse_legacy, Diagnostic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MIGRATED: &[&str] = &["SEM001", "SEM007", "SEM020", "SEM021"];
+const MIGRATED: &[&str] = &[
+    "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM020", "SEM021",
+];
 
 type Normalized = (
     &'static str,
@@ -95,7 +97,7 @@ fn visit_lsl(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn corpus_sem001_007_020_021_match_legacy_exactly() {
+fn corpus_nine_migrated_rules_match_legacy_exactly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut files = Vec::new();
     visit_lsl(&root, &mut files);
@@ -539,4 +541,384 @@ fn suppressed_eof_does_not_hide_the_outer_state_error() {
     let (_, ast) = parse_ast(&tokens);
     assert_eq!(normalize(&legacy), normalize(&ast));
     assert!(ast.iter().any(|diagnostic| diagnostic.code == "PAR007"));
+}
+
+#[test]
+fn focused_call_and_event_parity() {
+    for source in [
+        "default { state_entry() { llOwnerSay(); } }",
+        "default { state_entry() { llOwnerSay(\"a\", \"b\"); } }",
+        "default { state_entry() { llOwnerSay(1); } }",
+        "default { state_entry() { llSetPos(\"x\"); } }",
+        "integer f(integer x) { return x; } default { state_entry() { f(); f(1, 2); f(\"x\"); f(1); } }",
+        "integer f(integer x) { return x; } integer f(string y) { return 1; } default { state_entry() { f(\"x\"); } }",
+        "llOwnerSay(integer x) { } default { state_entry() { llOwnerSay(1); llOwnerSay(\"x\"); } }",
+        "default { state_entry(integer x) { } }",
+        "default { touch_start(string x) { } }",
+        "default { custom_event(integer x) { } }",
+        "default { state_entry() { integer local = 1; if (local) llOwnerSay(local); } }",
+        "default { state_entry() { integer local; local = llOwnerSay(); } }",
+        "default { state_entry() { list values = [llOwnerSay()]; } }",
+        "default { state_entry() { llOwnerSay((string)llGetListLength([1, 2, 3])); } }",
+        "integer f(integer x) { return x; } default { state_entry() { integer y = f(f()); } }",
+        "default { state_entry(bad, integer value) { integer value; } state_entry() { } }",
+        "float f(integer x) { return 1.0; } default { state_entry() { llOwnerSay(f(\"x\")); } }",
+        "default { state_entry() { vector v; float x = v.x; llOwnerSay(x); } }",
+        "default { state_entry() { llOwnerSay([1]); } }",
+        "default { state_entry() { llOwnerSay(<1, 2, 3>); } }",
+        "default { state_entry() { llOwnerSay((1)); } }",
+        "default { state_entry() { llOwnerSay(-1); } }",
+        "default { state_entry() { llOwnerSay((integer)1); } }",
+        "default { state_entry() { llOwnerSay(llGetListLength([])); } }",
+        "default { state_entry() { llOwnerSay(1 + 1); } }",
+        "default { state_entry() { llOwnerSay(TRUE); } }",
+        "default { state_entry() { vector v; llOwnerSay(v.x); } }",
+    ] {
+        assert_parity(source);
+    }
+}
+
+#[test]
+fn sem002_and_sem004_exact_messages_and_spans() {
+    let source = "default { state_entry() { llOwnerSay(); } }";
+    let start = source.find("llOwnerSay").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM002",
+            "llOwnerSay expects 1 argument(s), but received 0".to_owned(),
+            source,
+            start,
+            "llOwnerSay".len()
+        )]
+    );
+
+    let source = "default { state_entry() { llOwnerSay(1); } }";
+    let callee = source.find("llOwnerSay").unwrap();
+    let argument = source.find('1').unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM004",
+            "llOwnerSay argument 1 has type integer, expected string".to_owned(),
+            source,
+            argument,
+            1
+        )]
+    );
+    assert!(callee < argument);
+}
+
+#[test]
+fn sem005_and_sem006_exact_messages_and_spans() {
+    let source = "integer f(integer x) { return x; } default { state_entry() { f(); } }";
+    let start = source.rfind("f").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM005",
+            "f expects 1 argument(s), but received 0".to_owned(),
+            source,
+            start,
+            "f".len()
+        )]
+    );
+
+    let source = "integer f(integer x) { return x; } default { state_entry() { f(\"bad\"); } }";
+    let argument = source.find("\"bad\"").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM006",
+            "f argument 1 has type string, expected integer".to_owned(),
+            source,
+            argument,
+            "\"bad\"".len()
+        )]
+    );
+}
+
+#[test]
+fn sem003_exact_arity_and_type_messages_and_spans() {
+    let source = "default { state_entry(integer x) { } }";
+    let start = source.find("state_entry").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM003",
+            "event state_entry expects 0 parameter(s), but 1 were declared".to_owned(),
+            source,
+            start,
+            "state_entry".len()
+        )]
+    );
+
+    let source = "default { touch_start(string x) { } }";
+    let start = source.find("touch_start").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM003",
+            "event touch_start parameter 1 has type string, expected integer".to_owned(),
+            source,
+            start,
+            "touch_start".len()
+        )]
+    );
+}
+
+#[test]
+fn same_name_builtin_and_user_function_checks_are_independent() {
+    let source =
+        "llOwnerSay(integer x) { } default { state_entry() { llOwnerSay(1); llOwnerSay(\"x\"); } }";
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM004")
+            .count(),
+        1
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM006")
+            .count(),
+        1
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn calls_are_visited_once_in_every_expression_bearing_field() {
+    let source = r#"
+        integer probe(integer value) { return value; }
+        integer global = probe();
+        default {
+            state_entry() {
+                integer local = probe();
+                if (probe()) { } else { probe(); }
+                for (probe(); probe(); probe()) { probe(); }
+                while (probe()) { probe(); }
+                do { probe(); } while (probe());
+                list values = [probe(), <probe(), 1, 2>, <probe(), 1, 2, 3>];
+                return probe();
+            }
+        }
+    "#;
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM005")
+            .count(),
+        16,
+        "{diagnostics:?}"
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn syntax_error_inside_call_arguments_suppresses_call_rules() {
+    use neolint::{DiagnosticKind, Severity};
+    let source = "default { state_entry() { llOwnerSay(1); } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    assert!(syntax.is_empty());
+    let call = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::State(state) = item {
+                state.events.iter().find_map(|event| {
+                    event.body.as_ref().and_then(|body| {
+                        body.statements.iter().find_map(|statement| {
+                            if let neolint::ast::StatementKind::Expression(expression) =
+                                &statement.kind
+                            {
+                                if let neolint::ast::ExpressionKind::Call(call) =
+                                    &expression.expression.kind
+                                {
+                                    return Some(call);
+                                }
+                            }
+                            None
+                        })
+                    })
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let injected = Diagnostic {
+        code: "PAR099",
+        severity: Severity::Error,
+        kind: DiagnosticKind::Syntax,
+        message: "injected syntax error".to_owned(),
+        span: span(
+            source,
+            call.open_paren_span.end,
+            call.close_paren_span.start - call.open_paren_span.end,
+        ),
+    };
+    let diagnostics = analyze_ast(&ast, std::slice::from_ref(&injected));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "SEM002" | "SEM004")),
+        "{diagnostics:?}"
+    );
+    assert!(analyze_ast(&ast, &[])
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM004"));
+}
+
+#[test]
+fn firestorm_switch_and_lazy_calls_are_analyzed_without_panic() {
+    use neolint::ast::{parse_ast_with_options, AstParseOptions};
+    let source = "integer probe(integer value) { return value; } default { state_entry() { list values; (integer)values[probe()]; switch (probe()) { case probe(): { probe(); } break; } } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast_with_options(
+        &tokens,
+        AstParseOptions::lsl()
+            .with_switches_enabled(true)
+            .with_lazy_lists_enabled(true),
+    );
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM005")
+            .count(),
+        4,
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn user_function_first_definition_wins() {
+    let source = "integer f(integer x) { return x; } integer f(string x) { return 1; } default { state_entry() { f(\"bad\"); } }";
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM006")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM006"
+            && diagnostic.message == "f argument 1 has type string, expected integer"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn untyped_function_return_is_void() {
+    let source = "f() { } default { state_entry() { llOwnerSay(f()); } }";
+    let diagnostics = semantic(source);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM004"
+            && diagnostic.message == "llOwnerSay argument 1 has type void, expected string"
+    }));
+    assert_parity(source);
+}
+
+#[test]
+fn implicit_integer_float_and_string_key_conversions_are_allowed() {
+    let source = "integer f(float x) { return 1; } integer g(key k) { return 1; } default { state_entry() { f(1); g(\"s\"); f(\"s\"); g(1); } }";
+    let diagnostics = semantic(source);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM006")
+            .count(),
+        2,
+        "{diagnostics:?}"
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn focused_malformed_call_parity() {
+    for source in [
+        "default { state_entry() { llOwnerSay(\"x\",); } }",
+        "default { state_entry() { llOwnerSay(, \"x\"); } }",
+        "default { state_entry() { llOwnerSay(\"x\" \"y\"); } }",
+        "integer f(integer x) { return x; } default { state_entry() { f(1,); f(, 1); } }",
+        "default { state_entry() { llOwnerSay(); } }",
+        "default { state_entry() { llOwnerSay(1 + ); } }",
+        "default { state_entry(integer,) { } }",
+        "default { touch_start(integer x,) { } }",
+        "default {\n    state_entry(integer) {\n",
+    ] {
+        assert_parity(source);
+    }
+}
+
+#[test]
+fn malformed_call_recovery_keeps_declared_argument_count() {
+    let source = "default { state_entry() { llOwnerSay(\"x\",); } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) = parse_ast(&tokens);
+    let call = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::State(state) = item {
+                state.events.iter().find_map(|event| {
+                    event.body.as_ref().and_then(|body| {
+                        body.statements.iter().find_map(|statement| {
+                            if let neolint::ast::StatementKind::Expression(expression) =
+                                &statement.kind
+                            {
+                                if let neolint::ast::ExpressionKind::Call(call) =
+                                    &expression.expression.kind
+                                {
+                                    return Some(call);
+                                }
+                            }
+                            None
+                        })
+                    })
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(call.declared_argument_count, 2);
+    assert_eq!(call.arguments.len(), 1);
+    assert!(!call.arguments_complete);
+
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "SEM002"
+            && diagnostic.message == "llOwnerSay expects 1 argument(s), but received 2"
+    }));
+    assert_parity(source);
 }
