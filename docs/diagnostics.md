@@ -48,8 +48,8 @@ For malformed input, neolint attempts to continue far enough to report additiona
 
 ## Preprocessor diagnostics
 
-All preprocessor diagnostics have default severity **error** and kind
-**syntax**. Their `primary` and `related` locations are original-file
+All preprocessor diagnostics have kind **syntax**. `PRE037` is informational;
+the rest default to **error**. Their `primary` and `related` locations are original-file
 `SourceSpan`s in the diagnostic's own `AnalysisUnit`; they never pass through
 the prepared-span map. Related locations identify the relevant macro
 definition, previous definition, outer invocation, conditional opening, or EOF.
@@ -58,7 +58,7 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | --- | --- | --- |
 | `PRE001` | Unknown preprocessor directive. | Primary is the directive line. |
 | `PRE002` | Malformed or empty directive, including unexpected tokens after `#else`/`#endif`. | Primary is the directive line; conditional recovery still matches the frame. |
-| `PRE003` | Invalid `#define` (missing name, bad parameter list, variadic/duplicate parameter). | Primary is the definition name/line. |
+| `PRE003` | Invalid `#define` (missing name, malformed parameter list, duplicate parameter). | Primary is the definition name/line. |
 | `PRE004` | Invalid `#undef` (missing, extra, or non-identifier operand). | Primary is the directive/operand. |
 | `PRE005` | Conflicting macro redefinition. | Related points at the previous definition; the old definition remains active. |
 | `PRE006` | Invalid `#if`/`#elif` expression syntax. | Primary is the expression/token; related is the conditional opening. |
@@ -77,17 +77,24 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 | `PRE020` | Expanded-output byte budget (8 MiB) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
 | `PRE021` | Expanded-output token budget (1,000,000) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
 | `PRE022` | Preprocessor diagnostic limit (1,000) reached. | This is the final PRE diagnostic; later findings are suppressed. |
-| `PRE023` | `#` or `##` used in a macro replacement list. | Phase 2 does not implement stringification or token pasting; the macro is not defined. |
-| `PRE024` | Unsupported Phase 2 directive, for example `#include` or `#pragma`. | Phase 3 features are diagnosed, never silently treated as implemented. |
 | `PRE025` | Conditional nesting depth exceeds 64. | The over-deep frame is treated as inactive and still matched by `#endif`. |
 | `PRE026` | Division or remainder by zero in an evaluated expression. | The expression evaluates as false; unselected short-circuit branches are not diagnosed. |
 | `PRE027` | Checked `i64` arithmetic, literal, negation, division, or shift overflow. | The expression evaluates as false. |
 | `PRE028` | Invalid shift: negative left operand, negative count, or count at least 64 in an evaluated expression. | The expression evaluates as false. |
 | `PRE029` | Malformed decimal/octal/hexadecimal integer literal. | The literal is treated as zero so parsing can continue. |
 | `PRE030` | Missing `#if`/`#elif` expression. | Primary is a zero-length point at the directive end; related is the conditional opening. |
+| `PRE031` | Invalid `#include` syntax or forbidden remote/network include path. | Primary is the path spelling; related is the full directive. |
+| `PRE032` | Included file not found or unreadable (including invalid UTF-8/non-regular file). | Primary is the path spelling; related is the full directive. |
+| `PRE033` | Include cycle on the active include stack. | Primary is the include path; related is the previous entry and the directive. |
+| `PRE034` | Include depth exceeds 64. | Primary is the include path; related is the include-stack context. |
+| `PRE035` | Included source exceeds 4 MiB or the unit's 256-file limit. | Primary is the path spelling; related is the directive. |
+| `PRE036` | Unknown `#pragma` (other than `#pragma once`). | Primary is the pragma spelling/directive. |
+| `PRE037` | Firestorm `//fspreprocessor off` kill switch was found. | Severity **info**; primary is the exact marker range; never affects exit code. |
+| `PRE038` | Invalid `#`/`##` use, operands, or token-paste result. | Primary is the invocation; the affected expansion is left bounded. |
+| `PRE039` | Total rendered diagnostics limit (10,000) reached per AnalysisUnit. | Terminal error diagnostic at the map EOF anchor; later findings are suppressed. |
 
-`PRE016` is intentionally unused; Phase 2 has no separate malformed-invocation
-class beyond `PRE015` and `PRE014`.
+`PRE016` remains intentionally unused; malformed invocation classes are covered by
+`PRE014` and `PRE015`.
 
 ## Semantic and lint diagnostics
 
