@@ -13,6 +13,7 @@
 //! unresolved expressions, and unverified language behavior are deliberately
 //! left unchecked rather than guessed.
 
+pub mod ast;
 pub mod builtins;
 pub mod config;
 pub mod diagnostic;
@@ -23,6 +24,7 @@ pub mod preprocessor;
 pub mod semantic;
 pub mod source;
 
+pub use ast::{parse_ast, Ast};
 pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };

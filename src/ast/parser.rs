@@ -1,0 +1,1701 @@
+//! Independent recursive-descent AST parser for the frozen LSL grammar.
+//!
+//! Diagnostics intentionally mirror the legacy parser's `PARxxx` contract.
+//! Recovery is delimiter-aware and every loop is guaranteed to make progress.
+
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
+use crate::lexer::{Token, TokenKind};
+
+use super::node::*;
+use super::types::*;
+
+/// Maximum recursive AST nesting depth.
+pub const MAX_AST_RECURSION_DEPTH: usize = 256;
+
+/// Stable recursion-limit diagnostic code.
+pub const AST_RECURSION_LIMIT: &str = "AST001";
+
+struct Parser<'a> {
+    tokens: &'a [Token],
+    current: usize,
+    diagnostics: Vec<Diagnostic>,
+    states_started: bool,
+    default_state_seen: bool,
+    missing_default_reported: bool,
+    eof_reported: bool,
+    statement_depth: usize,
+    recursion_reported: bool,
+}
+
+impl<'a> Parser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self {
+            tokens,
+            current: 0,
+            diagnostics: Vec::new(),
+            states_started: false,
+            default_state_seen: false,
+            missing_default_reported: false,
+            eof_reported: false,
+            statement_depth: 0,
+            recursion_reported: false,
+        }
+    }
+
+    fn run(mut self) -> (Ast, Vec<Diagnostic>) {
+        let mut items = Vec::new();
+        while !self.at_end() {
+            let before = self.current;
+            if self.is_type() || self.is_untyped_function_declaration() {
+                if self.states_started {
+                    self.error_here(
+                        "PAR009",
+                        "global declarations and user-defined functions must be declared before state definitions",
+                    );
+                }
+                if let Some(item) = self.parse_global_declaration() {
+                    items.push(item);
+                }
+            } else if self.check(TokenKind::KwDefault) || self.check(TokenKind::KwState) {
+                self.states_started = true;
+                items.push(TopLevel::State(self.parse_state()));
+            } else {
+                let span = self.here_span();
+                self.error_here(
+                    "PAR001",
+                    "expected a global declaration or state definition",
+                );
+                self.synchronize_top_level();
+                items.push(TopLevel::Error(ErrorNode {
+                    span,
+                    code: Some("PAR001"),
+                }));
+            }
+            if self.current == before {
+                self.advance();
+            }
+        }
+
+        if !self.default_state_seen && !self.missing_default_reported {
+            self.error_here("PAR013", "the default state must be defined");
+        }
+
+        let end = self.last_non_eof_end();
+        let span = if end == 0 {
+            self.fallback_span()
+        } else {
+            self.span_from(0, end)
+        };
+        (Ast { items, span }, self.diagnostics)
+    }
+
+    fn last_non_eof_end(&self) -> usize {
+        self.tokens
+            .iter()
+            .rposition(|token| token.kind != TokenKind::Eof)
+            .map_or(0, |index| index + 1)
+    }
+
+    fn parse_global_declaration(&mut self) -> Option<TopLevel> {
+        let start = self.current;
+        let return_type = if self.is_type() {
+            self.parse_type()
+        } else {
+            None
+        };
+
+        if !self.expect(TokenKind::Identifier, "expected a declaration name") {
+            self.synchronize_top_level();
+            return Some(TopLevel::Error(ErrorNode {
+                span: self.span_from(start, self.current),
+                code: Some("PAR007"),
+            }));
+        }
+        let name_index = self.current - 1;
+        let name = self.tokens[name_index].lexeme.clone();
+        let name_span = self.tokens[name_index].span;
+
+        if self.matches(TokenKind::LParen) {
+            let (parameters, header_ok) = self.parse_parameters();
+            if !header_ok {
+                self.synchronize_top_level();
+                return Some(TopLevel::Error(ErrorNode {
+                    span: self.span_from(start, self.current),
+                    code: Some("PAR007"),
+                }));
+            }
+            let body = self.parse_block();
+            return Some(TopLevel::Function(FunctionDeclaration {
+                span: self.span_from(start, self.current),
+                return_type,
+                name,
+                name_span,
+                parameters,
+                body,
+            }));
+        }
+
+        let ty = return_type?;
+        let declarators = self.finish_variable_declaration(name_index);
+        Some(TopLevel::Global(GlobalVariableDeclaration {
+            span: self.span_from(start, self.current),
+            ty,
+            declarators,
+        }))
+    }
+
+    fn finish_variable_declaration(&mut self, name_index: usize) -> Vec<VariableDeclarator> {
+        let mut declarators = Vec::new();
+        let mut pending_initializer = None;
+        if self.matches(TokenKind::Equal) {
+            pending_initializer = self.parse_expression(1);
+            if pending_initializer.is_none() {
+                self.synchronize_statement();
+                declarators.push(self.declarator(name_index, None));
+                return declarators;
+            }
+        }
+        declarators.push(self.declarator(name_index, pending_initializer));
+        while self.matches(TokenKind::Comma) {
+            if !self.expect(TokenKind::Identifier, "expected a variable name after ','") {
+                break;
+            }
+            let name_index = self.current - 1;
+            let mut initializer = None;
+            if self.matches(TokenKind::Equal) {
+                initializer = self.parse_expression(1);
+                if initializer.is_none() {
+                    self.synchronize_statement();
+                    return declarators;
+                }
+            }
+            declarators.push(self.declarator(name_index, initializer));
+        }
+        self.expect(
+            TokenKind::Semicolon,
+            "expected ';' after global declaration",
+        );
+        declarators
+    }
+
+    fn declarator(&self, name_index: usize, initializer: Option<Expression>) -> VariableDeclarator {
+        let name_span = self.tokens[name_index].span;
+        let end = initializer
+            .as_ref()
+            .map_or(name_span.end, |expression| expression.span.end);
+        VariableDeclarator {
+            span: Span {
+                start: name_span.start,
+                end,
+                line: name_span.line,
+                column: name_span.column,
+                end_line: initializer
+                    .as_ref()
+                    .map_or(name_span.end_line, |expression| expression.span.end_line),
+                end_column: initializer
+                    .as_ref()
+                    .map_or(name_span.end_column, |expression| {
+                        expression.span.end_column
+                    }),
+            },
+            name: self.tokens[name_index].lexeme.clone(),
+            name_span,
+            initializer,
+        }
+    }
+
+    fn parse_parameters(&mut self) -> (Vec<Parameter>, bool) {
+        let mut parameters = Vec::new();
+        if self.matches(TokenKind::RParen) {
+            return (parameters, true);
+        }
+        loop {
+            let start = self.current;
+            let Some(ty) = self.parse_type() else {
+                self.error_here("PAR003", "expected a parameter type");
+                self.synchronize_parameters();
+                return (parameters, false);
+            };
+            if !self.expect(TokenKind::Identifier, "expected a parameter name") {
+                self.synchronize_parameters();
+                return (parameters, false);
+            }
+            let name_index = self.current - 1;
+            parameters.push(Parameter {
+                span: self.span_from(start, self.current),
+                ty,
+                name: self.tokens[name_index].lexeme.clone(),
+                name_span: self.tokens[name_index].span,
+            });
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        let ok = self.expect(TokenKind::RParen, "expected ')' after parameter list");
+        (parameters, ok)
+    }
+
+    fn parse_state(&mut self) -> StateDeclaration {
+        let start = self.current;
+        let mut is_default = false;
+        let (name, name_span) = if self.check(TokenKind::KwDefault) {
+            if self.default_state_seen {
+                self.error_here("PAR014", "only one default state is allowed");
+            }
+            let span = self.here_span();
+            self.advance();
+            self.default_state_seen = true;
+            is_default = true;
+            ("default".to_owned(), span)
+        } else {
+            if !self.default_state_seen && !self.missing_default_reported {
+                self.error_here(
+                    "PAR013",
+                    "the default state must be defined before other states",
+                );
+                self.missing_default_reported = true;
+            }
+            self.advance();
+            if self.expect(TokenKind::Identifier, "expected a state name after 'state'") {
+                let index = self.current - 1;
+                (self.tokens[index].lexeme.clone(), self.tokens[index].span)
+            } else {
+                ("<missing>".to_owned(), self.here_span())
+            }
+        };
+
+        let mut events = Vec::new();
+        let has_body = self.expect(TokenKind::LBrace, "expected '{' to begin state body");
+        if !has_body {
+            self.synchronize_top_level();
+        } else {
+            while !self.at_end() && !self.check(TokenKind::RBrace) {
+                let before = self.current;
+                if !self.check(TokenKind::Identifier) {
+                    self.error_here("PAR004", "expected an event handler inside state");
+                    self.synchronize_event();
+                } else {
+                    let event_start = self.current;
+                    let event_name_index = self.current;
+                    self.advance();
+                    let header_ok =
+                        if self.expect(TokenKind::LParen, "expected '(' after event name") {
+                            let (parameters, ok) = self.parse_parameters();
+                            if ok {
+                                let body = self.parse_block();
+                                events.push(EventHandler {
+                                    span: self.span_from(event_start, self.current),
+                                    name: self.tokens[event_name_index].lexeme.clone(),
+                                    name_span: self.tokens[event_name_index].span,
+                                    parameters,
+                                    body,
+                                });
+                            }
+                            ok
+                        } else {
+                            false
+                        };
+                    if !header_ok {
+                        self.synchronize_event();
+                    }
+                }
+                if self.current == before {
+                    self.advance();
+                }
+            }
+        }
+        if has_body {
+            self.expect(TokenKind::RBrace, "expected '}' after state body");
+        }
+        StateDeclaration {
+            span: self.span_from(start, self.current),
+            name,
+            name_span,
+            is_default,
+            events,
+        }
+    }
+
+    fn parse_block(&mut self) -> Block {
+        let start = self.current;
+        if !self.expect(TokenKind::LBrace, "expected '{' to begin block") {
+            return Block {
+                span: self.span_from(start, self.current),
+                statements: Vec::new(),
+            };
+        }
+        let mut statements = Vec::new();
+        while !self.at_end() && !self.check(TokenKind::RBrace) {
+            let before = self.current;
+            if let Some(statement) = self.parse_statement() {
+                statements.push(statement);
+            }
+            if self.current == before {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace, "expected '}' after block");
+        Block {
+            span: self.span_from(start, self.current),
+            statements,
+        }
+    }
+
+    fn parse_statement(&mut self) -> Option<Statement> {
+        if self.statement_depth >= MAX_AST_RECURSION_DEPTH {
+            let span = self.here_span();
+            self.report_recursion(span);
+            self.skip_deep_statement();
+            return Some(Statement {
+                span,
+                kind: StatementKind::Error(ErrorNode {
+                    span,
+                    code: Some(AST_RECURSION_LIMIT),
+                }),
+            });
+        }
+        self.statement_depth += 1;
+        let statement = self.parse_statement_inner();
+        self.statement_depth -= 1;
+        statement
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
+        let start = self.current;
+        if self.matches(TokenKind::Semicolon) {
+            return Some(self.statement(start, StatementKind::Empty));
+        }
+        if self.check(TokenKind::LBrace) {
+            let block = self.parse_block();
+            return Some(self.statement(start, StatementKind::Block(block)));
+        }
+        if self.matches(TokenKind::KwIf) {
+            return Some(self.parse_if_statement(start));
+        }
+        if self.matches(TokenKind::KwFor) {
+            return Some(self.parse_for_statement(start));
+        }
+        if self.matches(TokenKind::KwWhile) {
+            return Some(self.parse_while_statement(start));
+        }
+        if self.matches(TokenKind::KwDo) {
+            return Some(self.parse_do_while_statement(start));
+        }
+        if self.matches(TokenKind::KwReturn) {
+            let value = if !self.check(TokenKind::Semicolon) {
+                let expression = self.parse_expression(1);
+                if expression.is_none() {
+                    self.synchronize_statement();
+                    return Some(self.error_statement(start));
+                }
+                expression
+            } else {
+                None
+            };
+            self.expect(TokenKind::Semicolon, "expected ';' after return statement");
+            return Some(self.statement(
+                start,
+                StatementKind::Return(ReturnStatement {
+                    span: self.span_from(start, self.current),
+                    value,
+                }),
+            ));
+        }
+        if self.matches(TokenKind::KwJump) {
+            let label_index =
+                if self.expect(TokenKind::Identifier, "expected a label name after 'jump'") {
+                    self.current - 1
+                } else {
+                    self.current
+                };
+            self.expect(TokenKind::Semicolon, "expected ';' after jump statement");
+            let label_span = self.token_span(label_index);
+            return Some(self.statement(
+                start,
+                StatementKind::Jump(JumpStatement {
+                    span: self.span_from(start, self.current),
+                    label: self.token_text(label_index),
+                    label_span,
+                }),
+            ));
+        }
+        if self.matches(TokenKind::KwState) {
+            let name_index =
+                if self.matches(TokenKind::Identifier) || self.matches(TokenKind::KwDefault) {
+                    self.current - 1
+                } else {
+                    self.error_here("PAR007", "expected a state name after 'state'");
+                    self.current
+                };
+            self.expect(TokenKind::Semicolon, "expected ';' after state change");
+            let state_span = self.token_span(name_index);
+            return Some(self.statement(
+                start,
+                StatementKind::StateChange(StateChangeStatement {
+                    span: self.span_from(start, self.current),
+                    state: self.token_text(name_index),
+                    state_span,
+                }),
+            ));
+        }
+        if self.matches(TokenKind::At) {
+            let name_index =
+                if self.expect(TokenKind::Identifier, "expected a label name after '@'") {
+                    self.current - 1
+                } else {
+                    self.current
+                };
+            self.expect(TokenKind::Semicolon, "expected ';' after label");
+            let name_span = self.token_span(name_index);
+            return Some(self.statement(
+                start,
+                StatementKind::Label(LabelStatement {
+                    span: self.span_from(start, self.current),
+                    name: self.token_text(name_index),
+                    name_span,
+                }),
+            ));
+        }
+        if self.is_type() {
+            let ty = self.parse_type()?;
+            return Some(self.parse_local_declaration(start, ty));
+        }
+
+        let expression_start = self.current;
+        let expression = self.parse_expression(1);
+        let Some(expression) = expression else {
+            if self.current > expression_start {
+                self.synchronize_statement();
+            }
+            return Some(self.error_statement(start));
+        };
+        self.expect(TokenKind::Semicolon, "expected ';' after expression");
+        Some(self.statement(
+            start,
+            StatementKind::Expression(ExpressionStatement {
+                span: self.span_from(start, self.current),
+                expression,
+            }),
+        ))
+    }
+
+    fn parse_if_statement(&mut self, start: usize) -> Statement {
+        self.expect(TokenKind::LParen, "expected '(' after 'if'");
+        let condition = if let Some(expression) = self.parse_expression(1) {
+            self.expect(TokenKind::RParen, "expected ')' after if condition");
+            expression
+        } else {
+            self.synchronize_condition();
+            self.error_expression(self.here_span())
+        };
+        let then_branch = self
+            .parse_statement()
+            .unwrap_or_else(|| self.error_statement(self.current));
+        let else_branch = if self.matches(TokenKind::KwElse) {
+            Some(Box::new(
+                self.parse_statement()
+                    .unwrap_or_else(|| self.error_statement(self.current)),
+            ))
+        } else {
+            None
+        };
+        self.statement(
+            start,
+            StatementKind::If(IfStatement {
+                span: self.span_from(start, self.current),
+                condition,
+                then_branch: Box::new(then_branch),
+                else_branch,
+            }),
+        )
+    }
+
+    fn parse_for_statement(&mut self, start: usize) -> Statement {
+        self.expect(TokenKind::LParen, "expected '(' after 'for'");
+        let mut initializer = Vec::new();
+        if self.is_type() {
+            self.error_here(
+                "PAR008",
+                "LSL for-loop initializers must be expressions; declare variables before the loop",
+            );
+            while !self.at_end()
+                && !self.check(TokenKind::Semicolon)
+                && !self.check(TokenKind::RParen)
+            {
+                self.advance();
+            }
+            self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
+        } else {
+            let (expressions, ok) = self.parse_for_expression_list(TokenKind::Semicolon);
+            initializer = expressions;
+            if ok {
+                self.expect(TokenKind::Semicolon, "expected ';' after for initializer");
+            }
+        }
+
+        let condition = if let Some(expression) = self.parse_expression(1) {
+            self.expect(TokenKind::Semicolon, "expected ';' after for condition");
+            expression
+        } else {
+            self.synchronize_for_condition();
+            self.error_expression(self.here_span())
+        };
+
+        let (increment, ok) = self.parse_for_expression_list(TokenKind::RParen);
+        if ok {
+            self.expect(TokenKind::RParen, "expected ')' after for clauses");
+        }
+        let body = self
+            .parse_statement()
+            .unwrap_or_else(|| self.error_statement(self.current));
+        self.statement(
+            start,
+            StatementKind::For(ForStatement {
+                span: self.span_from(start, self.current),
+                initializer,
+                condition,
+                increment,
+                body: Box::new(body),
+            }),
+        )
+    }
+
+    fn parse_for_expression_list(&mut self, end: TokenKind) -> (Vec<Expression>, bool) {
+        let mut expressions = Vec::new();
+        if self.check(end) {
+            return (expressions, true);
+        }
+        let Some(expression) = self.parse_expression(1) else {
+            self.synchronize_for_list(end);
+            return (expressions, false);
+        };
+        expressions.push(expression);
+        while self.matches(TokenKind::Comma) {
+            let Some(expression) = self.parse_expression(1) else {
+                self.synchronize_for_list(end);
+                return (expressions, false);
+            };
+            expressions.push(expression);
+        }
+        (expressions, true)
+    }
+
+    fn parse_while_statement(&mut self, start: usize) -> Statement {
+        self.expect(TokenKind::LParen, "expected '(' after 'while'");
+        let condition = if let Some(expression) = self.parse_expression(1) {
+            self.expect(TokenKind::RParen, "expected ')' after while condition");
+            expression
+        } else {
+            self.synchronize_condition();
+            self.error_expression(self.here_span())
+        };
+        let body = self
+            .parse_statement()
+            .unwrap_or_else(|| self.error_statement(self.current));
+        self.statement(
+            start,
+            StatementKind::While(WhileStatement {
+                span: self.span_from(start, self.current),
+                condition,
+                body: Box::new(body),
+            }),
+        )
+    }
+
+    fn parse_do_while_statement(&mut self, start: usize) -> Statement {
+        let body = self
+            .parse_statement()
+            .unwrap_or_else(|| self.error_statement(self.current));
+        self.expect(TokenKind::KwWhile, "expected 'while' after do-body");
+        self.expect(TokenKind::LParen, "expected '(' after 'while'");
+        let condition = if let Some(expression) = self.parse_expression(1) {
+            self.expect(TokenKind::RParen, "expected ')' after do-while condition");
+            expression
+        } else {
+            self.synchronize_condition();
+            self.error_expression(self.here_span())
+        };
+        self.expect(
+            TokenKind::Semicolon,
+            "expected ';' after do-while statement",
+        );
+        self.statement(
+            start,
+            StatementKind::DoWhile(DoWhileStatement {
+                span: self.span_from(start, self.current),
+                body: Box::new(body),
+                condition,
+            }),
+        )
+    }
+
+    fn parse_local_declaration(&mut self, start: usize, ty: Type) -> Statement {
+        let mut declarators = Vec::new();
+        let name_index = if self.expect(TokenKind::Identifier, "expected a local variable name") {
+            Some(self.current - 1)
+        } else {
+            None
+        };
+        let mut initializer = None;
+        if self.matches(TokenKind::Equal) {
+            initializer = self.parse_expression(1);
+            if initializer.is_none() {
+                self.synchronize_statement();
+                return self.error_statement(start);
+            }
+        }
+        if let Some(index) = name_index {
+            declarators.push(self.declarator(index, initializer));
+        }
+        while self.matches(TokenKind::Comma) {
+            if !self.expect(TokenKind::Identifier, "expected a variable name after ','") {
+                break;
+            }
+            let index = self.current - 1;
+            let mut initializer = None;
+            if self.matches(TokenKind::Equal) {
+                initializer = self.parse_expression(1);
+                if initializer.is_none() {
+                    self.synchronize_statement();
+                    return self.error_statement(start);
+                }
+            }
+            declarators.push(self.declarator(index, initializer));
+        }
+        self.expect(TokenKind::Semicolon, "expected ';' after local declaration");
+        self.statement(
+            start,
+            StatementKind::Local(LocalVariableDeclaration {
+                span: self.span_from(start, self.current),
+                ty,
+                declarators,
+            }),
+        )
+    }
+
+    fn parse_expression(&mut self, min_precedence: u8) -> Option<Expression> {
+        self.parse_expression_at(min_precedence, 0)
+    }
+
+    fn parse_expression_at(&mut self, min_precedence: u8, depth: usize) -> Option<Expression> {
+        if depth > MAX_AST_RECURSION_DEPTH {
+            let span = self.here_span();
+            self.report_recursion(span);
+            return None;
+        }
+        let expression_start = self.current;
+        let mut left = self.parse_prefix(depth)?;
+        while let Some((precedence, right_associative)) = binary_precedence(self.peek_kind()) {
+            if precedence < min_precedence {
+                break;
+            }
+            let operator_kind = self.peek_kind();
+            if is_assignment(operator_kind)
+                && !is_assignment_lvalue(self.tokens, expression_start, self.current)
+            {
+                self.error_here(
+                    "PAR010",
+                    "left-hand side of assignment must be a variable or vector/rotation component",
+                );
+            }
+            let operator_span = self.here_span();
+            self.advance();
+            let next_min = if right_associative {
+                precedence
+            } else {
+                precedence + 1
+            };
+            let diagnostic_count = self.diagnostics.len();
+            let right = self.parse_expression_at(next_min, depth + 1);
+            let Some(right) = right else {
+                if self.diagnostics.len() == diagnostic_count {
+                    self.error_here("PAR005", "expected an expression after operator");
+                } else if self.diagnostics.len() == diagnostic_count + 1
+                    && self
+                        .diagnostics
+                        .last()
+                        .is_some_and(|diagnostic| diagnostic.code == "PAR006")
+                {
+                    if let Some(diagnostic) = self.diagnostics.last_mut() {
+                        diagnostic.code = "PAR005";
+                        diagnostic.message = "expected an expression after operator".to_owned();
+                    }
+                }
+                return None;
+            };
+            let span = join_spans(left.span, right.span);
+            let kind = if let Some(operator) = assignment_operator(operator_kind) {
+                ExpressionKind::Assignment(AssignmentExpression {
+                    span,
+                    target: Box::new(left),
+                    operator,
+                    operator_span,
+                    value: Box::new(right),
+                })
+            } else {
+                let operator = binary_operator(operator_kind)?;
+                ExpressionKind::Binary(BinaryExpression {
+                    span,
+                    left: Box::new(left),
+                    operator,
+                    operator_span,
+                    right: Box::new(right),
+                })
+            };
+            left = Expression { span, kind };
+        }
+        Some(left)
+    }
+
+    fn parse_prefix(&mut self, depth: usize) -> Option<Expression> {
+        if depth > MAX_AST_RECURSION_DEPTH {
+            let span = self.here_span();
+            self.report_recursion(span);
+            return None;
+        }
+        let start = self.current;
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Bang | TokenKind::Tilde | TokenKind::Plus | TokenKind::Minus
+        ) {
+            let operator_span = self.here_span();
+            let operator = unary_operator(self.peek_kind())?;
+            self.advance();
+            let operand = self.parse_prefix(depth + 1)?;
+            let span = join_spans(operator_span, operand.span);
+            return Some(Expression {
+                span,
+                kind: ExpressionKind::Unary(UnaryExpression {
+                    span,
+                    operator,
+                    operator_span,
+                    operand: Box::new(operand),
+                }),
+            });
+        }
+        if matches!(
+            self.peek_kind(),
+            TokenKind::PlusPlus | TokenKind::MinusMinus
+        ) {
+            let operator_span = self.here_span();
+            let operator = increment_operator(self.peek_kind())?;
+            self.advance();
+            let operand_start = self.current;
+            let operand = self.parse_prefix(depth + 1)?;
+            if !is_variable_lvalue(self.tokens, operand_start, self.current) {
+                self.error_here("PAR011", "increment/decrement operand must be a variable");
+            }
+            let span = join_spans(operator_span, operand.span);
+            return Some(Expression {
+                span,
+                kind: ExpressionKind::Increment(IncrementExpression {
+                    span,
+                    operator,
+                    operator_span,
+                    prefix: true,
+                    operand: Box::new(operand),
+                }),
+            });
+        }
+        if self.check(TokenKind::LParen)
+            && is_type_token(self.peek_kind_at(1))
+            && self.peek_kind_at(2) == TokenKind::RParen
+        {
+            let start_span = self.here_span();
+            self.advance();
+            let ty_token = self.current;
+            let ty = self.parse_type()?;
+            self.advance(); // ')'
+            let operand = self.parse_prefix(depth + 1)?;
+            let span = join_spans(start_span, operand.span);
+            let _ = ty_token;
+            return Some(Expression {
+                span,
+                kind: ExpressionKind::Cast(CastExpression {
+                    span,
+                    ty,
+                    operand: Box::new(operand),
+                }),
+            });
+        }
+
+        let primary_start = self.current;
+        let mut call_suffix_allowed = self.check(TokenKind::Identifier);
+        let mut expression = self.parse_primary(depth)?;
+        loop {
+            if self.check(TokenKind::LParen) {
+                if !call_suffix_allowed {
+                    self.error_here("PAR007", "function call suffix requires an identifier");
+                }
+                self.advance();
+                let arguments = self.parse_argument_list(depth + 1)?;
+                let span = join_spans(expression.span, self.previous_span());
+                expression = Expression {
+                    span,
+                    kind: ExpressionKind::Call(CallExpression {
+                        span,
+                        callee: Box::new(expression),
+                        arguments,
+                    }),
+                };
+                call_suffix_allowed = false;
+            } else if self.check(TokenKind::Dot) {
+                let dot_index = self.current;
+                self.advance();
+                let base_is_variable = is_variable_lvalue(self.tokens, primary_start, dot_index);
+                let component_token = self.tokens.get(self.current);
+                let component = component_token.and_then(|token| {
+                    if token.kind == TokenKind::Identifier {
+                        component_from_name(&token.lexeme)
+                    } else {
+                        None
+                    }
+                });
+                if !base_is_variable || component.is_none() {
+                    self.error_here(
+                        "PAR012",
+                        "vector/rotation component access requires a variable and a valid component name",
+                    );
+                }
+                if !self.expect(TokenKind::Identifier, "expected a component name after '.'") {
+                    return None;
+                }
+                let component_index = self.current - 1;
+                let component = component.unwrap_or(Component::X);
+                let span = join_spans(expression.span, self.tokens[component_index].span);
+                expression = Expression {
+                    span,
+                    kind: ExpressionKind::Component(ComponentAccessExpression {
+                        span,
+                        base: Box::new(expression),
+                        component,
+                        component_span: self.tokens[component_index].span,
+                    }),
+                };
+                call_suffix_allowed = false;
+            } else if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
+                if !is_variable_lvalue(self.tokens, primary_start, self.current) {
+                    self.error_here("PAR011", "increment/decrement operand must be a variable");
+                }
+                let operator_span = self.here_span();
+                let operator = increment_operator(self.peek_kind())?;
+                self.advance();
+                let span = join_spans(expression.span, operator_span);
+                expression = Expression {
+                    span,
+                    kind: ExpressionKind::Increment(IncrementExpression {
+                        span,
+                        operator,
+                        operator_span,
+                        prefix: false,
+                        operand: Box::new(expression),
+                    }),
+                };
+                call_suffix_allowed = false;
+            } else {
+                break;
+            }
+        }
+        let _ = start;
+        Some(expression)
+    }
+
+    fn parse_primary(&mut self, depth: usize) -> Option<Expression> {
+        let start = self.current;
+        let expression = match self.peek_kind() {
+            TokenKind::Identifier => {
+                let token = self.advance();
+                Expression {
+                    span: token.span,
+                    kind: ExpressionKind::Identifier(Identifier {
+                        name: token.lexeme.clone(),
+                        span: token.span,
+                    }),
+                }
+            }
+            TokenKind::IntegerLiteral => {
+                let token = self.advance();
+                Expression {
+                    span: token.span,
+                    kind: ExpressionKind::Integer(IntegerLiteral {
+                        text: token.lexeme.clone(),
+                        span: token.span,
+                    }),
+                }
+            }
+            TokenKind::FloatLiteral => {
+                let token = self.advance();
+                Expression {
+                    span: token.span,
+                    kind: ExpressionKind::Float(FloatLiteral {
+                        text: token.lexeme.clone(),
+                        span: token.span,
+                    }),
+                }
+            }
+            TokenKind::StringLiteral => {
+                let token = self.advance();
+                Expression {
+                    span: token.span,
+                    kind: ExpressionKind::String(StringLiteral {
+                        text: token.lexeme.clone(),
+                        span: token.span,
+                    }),
+                }
+            }
+            TokenKind::LParen => {
+                self.advance();
+                let inner = self.parse_expression_at(1, depth + 1)?;
+                if !self.expect(TokenKind::RParen, "expected ')' after expression") {
+                    return None;
+                }
+                let span = self.span_from(start, self.current);
+                Expression {
+                    span,
+                    kind: ExpressionKind::Parenthesized(Box::new(inner)),
+                }
+            }
+            TokenKind::LBracket => {
+                self.advance();
+                let elements = self.parse_delimited_expressions(TokenKind::RBracket, depth + 1)?;
+                let span = self.span_from(start, self.current);
+                Expression {
+                    span,
+                    kind: ExpressionKind::List(ListExpression { span, elements }),
+                }
+            }
+            TokenKind::Less => {
+                self.advance();
+                let mut components = Vec::new();
+                for component_index in 0..3 {
+                    let component = self.parse_expression_at(10, depth + 1)?;
+                    components.push(component);
+                    if component_index < 2
+                        && !self.expect(
+                            TokenKind::Comma,
+                            if component_index == 0 {
+                                "expected ',' after first vector component"
+                            } else {
+                                "expected ',' after second vector component"
+                            },
+                        )
+                    {
+                        return None;
+                    }
+                }
+                if self.matches(TokenKind::Comma) {
+                    let component = self.parse_expression_at(10, depth + 1)?;
+                    components.push(component);
+                }
+                if !self.expect(
+                    TokenKind::Greater,
+                    "expected '>' after vector or rotation literal",
+                ) {
+                    return None;
+                }
+                let span = self.span_from(start, self.current);
+                if components.len() == 4 {
+                    Expression {
+                        span,
+                        kind: ExpressionKind::Rotation(RotationExpression { span, components }),
+                    }
+                } else {
+                    Expression {
+                        span,
+                        kind: ExpressionKind::Vector(VectorExpression { span, components }),
+                    }
+                }
+            }
+            _ => {
+                self.error_here("PAR006", "expected an expression");
+                return None;
+            }
+        };
+        Some(expression)
+    }
+
+    fn parse_argument_list(&mut self, depth: usize) -> Option<Vec<Expression>> {
+        let mut arguments = Vec::new();
+        if self.matches(TokenKind::RParen) {
+            return Some(arguments);
+        }
+        loop {
+            let Some(expression) = self.parse_expression_at(1, depth) else {
+                self.synchronize_arguments();
+                return None;
+            };
+            arguments.push(expression);
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        if self.expect(TokenKind::RParen, "expected ')' after arguments") {
+            Some(arguments)
+        } else {
+            None
+        }
+    }
+
+    fn parse_delimited_expressions(
+        &mut self,
+        closing: TokenKind,
+        depth: usize,
+    ) -> Option<Vec<Expression>> {
+        let mut expressions = Vec::new();
+        if self.matches(closing) {
+            return Some(expressions);
+        }
+        loop {
+            let expression = self.parse_expression_at(1, depth)?;
+            expressions.push(expression);
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        if self.expect(closing, "expected closing delimiter") {
+            Some(expressions)
+        } else {
+            None
+        }
+    }
+
+    fn parse_type(&mut self) -> Option<Type> {
+        let token = self.tokens.get(self.current)?;
+        let kind = type_kind(token.kind)?;
+        let ty = Type {
+            kind,
+            span: token.span,
+        };
+        self.advance();
+        Some(ty)
+    }
+
+    fn is_type(&self) -> bool {
+        is_type_token(self.peek_kind())
+    }
+
+    fn is_untyped_function_declaration(&self) -> bool {
+        self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen
+    }
+
+    fn expect(&mut self, kind: TokenKind, message: &'static str) -> bool {
+        if self.matches(kind) {
+            true
+        } else {
+            if self.at_end() && self.eof_reported {
+                return false;
+            }
+            self.error_here("PAR007", message);
+            false
+        }
+    }
+
+    fn matches(&mut self, kind: TokenKind) -> bool {
+        if self.check(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check(&self, kind: TokenKind) -> bool {
+        self.peek_kind() == kind
+    }
+
+    fn peek_kind(&self) -> TokenKind {
+        self.peek_kind_at(0)
+    }
+
+    fn peek_kind_at(&self, distance: usize) -> TokenKind {
+        self.tokens
+            .get(self.current + distance)
+            .map(|token| token.kind)
+            .unwrap_or(TokenKind::Eof)
+    }
+
+    fn at_end(&self) -> bool {
+        self.check(TokenKind::Eof)
+    }
+
+    fn advance(&mut self) -> &Token {
+        if !self.at_end() {
+            self.current += 1;
+        }
+        self.previous()
+    }
+
+    fn previous(&self) -> &Token {
+        &self.tokens[self.current.saturating_sub(1)]
+    }
+
+    fn previous_span(&self) -> Span {
+        self.tokens
+            .get(self.current.saturating_sub(1))
+            .map_or_else(|| self.fallback_span(), |token| token.span)
+    }
+
+    fn here_span(&self) -> Span {
+        self.tokens
+            .get(self.current)
+            .or_else(|| self.tokens.last())
+            .map_or_else(|| self.fallback_span(), |token| token.span)
+    }
+
+    fn token_span(&self, index: usize) -> Span {
+        self.tokens
+            .get(index)
+            .or_else(|| self.tokens.last())
+            .map_or_else(|| self.fallback_span(), |token| token.span)
+    }
+
+    fn token_text(&self, index: usize) -> String {
+        self.tokens
+            .get(index)
+            .map(|token| token.lexeme.clone())
+            .unwrap_or_default()
+    }
+
+    fn fallback_span(&self) -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 1,
+        }
+    }
+
+    fn span_from(&self, start: usize, end_exclusive: usize) -> Span {
+        if end_exclusive > start {
+            join_spans(self.token_span(start), self.token_span(end_exclusive - 1))
+        } else {
+            self.token_span(start)
+        }
+    }
+
+    fn statement(&self, start: usize, kind: StatementKind) -> Statement {
+        Statement {
+            span: self.span_from(start, self.current),
+            kind,
+        }
+    }
+
+    fn error_statement(&self, start: usize) -> Statement {
+        let span = self.span_from(start, self.current);
+        Statement {
+            span,
+            kind: StatementKind::Error(ErrorNode { span, code: None }),
+        }
+    }
+
+    fn error_expression(&self, span: Span) -> Expression {
+        Expression {
+            span,
+            kind: ExpressionKind::Error(ErrorNode { span, code: None }),
+        }
+    }
+
+    fn error_here(&mut self, code: &'static str, message: impl Into<String>) {
+        if self.at_end() && self.eof_reported {
+            return;
+        }
+        let span = self.here_span();
+        self.push_error(code, message, span);
+        if self.at_end() {
+            self.eof_reported = true;
+        }
+    }
+
+    fn push_error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
+        self.diagnostics.push(Diagnostic {
+            code,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Syntax,
+            message: message.into(),
+            span,
+        });
+    }
+
+    fn report_recursion(&mut self, span: Span) {
+        if self.recursion_reported {
+            return;
+        }
+        self.recursion_reported = true;
+        self.push_error(
+            AST_RECURSION_LIMIT,
+            format!("AST recursion depth exceeds {MAX_AST_RECURSION_DEPTH} levels"),
+            span,
+        );
+    }
+
+    fn skip_deep_statement(&mut self) {
+        if self.check(TokenKind::LBrace) {
+            let mut depth = 0usize;
+            while !self.at_end() {
+                match self.peek_kind() {
+                    TokenKind::LBrace => depth += 1,
+                    TokenKind::RBrace => {
+                        depth = depth.saturating_sub(1);
+                        self.advance();
+                        if depth == 0 {
+                            return;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                self.advance();
+            }
+            return;
+        }
+        if !self.at_end() {
+            self.advance();
+        }
+    }
+
+    fn synchronize_top_level(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if brace_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && (self.is_type()
+                    || self.check(TokenKind::KwVoid)
+                    || self.check(TokenKind::KwDefault)
+                    || self.check(TokenKind::KwState))
+            {
+                return;
+            }
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        self.advance();
+                        continue;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_event(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RBrace) {
+                    return;
+                }
+                if self.check(TokenKind::Identifier) && self.peek_kind_at(1) == TokenKind::LParen {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        return;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_for_list(&mut self, end: TokenKind) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(end) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::LBrace) || self.check(TokenKind::RBrace) {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_condition(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RParen) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::LBrace) {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_for_condition(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::Semicolon) {
+                    self.advance();
+                    return;
+                }
+                if self.check(TokenKind::RParen) || self.check(TokenKind::LBrace) {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_arguments(&mut self) {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            match self.peek_kind() {
+                TokenKind::RParen if paren_depth == 0 && bracket_depth == 0 => {
+                    self.advance();
+                    return;
+                }
+                TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 => return,
+                TokenKind::Semicolon if paren_depth == 0 && bracket_depth == 0 => {
+                    if self.peek_kind_at(1) == TokenKind::RParen {
+                        self.advance();
+                        self.advance();
+                    }
+                    return;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_statement(&mut self) {
+        let mut brace_depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while !self.at_end() {
+            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                if self.check(TokenKind::RBrace) {
+                    return;
+                }
+                if self.matches(TokenKind::Semicolon) {
+                    return;
+                }
+            }
+            match self.peek_kind() {
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        return;
+                    }
+                    brace_depth -= 1;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_parameters(&mut self) {
+        while !self.at_end() {
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::LBrace
+                    | TokenKind::RBrace
+                    | TokenKind::Semicolon
+            ) {
+                return;
+            }
+            self.advance();
+        }
+    }
+}
+
+fn join_spans(first: Span, second: Span) -> Span {
+    Span {
+        start: first.start,
+        end: second.end,
+        line: first.line,
+        column: first.column,
+        end_line: second.end_line,
+        end_column: second.end_column,
+    }
+}
+
+fn is_type_token(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::KwInteger
+            | TokenKind::KwFloat
+            | TokenKind::KwString
+            | TokenKind::KwKey
+            | TokenKind::KwList
+            | TokenKind::KwVector
+            | TokenKind::KwRotation
+    )
+}
+
+fn type_kind(kind: TokenKind) -> Option<TypeKind> {
+    match kind {
+        TokenKind::KwInteger => Some(TypeKind::Integer),
+        TokenKind::KwFloat => Some(TypeKind::Float),
+        TokenKind::KwString => Some(TypeKind::String),
+        TokenKind::KwKey => Some(TypeKind::Key),
+        TokenKind::KwList => Some(TypeKind::List),
+        TokenKind::KwVector => Some(TypeKind::Vector),
+        TokenKind::KwRotation => Some(TypeKind::Rotation),
+        _ => None,
+    }
+}
+
+fn is_assignment(kind: TokenKind) -> bool {
+    assignment_operator(kind).is_some()
+}
+
+fn assignment_operator(kind: TokenKind) -> Option<AssignmentOperator> {
+    match kind {
+        TokenKind::Equal => Some(AssignmentOperator::Assign),
+        TokenKind::PlusEqual => Some(AssignmentOperator::AddAssign),
+        TokenKind::MinusEqual => Some(AssignmentOperator::SubtractAssign),
+        TokenKind::StarEqual => Some(AssignmentOperator::MultiplyAssign),
+        TokenKind::SlashEqual => Some(AssignmentOperator::DivideAssign),
+        TokenKind::PercentEqual => Some(AssignmentOperator::RemainderAssign),
+        _ => None,
+    }
+}
+
+fn unary_operator(kind: TokenKind) -> Option<UnaryOperator> {
+    match kind {
+        TokenKind::Plus => Some(UnaryOperator::Plus),
+        TokenKind::Minus => Some(UnaryOperator::Minus),
+        TokenKind::Bang => Some(UnaryOperator::Bang),
+        TokenKind::Tilde => Some(UnaryOperator::Tilde),
+        _ => None,
+    }
+}
+
+fn increment_operator(kind: TokenKind) -> Option<IncrementOperator> {
+    match kind {
+        TokenKind::PlusPlus => Some(IncrementOperator::Increment),
+        TokenKind::MinusMinus => Some(IncrementOperator::Decrement),
+        _ => None,
+    }
+}
+
+fn component_from_name(name: &str) -> Option<Component> {
+    match name {
+        "x" => Some(Component::X),
+        "y" => Some(Component::Y),
+        "z" => Some(Component::Z),
+        "s" => Some(Component::S),
+        _ => None,
+    }
+}
+
+fn binary_operator(kind: TokenKind) -> Option<BinaryOperator> {
+    match kind {
+        TokenKind::OrOr => Some(BinaryOperator::OrOr),
+        TokenKind::AndAnd => Some(BinaryOperator::AndAnd),
+        TokenKind::Or => Some(BinaryOperator::BitOr),
+        TokenKind::Xor => Some(BinaryOperator::BitXor),
+        TokenKind::And => Some(BinaryOperator::BitAnd),
+        TokenKind::EqualEqual => Some(BinaryOperator::Equal),
+        TokenKind::BangEqual => Some(BinaryOperator::NotEqual),
+        TokenKind::Less => Some(BinaryOperator::Less),
+        TokenKind::LessEqual => Some(BinaryOperator::LessEqual),
+        TokenKind::Greater => Some(BinaryOperator::Greater),
+        TokenKind::GreaterEqual => Some(BinaryOperator::GreaterEqual),
+        TokenKind::ShiftLeft => Some(BinaryOperator::ShiftLeft),
+        TokenKind::ShiftRight => Some(BinaryOperator::ShiftRight),
+        TokenKind::Plus => Some(BinaryOperator::Add),
+        TokenKind::Minus => Some(BinaryOperator::Subtract),
+        TokenKind::Star => Some(BinaryOperator::Multiply),
+        TokenKind::Slash => Some(BinaryOperator::Divide),
+        TokenKind::Percent => Some(BinaryOperator::Remainder),
+        _ => None,
+    }
+}
+
+fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
+    let precedence = match kind {
+        TokenKind::Equal
+        | TokenKind::PlusEqual
+        | TokenKind::MinusEqual
+        | TokenKind::StarEqual
+        | TokenKind::SlashEqual
+        | TokenKind::PercentEqual => return Some((1, true)),
+        TokenKind::OrOr | TokenKind::AndAnd => 3,
+        TokenKind::Or => 5,
+        TokenKind::Xor => 6,
+        TokenKind::And => 7,
+        TokenKind::EqualEqual | TokenKind::BangEqual => 8,
+        TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual => 9,
+        TokenKind::ShiftLeft | TokenKind::ShiftRight => 10,
+        TokenKind::Plus => 11,
+        TokenKind::Minus => 12,
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 13,
+        _ => return None,
+    };
+    Some((precedence, false))
+}
+
+fn is_variable_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> bool {
+    loop {
+        if end <= start + 1
+            || tokens.get(start).map(|token| token.kind) != Some(TokenKind::LParen)
+            || tokens.get(end - 1).map(|token| token.kind) != Some(TokenKind::RParen)
+        {
+            break;
+        }
+        let mut depth = 0usize;
+        let mut matching_close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        matching_close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if matching_close != Some(end - 1) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    end == start + 1
+        && tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+}
+
+fn is_assignment_lvalue(tokens: &[Token], mut start: usize, mut end: usize) -> bool {
+    loop {
+        if end <= start + 1
+            || tokens.get(start).map(|token| token.kind) != Some(TokenKind::LParen)
+            || tokens.get(end - 1).map(|token| token.kind) != Some(TokenKind::RParen)
+        {
+            break;
+        }
+        let mut depth = 0usize;
+        let mut matching_close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        matching_close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if matching_close != Some(end - 1) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    if end == start + 1 {
+        return tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier);
+    }
+    end == start + 3
+        && tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+        && tokens
+            .get(start + 1)
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+        && tokens.get(start + 2).is_some_and(|token| {
+            token.kind == TokenKind::Identifier
+                && matches!(token.lexeme.as_str(), "x" | "y" | "z" | "s")
+        })
+}
+
+/// Parse a prepared token stream into a typed AST and syntax diagnostics.
+///
+/// The explicit grammar recursion guard stops at
+/// [`MAX_AST_RECURSION_DEPTH`]. Parsing runs on a dedicated, fixed-size stack so
+/// the guard itself is reached safely even in unoptimized debug builds; the
+/// thread is scoped to this call and no state is shared between invocations.
+pub fn parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>) {
+    const PARSER_STACK_BYTES: usize = 16 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("neolint-ast-parser".to_owned())
+            .stack_size(PARSER_STACK_BYTES)
+            .spawn_scoped(scope, || Parser::new(tokens).run());
+        match worker {
+            Ok(handle) => match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
+            Err(_) => Parser::new(tokens).run(),
+        }
+    })
+}
