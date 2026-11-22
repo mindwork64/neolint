@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::diagnostic::{DiagnosticKind, Severity};
-use crate::preprocessor::config::{PreprocessDialect, PreprocessOptions};
+use crate::preprocessor::config::{PreprocessDialect, PreprocessSettings};
 use crate::preprocessor::diagnostics::{
     DiagSink, RawDiagnostic, RawRelated, PRE_CONDITIONAL_DEPTH, PRE_CONFLICTING_REDEFINITION,
     PRE_DUPLICATE_ELSE, PRE_ELIF_AFTER_ELSE, PRE_ELIF_WITHOUT_IF, PRE_ELSE_WITHOUT_IF,
@@ -50,6 +50,7 @@ struct IncludeFrame {
     canonical: Option<PathBuf>,
     entry_span: Option<RawSpan>,
     directory: Option<PathBuf>,
+    condition_base: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +92,7 @@ impl<'a> Preprocessor<'a> {
     pub(crate) fn new(
         manager: &'a mut SourceManager,
         root: SourceId,
-        options: &PreprocessOptions,
+        options: &PreprocessSettings,
     ) -> Result<Self, SpanError> {
         let unit = manager.unit();
         if root.unit() != unit {
@@ -113,6 +114,7 @@ impl<'a> Preprocessor<'a> {
             canonical: canonical.clone(),
             entry_span: None,
             directory,
+            condition_base: 0,
         };
         Ok(Self {
             unit,
@@ -205,6 +207,10 @@ impl<'a> Preprocessor<'a> {
 
     fn is_active(&self) -> bool {
         self.conditions.last().map_or(true, |frame| frame.active)
+    }
+
+    fn local_condition_base(&self) -> usize {
+        self.frames.last().map_or(0, |frame| frame.condition_base)
     }
 
     fn push_pending(&mut self, start: usize, end: usize) {
@@ -548,16 +554,17 @@ impl<'a> Preprocessor<'a> {
         let saved_source = self.source;
         let saved_text = Arc::clone(&self.text);
         let saved_context = self.include_context;
+        let condition_depth = self.conditions.len();
         self.frames.push(IncludeFrame {
             source,
             canonical,
             entry_span: Some(directive_span),
             directory,
+            condition_base: condition_depth,
         });
         self.source = source;
         self.text = text;
         self.include_context = Some(context);
-        let condition_depth = self.conditions.len();
         self.process_current_source();
         self.flush_pending();
         let eof = RawSpan::point(source, self.text.len());
@@ -830,10 +837,18 @@ impl<'a> Preprocessor<'a> {
     }
 
     fn elif(&mut self, rest: &MappedText, name_span: RawSpan, directive_span: RawSpan) {
+        if self.conditions.len() <= self.local_condition_base() {
+            self.diags.push(
+                PRE_ELIF_WITHOUT_IF,
+                "#elif without a matching #if in this file",
+                name_span,
+            );
+            return;
+        }
         let Some(frame) = self.conditions.last_mut() else {
             self.diags.push(
                 PRE_ELIF_WITHOUT_IF,
-                "#elif without a matching #if",
+                "#elif without a matching #if in this file",
                 name_span,
             );
             return;
@@ -880,10 +895,18 @@ impl<'a> Preprocessor<'a> {
                 directive_span,
             );
         }
+        if self.conditions.len() <= self.local_condition_base() {
+            self.diags.push(
+                PRE_ELSE_WITHOUT_IF,
+                "#else without a matching #if in this file",
+                name_span,
+            );
+            return;
+        }
         let Some(frame) = self.conditions.last_mut() else {
             self.diags.push(
                 PRE_ELSE_WITHOUT_IF,
-                "#else without a matching #if",
+                "#else without a matching #if in this file",
                 name_span,
             );
             return;
@@ -907,10 +930,18 @@ impl<'a> Preprocessor<'a> {
                 directive_span,
             );
         }
+        if self.conditions.len() <= self.local_condition_base() {
+            self.diags.push(
+                PRE_ENDIF_WITHOUT_IF,
+                "#endif without a matching #if in this file",
+                name_span,
+            );
+            return;
+        }
         if self.conditions.pop().is_none() {
             self.diags.push(
                 PRE_ENDIF_WITHOUT_IF,
-                "#endif without a matching #if",
+                "#endif without a matching #if in this file",
                 name_span,
             );
         }
@@ -1193,7 +1224,7 @@ impl ConditionalKind {
 pub(crate) fn preprocess_full(
     manager: &mut SourceManager,
     root: SourceId,
-    options: &PreprocessOptions,
+    options: &PreprocessSettings,
 ) -> Result<PreparedSource, SpanError> {
     if options.dialect() == PreprocessDialect::Firestorm {
         const MARKER: &str = "//fspreprocessor off";
@@ -1556,7 +1587,8 @@ mod tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(900), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -1616,7 +1648,8 @@ mod phase2_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(901), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -1816,7 +1849,8 @@ mod phase2_extra_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(902), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -1938,7 +1972,8 @@ mod phase2_adversarial_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(903), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -2056,7 +2091,8 @@ mod phase2_map_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(904), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn original_text(prepared: &PreparedSource, span: crate::source::SourceSpan) -> &str {
@@ -2178,7 +2214,8 @@ mod phase2_contract_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(905), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -2198,8 +2235,12 @@ mod phase2_contract_tests {
             .load_root_text("root.lsl", "integer x = 1;\n")
             .unwrap();
         let identity = crate::preprocessor::identity::preprocess_identity(&manager, root).unwrap();
-        let configured =
-            crate::preprocessor::preprocess(&manager, root, PreprocessConfig::identity()).unwrap();
+        let configured = crate::preprocessor::preprocess_with_settings(
+            &manager,
+            root,
+            PreprocessConfig::identity(),
+        )
+        .unwrap();
         assert_eq!(configured.text(), identity.text());
         assert_eq!(
             configured.map().prepared_len(),
@@ -2209,7 +2250,8 @@ mod phase2_contract_tests {
         assert!(configured.preprocess_diagnostics().is_empty());
         assert_eq!(PreprocessConfig::default(), PreprocessConfig::identity());
         let legacy = PreprocessConfig;
-        let legacy_prepared = crate::preprocessor::preprocess(&manager, root, legacy).unwrap();
+        let legacy_prepared =
+            crate::preprocessor::preprocess_with_settings(&manager, root, legacy).unwrap();
         assert_eq!(legacy_prepared.text(), identity.text());
     }
 
@@ -2297,7 +2339,8 @@ mod phase2_limit_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(907), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2335,7 +2378,8 @@ mod phase2_comment_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(908), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2368,7 +2412,8 @@ mod phase2_state_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(909), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -2432,7 +2477,8 @@ mod phase2_rescan_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(910), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2457,7 +2503,8 @@ mod phase2_isolation_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(911), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2523,7 +2570,8 @@ mod phase2_comment_close_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(912), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2556,7 +2604,8 @@ mod phase2_function_depth_tests {
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", &source).unwrap();
         let prepared =
-            crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap();
+            crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+                .unwrap();
         assert!(prepared.text().contains('1'), "{}", prepared.text());
         assert!(
             prepared.preprocess_diagnostics().is_empty(),
@@ -2575,7 +2624,7 @@ mod phase2_diagnostic_code_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(914), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full())
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
             .unwrap()
             .preprocess_diagnostics()
             .iter()
@@ -2606,7 +2655,8 @@ mod phase2_conditional_extra_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(915), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2645,7 +2695,8 @@ mod phase2_directive_comment_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(916), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2674,7 +2725,8 @@ mod phase2_diagnostic_span_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(917), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -2715,7 +2767,8 @@ mod phase2_rendered_diagnostic_tests {
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", "#if 1\nx\n").unwrap();
         let prepared =
-            crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap();
+            crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+                .unwrap();
         let diagnostic = prepared.preprocess_diagnostics()[0].clone();
         let rendered = RenderedDiagnostic::from_preprocess(diagnostic, &prepared).unwrap();
         assert_eq!(rendered.diagnostic().span.start, 0);
@@ -2733,7 +2786,8 @@ mod phase2_review_regression_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(919), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -2943,7 +2997,8 @@ mod phase2_multiline_provenance_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(920), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn text_of(prepared: &PreparedSource, span: SourceSpan) -> &str {
@@ -2974,7 +3029,7 @@ mod phase2_multiline_provenance_tests {
 #[cfg(test)]
 mod phase3_include_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2998,7 +3053,7 @@ mod phase3_include_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root_id,
-            PreprocessOptions::full().with_include_dirs(include_dirs),
+            PreprocessSettings::full().with_include_dirs(include_dirs),
         )
         .unwrap();
         (manager, prepared)
@@ -3084,7 +3139,8 @@ mod phase3_advanced_macro_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(931), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
@@ -3197,17 +3253,17 @@ mod phase3_advanced_macro_tests {
 mod phase3_firestorm_kill_switch_tests {
     use super::*;
     use crate::diagnostic::Severity;
-    use crate::preprocessor::config::{PreprocessConfig, PreprocessOptions};
+    use crate::preprocessor::config::PreprocessSettings;
 
-    fn run(source: &str, options: PreprocessOptions) -> PreparedSource {
+    fn run(source: &str, options: PreprocessSettings) -> PreparedSource {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(932), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", source).unwrap();
-        crate::preprocessor::preprocess(&manager, root, options).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, options).unwrap()
     }
 
     fn assert_disabled(source: &str, marker_offset: usize) {
-        let prepared = run(source, PreprocessOptions::firestorm());
+        let prepared = run(source, PreprocessSettings::firestorm());
         assert_eq!(prepared.text(), source);
         assert_eq!(prepared.preprocess_diagnostics().len(), 1);
         let diagnostic = &prepared.preprocess_diagnostics()[0];
@@ -3224,7 +3280,7 @@ mod phase3_firestorm_kill_switch_tests {
     #[test]
     fn marker_absent_processes_normally() {
         let source = "#define X 1\nX\n";
-        let prepared = run(source, PreprocessOptions::firestorm());
+        let prepared = run(source, PreprocessSettings::firestorm());
         assert!(prepared.text().contains('1'));
         assert!(prepared.preprocess_diagnostics().is_empty());
     }
@@ -3248,7 +3304,7 @@ mod phase3_firestorm_kill_switch_tests {
     #[test]
     fn standard_lsl_mode_does_not_apply_the_firestorm_marker() {
         let source = "//fspreprocessor off\n#define X 1\nX\n";
-        let prepared = run(source, PreprocessConfig::full());
+        let prepared = run(source, PreprocessSettings::full());
         assert!(prepared.text().contains('1'));
         assert!(prepared.preprocess_diagnostics().is_empty());
     }
@@ -3257,7 +3313,7 @@ mod phase3_firestorm_kill_switch_tests {
 #[cfg(test)]
 mod phase3_builtin_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3267,7 +3323,12 @@ mod phase3_builtin_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(933), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessOptions::firestorm()).unwrap()
+        crate::preprocessor::preprocess_with_settings(
+            &manager,
+            root,
+            PreprocessSettings::firestorm(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -3319,7 +3380,7 @@ mod phase3_builtin_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::firestorm(),
+            PreprocessSettings::firestorm(),
         )
         .unwrap();
         assert!(prepared.text().contains("inc.lsl\""), "{}", prepared.text());
@@ -3335,7 +3396,7 @@ mod phase3_builtin_tests {
 #[cfg(test)]
 mod phase3_include_advanced_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3359,7 +3420,7 @@ mod phase3_include_advanced_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root_id,
-            PreprocessOptions::full().with_include_dirs(dirs),
+            PreprocessSettings::full().with_include_dirs(dirs),
         )
         .unwrap();
         (manager, prepared)
@@ -3462,7 +3523,7 @@ mod phase3_include_advanced_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full(),
+            PreprocessSettings::full(),
         )
         .unwrap();
         assert_eq!(codes(&prepared), vec!["PRE032"]);
@@ -3475,7 +3536,7 @@ mod phase3_include_advanced_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full().with_include_dirs(vec![dir.clone()]),
+            PreprocessSettings::full().with_include_dirs(vec![dir.clone()]),
         )
         .unwrap();
         assert!(prepared.text().contains("STDIN_INCLUDE"));
@@ -3553,7 +3614,7 @@ mod phase3_include_advanced_tests {
 #[cfg(test)]
 mod phase3_include_limit_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3585,7 +3646,7 @@ mod phase3_include_limit_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full(),
+            PreprocessSettings::full(),
         )
         .unwrap();
         assert!(prepared
@@ -3612,7 +3673,7 @@ mod phase3_include_limit_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full(),
+            PreprocessSettings::full(),
         )
         .unwrap();
         assert!(prepared
@@ -3630,7 +3691,7 @@ mod phase3_include_limit_tests {
 #[cfg(test)]
 mod phase3_include_map_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3666,7 +3727,7 @@ mod phase3_include_map_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full(),
+            PreprocessSettings::full(),
         )
         .unwrap();
         assert!(prepared.text().contains("foobar"), "{}", prepared.text());
@@ -3710,7 +3771,7 @@ mod phase3_include_map_tests {
 #[cfg(test)]
 mod phase3_include_policy_tests {
     use super::*;
-    use crate::preprocessor::config::PreprocessOptions;
+    use crate::preprocessor::config::PreprocessSettings;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3743,7 +3804,7 @@ mod phase3_include_policy_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full().with_include_dirs(vec![first, second]),
+            PreprocessSettings::full().with_include_dirs(vec![first, second]),
         )
         .unwrap();
         assert!(prepared.text().contains("FIRST"));
@@ -3768,7 +3829,7 @@ mod phase3_include_policy_tests {
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root,
-            PreprocessOptions::full(),
+            PreprocessSettings::full(),
         )
         .unwrap();
         let names: Vec<&str> = prepared
@@ -3798,7 +3859,8 @@ mod phase3_advanced_macro_extra_tests {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(943), 0);
         let mut manager = SourceManager::new(unit);
         let root = manager.load_root_text("root.lsl", text).unwrap();
-        crate::preprocessor::preprocess(&manager, root, PreprocessConfig::full()).unwrap()
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
     }
 
     #[test]
@@ -3820,5 +3882,354 @@ mod phase3_advanced_macro_extra_tests {
         let prepared = run("#define V(a, ...) a __VA_ARGS__\nV(1)\n");
         assert!(prepared.text().contains('1'));
         assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod phase3_conditional_include_isolation_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessSettings;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "neolint-phase3-cond-include-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn run(dir: &Path, root_text: &str) -> PreparedSource {
+        fs::write(dir.join("root.lsl"), root_text).unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(944), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessSettings::full(),
+        )
+        .unwrap()
+    }
+
+    fn codes(prepared: &PreparedSource) -> Vec<&'static str> {
+        prepared
+            .preprocess_diagnostics()
+            .iter()
+            .map(|item| item.code)
+            .collect()
+    }
+
+    #[test]
+    fn extra_else_elif_and_endif_in_include_do_not_touch_parent() {
+        for (directive, code) in [
+            ("#else", "PRE011"),
+            ("#elif 1", "PRE010"),
+            ("#endif", "PRE012"),
+        ] {
+            let dir = temp_dir();
+            fs::write(dir.join("header.lsl"), format!("{directive}\n")).unwrap();
+            let prepared = run(
+                &dir,
+                "#if 1\n#include \"header.lsl\"\nVISIBLE\n#endif\nAFTER\n",
+            );
+            assert_eq!(codes(&prepared), vec![code], "directive {directive}");
+            assert!(
+                prepared.text().contains("VISIBLE"),
+                "{directive}: {}",
+                prepared.text()
+            );
+            assert!(
+                prepared.text().contains("AFTER"),
+                "{directive}: {}",
+                prepared.text()
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn include_local_condition_and_unclosed_local_condition() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("header.lsl"),
+            "#if 0\nNO\n#else\nLOCAL\n#endif\n#if 1\nUNCLOSED\n",
+        )
+        .unwrap();
+        let prepared = run(&dir, "#if 1\n#include \"header.lsl\"\nPARENT\n#endif\n");
+        assert_eq!(codes(&prepared), vec!["PRE013"]);
+        assert!(prepared.text().contains("LOCAL"));
+        assert!(prepared.text().contains("PARENT"));
+        assert!(!prepared.text().contains("NO"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nested_include_cannot_close_or_else_parent_local_condition() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("outer.lsl"),
+            "#ifndef G\n#define G\n#include \"inner.lsl\"\nOUTER\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("inner.lsl"), "#else\n#endif\nINNER\n").unwrap();
+        let prepared = run(&dir, "#include \"outer.lsl\"\nROOT\n");
+        let codes = codes(&prepared);
+        assert!(codes.contains(&"PRE011"), "{codes:?}");
+        assert!(codes.contains(&"PRE012"), "{codes:?}");
+        assert!(prepared.text().contains("OUTER"));
+        assert!(prepared.text().contains("INNER"));
+        assert!(prepared.text().contains("ROOT"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sequential_includes_under_one_parent_condition_are_isolated() {
+        let dir = temp_dir();
+        fs::write(dir.join("a.lsl"), "#else\nA\n").unwrap();
+        fs::write(dir.join("b.lsl"), "#endif\nB\n").unwrap();
+        let prepared = run(
+            &dir,
+            "#if 1\n#include \"a.lsl\"\n#include \"b.lsl\"\nVISIBLE\n#endif\n",
+        );
+        assert_eq!(codes(&prepared), vec!["PRE011", "PRE012"]);
+        assert!(prepared.text().contains('A'));
+        assert!(prepared.text().contains('B'));
+        assert!(prepared.text().contains("VISIBLE"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn include_inside_inactive_branch_is_not_processed() {
+        let dir = temp_dir();
+        fs::write(dir.join("header.lsl"), "#else\nHIDDEN\n").unwrap();
+        let prepared = run(
+            &dir,
+            "#if 0\n#include \"header.lsl\"\nHIDDEN_ROOT\n#endif\nVISIBLE\n",
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert!(!prepared.text().contains("HIDDEN"));
+        assert!(prepared.text().contains("VISIBLE"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod phase3_builtin_line_context_tests {
+    use super::*;
+    use crate::preprocessor::config::{PreprocessConfig, PreprocessSettings};
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn run_text(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(945), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
+    }
+
+    fn run_file(name: &str, text: &str) -> PreparedSource {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neolint-phase3-line-context-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(946), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(&path).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_settings(
+            &manager,
+            root,
+            PreprocessSettings::full(),
+        )
+        .unwrap();
+        fs::remove_dir_all(dir).unwrap();
+        prepared
+    }
+
+    #[test]
+    fn multiline_argument_uses_the_argument_token_line() {
+        let prepared = run_text("#define ID(x) x\nID(\n__LINE__\n)\n");
+        assert!(prepared.text().contains('3'), "{}", prepared.text());
+        assert!(!prepared.text().contains('2'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn macro_body_uses_the_invocation_line() {
+        let prepared = run_text("#define HERE __LINE__\n\nHERE\n");
+        assert!(prepared.text().contains('3'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn nested_macro_in_argument_uses_its_actual_invocation_line() {
+        let prepared = run_text("#define HERE __LINE__\n#define PASS(x) x\nPASS(\nHERE\n)\n");
+        assert!(prepared.text().contains('4'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn included_file_lines_are_relative_to_the_included_file() {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neolint-phase3-line-include-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inc.lsl"), "ONE __LINE__\nTWO __LINE__\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"inc.lsl\"\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(947), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessSettings::full(),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("ONE 1"), "{}", prepared.text());
+        assert!(prepared.text().contains("TWO 2"), "{}", prepared.text());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn included_file_lines_are_relative_with_crlf() {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neolint-phase3-line-include-crlf-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inc.lsl"), "ONE __LINE__\r\nTWO __LINE__\r\n").unwrap();
+        fs::write(dir.join("root.lsl"), "#include \"inc.lsl\"\r\n").unwrap();
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(950), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_file(dir.join("root.lsl")).unwrap();
+        let prepared = crate::preprocessor::preprocess_with_includes(
+            &mut manager,
+            root,
+            PreprocessSettings::full(),
+        )
+        .unwrap();
+        assert!(prepared.text().contains("ONE 1"), "{}", prepared.text());
+        assert!(prepared.text().contains("TWO 2"), "{}", prepared.text());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_context_handles_lf_and_crlf() {
+        let lf = run_text("#define ID(x) x\nID(\n__LINE__\n)\n");
+        assert!(lf.text().contains('3'));
+        let crlf = run_file("root.lsl", "#define ID(x) x\r\nID(\r\n__LINE__\r\n)\r\n");
+        assert!(crlf.text().contains('3'), "{}", crlf.text());
+    }
+}
+
+#[cfg(test)]
+mod phase3_raw_macro_argument_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessConfig;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(948), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessConfig::full())
+            .unwrap()
+    }
+
+    #[test]
+    fn stringification_of_recursive_macro_uses_raw_text_without_recursion() {
+        let prepared = run("#define SELF SELF\n#define STR(x) #x\nSTR(SELF)\n");
+        assert!(prepared.text().contains("\"SELF\""), "{}", prepared.text());
+        assert!(
+            prepared.preprocess_diagnostics().is_empty(),
+            "{:?}",
+            prepared
+                .preprocess_diagnostics()
+                .iter()
+                .map(|item| item.code)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn token_pasting_uses_raw_arguments_without_expanding_them() {
+        let prepared = run("#define SELF SELF\n#define CAT(a,b) a ## b\nCAT(SELF, SUFFIX)\n");
+        assert!(
+            prepared.text().contains("SELFSUFFIX"),
+            "{}",
+            prepared.text()
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn ordinary_substitution_still_diagnoses_real_recursion() {
+        let prepared = run("#define SELF SELF\n#define ID(x) x\nID(SELF)\n");
+        assert_eq!(
+            prepared
+                .preprocess_diagnostics()
+                .iter()
+                .map(|item| item.code)
+                .collect::<Vec<_>>(),
+            vec!["PRE017"]
+        );
+    }
+
+    #[test]
+    fn one_argument_can_be_raw_and_expanded_in_the_same_macro() {
+        let prepared = run("#define VAL 7\n#define MIX(x) #x x\nMIX(VAL)\n");
+        assert!(prepared.text().contains("\"VAL\""), "{}", prepared.text());
+        assert!(prepared.text().contains('7'), "{}", prepared.text());
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn paste_chains_empty_arguments_and_rescan_results() {
+        let prepared =
+            run("#define FOO 9\n#define CAT3(a,b,c) a ## b ## c\nCAT3(,SUF,FIX)\nCAT3(F,OO,)\n");
+        assert!(prepared.text().contains("SUFFIX"), "{}", prepared.text());
+        assert!(prepared.text().contains('9'), "{}", prepared.text());
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod phase3_builtin_nested_body_tests {
+    use super::*;
+    use crate::preprocessor::config::PreprocessSettings;
+
+    fn run(text: &str) -> PreparedSource {
+        let unit = AnalysisUnitId::new(crate::source::RunId::new(951), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager.load_root_text("root.lsl", text).unwrap();
+        crate::preprocessor::preprocess_with_settings(&manager, root, PreprocessSettings::full())
+            .unwrap()
+    }
+
+    #[test]
+    fn builtin_in_nested_macro_body_uses_outer_invocation_line() {
+        let prepared = run("#define INNER __LINE__\n#define OUTER INNER\n\nOUTER\n");
+        assert!(prepared.text().contains('4'), "{}", prepared.text());
+    }
+
+    #[test]
+    fn builtin_in_argument_written_in_a_macro_body_uses_outer_invocation() {
+        let prepared = run("#define ID(x) x\n#define OUTER ID(__LINE__)\n\nOUTER\n");
+        assert!(prepared.text().contains('4'), "{}", prepared.text());
     }
 }
