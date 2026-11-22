@@ -798,7 +798,8 @@ same zero-length prepared span. Resolution rule:
    builder must prevent), return `eof_anchor` rather than panicking.
 
 For a zero-length `PreparedSpan(n, n)` with `n < prepared_len`, resolution uses
-`resolve_point(n)` and returns that single `SourceSpan`.
+`resolve_point(n)` and returns `primary = resolve_point(n)` with an empty
+`related` list.
 
 **Span crossing several segments.** A prepared span may cross any number of
 segment boundaries (a macro argument followed by macro body, then by direct
