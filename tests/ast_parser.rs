@@ -155,3 +155,30 @@ fn focused_malformed_examples_keep_parity() {
         );
     }
 }
+
+#[test]
+fn deterministic_generated_sources_keep_parity() {
+    const PIECES: &[&str] = &[
+        "default", "state", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", "@", "integer",
+        "float", "string", "key", "list", "vector", "rotation", "if", "else", "for", "while", "do",
+        "return", "jump", "x", "y", "z", "s", ".", "=", "+", "-", "*", "/", "%", "!", "~", "++",
+        "--", "==", "!=", "<=", ">=", "&&", "||", "1", "1.0", "\"text\"",
+    ];
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..300 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let count = (state as usize % 10) + 1;
+        let mut source = String::new();
+        for _ in 0..count {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            source.push_str(PIECES[state as usize % PIECES.len()]);
+            source.push(' ');
+        }
+        let differences = parity_differences(&source);
+        assert!(
+            differences.is_empty(),
+            "generated parity failure for {source:?}:\n{}",
+            differences.join("\n")
+        );
+    }
+}
