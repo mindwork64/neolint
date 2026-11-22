@@ -2957,7 +2957,7 @@ still counted; recovery stops at a top-level semicolon. `EventHandler` stores
 malformed/nameless parameter positions for SEM003. Malformed top-level function
 headers with `)` plus a body contribute a recoverable signature through
 `Ast::recovered_functions` without changing parser diagnostics, so user-call
-checks retain the Legacy first definition. Unknown extension events remain
+checks and SEM021 namespace precedence retain the Legacy first definition. Unknown extension events remain
 unchecked. Switch case expressions use the switch body scope, matching Legacy
 local visibility from earlier arms.
 SEM001 also mirrors Legacy's top-level-call-in-global-initializer quirk.
