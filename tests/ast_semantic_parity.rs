@@ -1423,7 +1423,6 @@ fn malformed_for_condition_is_unknown_not_missing() {
     assert!(for_statement.condition_malformed);
 }
 
-
 #[test]
 fn malformed_return_preserves_nested_recovered_label_scope() {
     let source = "do_work() { return { @done; }; jump done; } default { }";
