@@ -24,7 +24,7 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
     let scopes = scopes::ScopeTree::build(ast);
     let functions = types::collect_user_functions(ast);
     let expressions = expressions::collect_facts(ast, &scopes);
-    let calls = calls::collect_calls(&expressions);
+    let calls = calls::collect_calls(ast, &scopes);
     let mut diagnostics = Vec::new();
     diagnostics.extend(rules::duplicate_globals::check(ast));
     diagnostics.extend(rules::duplicate_locals::check(&scopes));
