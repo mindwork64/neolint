@@ -1423,6 +1423,58 @@ fn malformed_for_condition_is_unknown_not_missing() {
     assert!(for_statement.condition_malformed);
 }
 
+
+#[test]
+fn malformed_return_preserves_nested_recovered_label_scope() {
+    let source = "do_work() { return { @done; }; jump done; } default { }";
+    let diagnostics = semantic(source);
+    let migrated_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, "SEM008" | "SEM009" | "SEM010"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        migrated_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec!["SEM008", "SEM010"],
+        "{diagnostics:?}"
+    );
+
+    let jump_target = source.find("jump done").unwrap() + "jump ".len();
+    assert_eq!(
+        migrated_diagnostics[1].message,
+        "jump target 'done' is inside a nested block and is not accessible from this jump in do_work"
+    );
+    assert_eq!(
+        migrated_diagnostics[1].span,
+        span(source, jump_target, "done".len())
+    );
+    assert_parity(source);
+
+    let (tokens, _) = lex(source);
+    let (ast, _) = parse_ast(&tokens);
+    let function = ast
+        .items
+        .iter()
+        .find_map(|item| {
+            if let neolint::ast::TopLevel::Function(function) = item {
+                Some(function)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let neolint::ast::StatementKind::Return(return_statement) =
+        &function.body.as_ref().unwrap().statements[0].kind
+    else {
+        panic!("expected recovered return");
+    };
+    assert_eq!(return_statement.recovered_labels.len(), 1);
+    assert_eq!(return_statement.recovered_labels[0].scope_path.len(), 1);
+}
+
 #[test]
 fn malformed_return_preserves_recovered_label_visibility() {
     let source = "do_work() { return @done; jump done; } default { }";
