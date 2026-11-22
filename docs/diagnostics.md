@@ -45,6 +45,20 @@ All parser diagnostics have default severity **error** and kind **syntax**.
 | `PAR014` | Duplicate default state. | `default {} default {}` |
 
 For malformed input, neolint attempts to continue far enough to report additional independent problems. Recovery is best-effort: unbalanced outer braces can affect which surrounding construct receives a diagnostic.
+### AST parser diagnostics
+
+The independent `parse_ast` parser mirrors the `PARxxx` syntax contract on the
+same prepared token stream. Its only additional code is the explicit recursion
+guard:
+
+| Code | Meaning | Notes |
+| --- | --- | --- |
+| `AST001` | AST recursion depth exceeds 256 recursive constructs. | Error severity, syntax kind. Emitted once per parse invocation; the over-deep branch is skipped and later independent constructs are still parsed when delimiters permit. |
+| `AST002` | The bounded AST parser worker stack could not be created or terminated safely. | Error severity, syntax kind. The parser returns an empty AST and never retries the recursive parser on the caller's stack. |
+
+`AST001` is intentionally AST-only. The legacy parser has no equivalent guard;
+all ordinary syntax findings remain `PARxxx` and are compared by the differential
+harness.
 
 ## Preprocessor diagnostics
 

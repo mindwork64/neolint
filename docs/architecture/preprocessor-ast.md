@@ -1,12 +1,13 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–3 implemented on the experimental branch**; this document
-remains the normative contract for Phases 4–6.
+Status: **Phases 1–4 implemented on the experimental branch**; this document
+remains the normative contract for Phases 5–6.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
-the Firestorm preprocessing profile, unified diagnostics, and CLI integration are
-implemented; AST and switch/lazy-list syntax remain future work.
-Audience: maintainers and contributors working on Phases 4–6.
+the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
+independent typed AST parser are implemented; AST semantics and switch/lazy-list
+syntax remain future work.
+Audience: maintainers and contributors working on Phases 5–6.
 
 This document is the normative source of context for the preprocessor and AST
 work. It records the current pipeline, the target pipeline, the contracts between
@@ -2013,7 +2014,7 @@ are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 | Preprocessor diagnostics | 1,000 | Preprocessor diagnostic sink |
 | Total rendered diagnostics per unit | 10,000 | Unified analysis result |
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
-| AST recursion depth | 256 nodes (with explicit guard) | AST parser |
+| AST recursion depth | 256 recursive constructs (explicit AST001 guard) | AST parser |
 | Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
 
 Requirements:
@@ -2706,7 +2707,7 @@ and every-byte map coverage, stringification, token pasting, variadics,
 provenance, Firestorm kill-switch fixtures, built-ins, CLI/config flags and exit
 codes, and unchanged plain-LSL behavior.
 
-### Phase 4 — AST parser
+### Phase 4 — AST parser (implemented)
 
 - **Goal:** build a typed AST over the same prepared token stream without
   changing diagnostic behavior.
@@ -2733,6 +2734,55 @@ codes, and unchanged plain-LSL behavior.
 - **Done when:** the AST parser parses the whole corpus with parity, the
   differential harness reports only documented deltas, and both parsers are
   independently runnable.
+
+#### Phase 4 implementation record
+
+**Status:** implemented in `src/ast/{mod,node,types,parser}.rs`; exported through
+`neolint::ast` and `parse_ast`. The legacy parser is unchanged.
+
+**Public API.** `parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>)` is
+independently callable on the same prepared stream as `parse_legacy`; it never
+calls the legacy parser or semantic analyzer. `Ast` contains typed `TopLevel`
+declarations (`Global`, `Function`, `State`, explicit `Error`), typed statements
+(empty, block, local declaration, if/else, for, while, do/while, return, jump,
+state change, label, expression, error), and typed expressions (identifier,
+integer/float/string literals, parenthesized, list, vector, rotation, call,
+component access, unary, binary, assignment, cast, prefix/postfix increment,
+error). Every node carries a prepared `Span`; composite spans run from their
+first through their last token. Operator enums preserve LSL's non-C precedence
+table, including equal `&&`/`||` precedence and subtraction binding above
+addition.
+
+**Recovery.** The AST parser deliberately mirrors the legacy delimiter-aware
+synchronization at top level, state/event, parameters, statement, condition,
+`for` clause, and argument boundaries. Failed constructs become explicit
+`ErrorNode`s rather than fabricated valid nodes. Event/function recovery keeps
+later events, functions, and states; failed statements keep later independent
+statements. Every loop either consumes a token or exits its recovery branch.
+
+**Recursion guard.** `MAX_AST_RECURSION_DEPTH` is 256. Expression, prefix,
+statement, and block recursion is counted before entering the next recursive
+construct. Exceeding it emits exactly one `AST001` (error/syntax), skips the
+affected branch with a bounded balanced-delimiter skip, and continues with later
+input. Parsing runs on a scoped 16 MiB worker stack so the explicit guard is
+reached safely even in unoptimized builds; no state is shared between parses. If
+that worker cannot be created or terminates unexpectedly, `parse_ast` returns an
+empty AST plus exactly one `AST002` diagnostic and never retries the recursive
+parser on the caller's stack.
+
+**Known differences.** For ordinary grammar and malformed inputs, the AST parser
+reproduces legacy `PARxxx` code, severity, kind, message and span as a multiset
+on the grammar inventory and full `corpus/{small,medium,large,invalid}`. The only
+intentional syntax diagnostics are `AST001` for input nesting that legacy does
+not explicitly guard and `AST002` for the safe worker resource-failure path. AST recovery nodes are internal tree structure and are not
+user-visible diagnostics. No AST semantic analysis, SEM migration, switch/lazy
+syntax, pipeline selection, or CLI behavior is part of Phase 4.
+
+**Tests.** Dedicated suites cover AST shape for every declaration/statement/
+expression category, exact spans including UTF-8 and EOF, grammar-inventory and
+full-corpus differential parity, recovery after each malformed construct group,
+deterministic prefix/token-soup robustness, empty/non-Eof token streams, depth
+boundaries 255/256/257, extreme expression nesting, and deeply nested blocks.
 
 ### Phase 5 — Firestorm extensions
 
