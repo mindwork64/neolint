@@ -993,6 +993,12 @@ fn scan_line(text: &str, start: usize, in_block_comment: bool) -> (usize, bool) 
             while index < text.len() {
                 let ch = text[index..].chars().next().unwrap_or('\0');
                 if ch == '\n' || ch == '\r' {
+                    if is_spliced_newline(text, index) {
+                        // Phase 2 line splicing precedes comment recognition:
+                        // keep scanning this // comment across the physical line.
+                        index += newline_len(text, index);
+                        continue;
+                    }
                     break;
                 }
                 index += ch.len_utf8();
@@ -2464,6 +2470,69 @@ mod phase2_review_regression_tests {
         let prepared = run("#if 0\n#else /* c */\nyes\n#endif // c\n");
         assert!(prepared.preprocess_diagnostics().is_empty());
         assert!(prepared.text().contains("yes"));
+    }
+
+    #[test]
+    fn continued_line_comment_does_not_open_a_block_comment() {
+        let prepared = run("// comment \\
+/* fake opener\n#define X 7\nX\n");
+        assert!(prepared.text().contains("// comment /* fake opener\n"));
+        assert!(prepared.text().contains("7\n"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn continued_line_comment_splicing_supports_crlf_and_lone_cr() {
+        let slash = char::from(92);
+        let crlf: String = [char::from(13), char::from(10)].into_iter().collect();
+        let cr = char::from(13).to_string();
+        let cases = [
+            (
+                format!("// comment {slash}{crlf}/* fake opener{crlf}#define X 11{crlf}X{crlf}"),
+                format!("11{crlf}"),
+            ),
+            (
+                format!("// comment {slash}{cr}/* fake opener{cr}#define X 12{cr}X{cr}"),
+                format!("12{cr}"),
+            ),
+        ];
+        for (source, expected) in cases {
+            let prepared = run(&source);
+            assert!(prepared.text().contains(&expected), "{source:?}");
+            assert!(prepared.preprocess_diagnostics().is_empty(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn continued_line_comment_ignores_quotes_for_scanner_state() {
+        let prepared = run("// comment \\
+\" fake string opener\n#define X 8\nX\n");
+        assert!(prepared
+            .text()
+            .contains("// comment \" fake string opener\n"));
+        assert!(prepared.text().contains("8\n"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn continued_line_comment_handles_multiple_splices() {
+        let prepared = run("// comment \\
+/* still comment \\
+\" still comment \\
+end\n#define X 9\nX\n");
+        assert!(prepared
+            .text()
+            .contains("// comment /* still comment \" still comment end\n"));
+        assert!(prepared.text().contains("9\n"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn block_comment_state_still_survives_physical_lines() {
+        let prepared = run("/* real block\nstill block\n*/ #define X 10\nX\n");
+        assert!(prepared.text().contains("/* real block\nstill block\n*/"));
+        assert!(prepared.text().contains("10\n"));
+        assert!(prepared.preprocess_diagnostics().is_empty());
     }
 
     #[test]
