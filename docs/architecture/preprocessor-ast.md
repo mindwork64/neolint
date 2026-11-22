@@ -1,11 +1,12 @@
 # Preprocessor and AST Architecture
 
-Status: **Phase 1 implemented on the experimental branch**; this document
-remains the normative contract for Phases 2–6.
+Status: **Phases 1 and 2 implemented on the experimental branch**; this document
+remains the normative contract for Phases 3–6.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
-Scope: source ownership, identity preprocessing, and diagnostic resolution are
-implemented; directive/macro/include processing and the AST remain future work.
-Audience: maintainers and contributors working on Phases 2–6.
+Scope: source ownership, identity preprocessing, diagnostic resolution, and the
+Phase 2 directive/macro core are implemented; includes, advanced macros, the
+Firestorm extensions, CLI integration, and the AST remain future work.
+Audience: maintainers and contributors working on Phases 3–6.
 
 This document is the normative source of context for the preprocessor and AST
 work. It records the current pipeline, the target pipeline, the contracts between
@@ -569,7 +570,9 @@ Contract:
 New preprocessing, bridge, and diagnostic entry points are **additive**:
 
 ```rust
-// conceptual, finalized in Phase 1/3; one call per AnalysisUnit
+// conceptual, finalized in Phase 1/3; one call per AnalysisUnit.
+// Phase 2 implements the library-level form:
+//   preprocess(manager, root, config_or_options) -> Result<PreparedSource, SpanError>
 pub fn prepare(unit: &mut AnalysisUnit, config: &PreprocessConfig) -> PreparedSource;
 pub fn analyze_prepared(prepared: &PreparedSource, options: &EngineOptions) -> RunDiagnostics;
 
@@ -678,8 +681,9 @@ unit.
      create no `PreparedSource` and no `SourceMap`;
    - identity/prepared mode: copy the root text byte-for-byte into one
      `PreparedSource`, build the identity map and EOF anchor;
-   - later Firestorm mode: scan directives, expand macros, resolve includes in
-     textual order, and build the full map.
+   - full Phase 2 mode: scan directives, expand macros, and build the full map;
+   - later Firestorm mode: add include resolution and the remaining extensions
+     in textual order.
    Origin records are inserted only through the map builder, which validates
    `span`/`invocation`/`definition` against the unit and rejects foreign spans
    before they enter the arena (§7.5.1). Preprocessor problems become
@@ -1770,9 +1774,9 @@ Rules:
   - **user preprocessor errors** — `PreprocessDiagnostic` with a valid original
     `SourceSpan` of its own unit; they never take the `SpanError` path.
 - Every new diagnostic code must be added to `docs/diagnostics.md`. The
-  documentation test currently scans only `src/lexer.rs`, `src/parser.rs`, and
-  `src/semantic.rs`; Phase 2 must extend its source list to the preprocessor
-  module (and Phase 4 to the AST modules) so new codes cannot go undocumented.
+  documentation test scans `src/lexer.rs`, `src/parser.rs`, `src/semantic.rs`,
+  and every Rust file under `src/preprocessor/`; Phase 4 must extend it to the
+  AST modules so new codes cannot go undocumented.
 - Preprocessor diagnostics that prevent meaningful analysis (for example a
   missing include) do not abort the run: the rest of the file is still analyzed
   and independent findings are still reported.
@@ -1991,8 +1995,8 @@ classifications.
 
 ## 12. Resource limits (L)
 
-Limits are mandatory because preprocessor input is untrusted. Phase 1 values are
-implemented as public constants in `src/source/manager.rs`.
+Limits are mandatory because preprocessor input is untrusted. The values below
+are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 
 | Limit | Implemented value | Enforcement point |
 | --- | --- | --- |
@@ -2002,9 +2006,11 @@ implemented as public constants in `src/source/manager.rs`.
 | Source files per AnalysisUnit | 256 (`MAX_SOURCE_FILES_PER_UNIT`) | Source Manager |
 | Include depth | 64 | Preprocessor include stack |
 | Macro expansion depth | 64 | Preprocessor expander |
-| Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor |
+| Conditional nesting depth | 64 | Preprocessor conditional stack |
+| Expression nesting depth | 128 | Preprocessor expression parser |
+| Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor output budget |
 | Origin chain depth | 64 | Source Map |
-| Preprocessor diagnostics | 1,000 | Preprocessor |
+| Preprocessor diagnostics | 1,000 | Preprocessor diagnostic sink |
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
 | AST recursion depth | 256 nodes (with explicit guard) | AST parser |
 | Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
@@ -2018,7 +2024,8 @@ Requirements:
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
   re-use, or `panic`. `RunId` is process-local and never emitted.
 - Phase 1 tests cover root size boundary/+1, source count capacity, and unit
-  count arithmetic. Expansion and include limits are enforced in Phases 2/3.
+  count arithmetic. Phase 2 tests cover conditional depth 64/65, macro depth
+  64/65, expansion growth, and the diagnostic cap; include limits remain Phase 3.
 - No limit may depend on machine memory size.
 
 ---
@@ -2471,7 +2478,7 @@ implementations, not stages of the same code.
   crate-internal; the unused empty `AnalysisUnit::diagnostics()` accessor was
   removed.
 
-### Phase 2 — Preprocessor core
+### Phase 2 — Preprocessor core (implemented)
 
 - **Goal:** C-like conditional compilation and object/function macros producing
   mapped prepared text.
@@ -2500,6 +2507,88 @@ implementations, not stages of the same code.
   and exact `PreprocessDiagnostic` primary/related assertions.
 - **Done when:** directive and macro suites pass, map invariants hold, and the
   legacy suite is unchanged.
+
+#### Phase 2 implementation record
+
+**Status:** implemented in `src/preprocessor/{config,directive,macros,expand,
+expr,token,diagnostics}.rs`. Phase 1 types and the identity pass-through are
+unchanged.
+
+**Entry point.** `preprocess(manager, root, options)` dispatches on
+`PreprocessOptions::mode()`. `PreprocessConfig` remains a unit value and
+converts to identity options, so existing callers compile unchanged;
+`PreprocessConfig::full()` and `PreprocessOptions::full()` opt into Phase 2.
+`Identity` calls `preprocess_identity` unchanged and `Default` remains identity,
+so plain-LSL callers do not opt in accidentally. `AnalysisRun::add_prepared_*`
+still creates identity units; CLI integration is Phase 3.
+
+**Scanner and directives.** The scanner works on original bytes, not regular
+expressions or the LSL lexer. It tracks strings, `//` comments, `/* ... */`
+comments, physical line starts, whitespace, and backslash-newline splicing.
+Directives are recognized only when `#` is the first token of a logical line
+after whitespace/comments; a `#` inside a string, comment, or ordinary code is
+not a directive. LF, CRLF, and lone CR are preserved. A directive consumes its
+logical line; one original line terminator is retained as direct output so
+neighbouring tokens are not glued together. The conditional stack stores
+parent-active, current-active, branch-taken, `#else`-seen, and opening span, and
+handles nested inactive blocks structurally. `#define`/`#undef` in inactive
+blocks do not change the table. `#elif` after a taken branch or after `#else`
+is not evaluated. Unknown directives and Phase 3 directives (`#include`,
+`#pragma`) are diagnosed rather than silently accepted.
+
+**Macros.** Object-like and function-like macros are supported. A function-like
+definition requires `(` immediately after the name; `#define F (x)` is
+object-like. Calls allow whitespace/comments between the name and `(`. Argument
+parsing is parenthesis-depth aware, preserves nested commas, trims argument-edge
+whitespace/comments, pre-expands arguments, substitutes parameters, and rescans
+the replacement. Identical redefinitions are accepted; conflicting ones keep the
+old definition and emit `PRE005`. `#undef` of an absent name is a no-op.
+Recursive expansions stop at the offending invocation, emit one diagnostic per
+invocation site, and leave the invocation text in place while scanning continues.
+
+**Expression grammar.** `defined IDENT` and `defined(IDENT)` are resolved before
+macro expansion; the operand is not macro-expanded. Integers are decimal,
+leading-zero octal, or `0x` hexadecimal. The fixed model is signed 64-bit.
+Undefined identifiers evaluate to zero. Precedence, from lowest to highest:
+
+```text
+?:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %  unary + - ! ~  ()
+```
+
+Binary operators are left-associative; `?:` is right-associative. `&&`, `||`,
+and `?:` short-circuit and do not evaluate unselected operands. Arithmetic,
+unary negation, shifts, and integer literals use checked `i64` operations;
+division/remainder by zero, `INT64_MIN / -1`, out-of-range shifts, and overflow
+are diagnostics. No wrapping arithmetic or profile-dependent behavior is used.
+
+**Source map provenance.** Every prepared byte belongs to a segment. Unchanged
+active text is `Direct`. Replacement tokens are `MacroDefinition` origins whose
+span is the definition fragment and whose invocation/definition fields point to
+the call and `#define`. Argument text is `MacroArgument` with the exact argument
+span, call, and definition. Nested calls link through the parent chain rather
+than replacing it with one final span. Inserted separators are `Generated`
+origins anchored at a real source point. The driver emits output and provisional
+provenance first, then materializes origins parent-first and appends segments in
+prepared order. Empty output has no segments and an EOF anchor at the end of the
+last consumed directive, or at offset zero when there is none; non-empty output
+anchors at the root end.
+
+**Recovery and limits.** Malformed directives recover at the next logical line;
+malformed/unselected conditional expressions evaluate to false without
+suppressing structural errors. The engine enforces macro depth 64, conditional
+depth 64, 8 MiB/1,000,000 expanded bytes/tokens, expression depth 128, and
+1,000 PRE diagnostics. Exceeding a limit stops the affected expansion, emits one
+specific diagnostic, and continues safely. Macro table and conditional stack are
+per-run, iteration uses deterministic containers, and no network/clock/random
+state is consulted.
+
+**Tests.** Unit modules cover tokenization/continuations, every directive,
+conditional errors and inactive blocks, object/function macros, zero/multiple
+arguments, nested parentheses and calls, pre-expansion, recursion, redefinition,
+`#undef`, expression precedence/associativity/short-circuit/overflow/shifts/
+malformed input, provenance and every-byte map coverage, UTF-8/CRLF, depth and
+diagnostic limits, and exact diagnostic primary/related locations. The full
+Phase 1 suite remains unchanged.
 
 ### Phase 3 — Includes, advanced macros, Firestorm built-ins, CLI integration
 
@@ -2650,7 +2739,7 @@ src/
                           PreparedSource/SourceMap pair, diagnostics
 
   preprocessor/
-    mod.rs                prepare(), PreprocessConfig, PreparedSource with
+    mod.rs                preprocess(), PreprocessConfig/Options, PreparedSource with
                           unit id, prepared_span (only bridge), eof_span
     identity.rs           Phase 1 identity pass-through
     directive.rs          Phase 2 raw-text directive scanner

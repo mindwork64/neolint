@@ -46,6 +46,49 @@ All parser diagnostics have default severity **error** and kind **syntax**.
 
 For malformed input, neolint attempts to continue far enough to report additional independent problems. Recovery is best-effort: unbalanced outer braces can affect which surrounding construct receives a diagnostic.
 
+## Preprocessor diagnostics
+
+All preprocessor diagnostics have default severity **error** and kind
+**syntax**. Their `primary` and `related` locations are original-file
+`SourceSpan`s in the diagnostic's own `AnalysisUnit`; they never pass through
+the prepared-span map. Related locations identify the relevant macro
+definition, previous definition, outer invocation, conditional opening, or EOF.
+
+| Code | Meaning | Related/notes |
+| --- | --- | --- |
+| `PRE001` | Unknown preprocessor directive. | Primary is the directive line. |
+| `PRE002` | Malformed or empty directive. | Primary is the directive line. |
+| `PRE003` | Invalid `#define` (missing name, bad parameter list, variadic/duplicate parameter). | Primary is the definition name/line. |
+| `PRE004` | Invalid `#undef` (missing, extra, or non-identifier operand). | Primary is the directive/operand. |
+| `PRE005` | Conflicting macro redefinition. | Related points at the previous definition; the old definition remains active. |
+| `PRE006` | Invalid `#if`/`#elif` expression syntax. | Primary is the expression/token; related is the conditional opening. |
+| `PRE007` | Missing or invalid `#ifdef`/`#ifndef` identifier. | Related is the conditional opening. |
+| `PRE008` | Duplicate `#else`. | Primary is the second `#else`. |
+| `PRE009` | `#elif` after `#else`. | Primary is the misplaced `#elif`. |
+| `PRE010` | `#elif` without a matching `#if`. | Primary is the `#elif`. |
+| `PRE011` | `#else` without a matching `#if`. | Primary is the `#else`. |
+| `PRE012` | `#endif` without a matching `#if`. | Primary is the `#endif`. |
+| `PRE013` | Unterminated conditional block at EOF. | Primary is the opening directive; related is the EOF point. |
+| `PRE014` | Wrong number of arguments for a function-like macro. | Related is the macro definition; the invocation is left unexpanded. |
+| `PRE015` | Unterminated function-like macro invocation. | Related is the macro definition; the invocation is left unexpanded. |
+| `PRE017` | Direct macro recursion. | Primary is the recursive invocation; related includes the definition and outer invocations. |
+| `PRE018` | Indirect macro recursion. | Primary is the recursive invocation; related includes the definition and outer invocations. |
+| `PRE019` | Macro expansion depth exceeds 64. | Primary is the invocation that would exceed the limit. |
+| `PRE020` | Expanded-output byte budget (8 MiB) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
+| `PRE021` | Expanded-output token budget (1,000,000) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
+| `PRE022` | Preprocessor diagnostic limit (1,000) reached. | This is the final PRE diagnostic; later findings are suppressed. |
+| `PRE023` | `#` or `##` used in a macro replacement list. | Phase 2 does not implement stringification or token pasting; the macro is not defined. |
+| `PRE024` | Unsupported Phase 2 directive, for example `#include` or `#pragma`. | Phase 3 features are diagnosed, never silently treated as implemented. |
+| `PRE025` | Conditional nesting depth exceeds 64. | The over-deep frame is treated as inactive and still matched by `#endif`. |
+| `PRE026` | Division or remainder by zero in an evaluated expression. | The expression evaluates as false; unselected short-circuit branches are not diagnosed. |
+| `PRE027` | Checked `i64` arithmetic, literal, negation, division, or shift overflow. | The expression evaluates as false. |
+| `PRE028` | Invalid shift count (negative or at least 64) in an evaluated expression. | The expression evaluates as false. |
+| `PRE029` | Malformed decimal/octal/hexadecimal integer literal. | The literal is treated as zero so parsing can continue. |
+| `PRE030` | Missing `#if`/`#elif` expression or `defined` operand. | Related is the conditional opening where applicable. |
+
+`PRE016` is intentionally unused; Phase 2 has no separate malformed-invocation
+class beyond `PRE015` and `PRE014`.
+
 ## Semantic and lint diagnostics
 
 All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which are **lint**. `SEM012`, `SEM013` and `SEM023` default to **warning**; the rest default to **error**.

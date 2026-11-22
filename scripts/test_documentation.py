@@ -4,7 +4,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DIAGNOSTIC_SOURCES = ("src/lexer.rs", "src/parser.rs", "src/semantic.rs")
+DIAGNOSTIC_SOURCES = (
+    "src/lexer.rs",
+    "src/parser.rs",
+    "src/semantic.rs",
+) + tuple(
+    str(path.relative_to(ROOT))
+    for path in sorted((ROOT / "src/preprocessor").rglob("*.rs"))
+)
 
 
 class DocumentationTests(unittest.TestCase):
@@ -13,7 +20,7 @@ class DocumentationTests(unittest.TestCase):
         for relative in DIAGNOSTIC_SOURCES:
             source_codes.update(
                 re.findall(
-                    r'"(?:LEX|PAR|SEM)\d{3}"',
+                    r'"(?:LEX|PAR|SEM|PRE)\d{3}"',
                     (ROOT / relative).read_text(),
                 )
             )
