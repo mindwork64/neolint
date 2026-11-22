@@ -1,4 +1,4 @@
-//! Prepared source and identity-preprocessor entry points.
+//! Preprocessor configuration, entry points, and prepared source.
 //!
 //! A prepared unit owns exactly one [`PreparedSource`] and one matching
 //! [`SourceMap`]. The prepared buffer is not a
@@ -9,15 +9,38 @@ pub mod config;
 pub mod diagnostics;
 pub mod identity;
 
+pub(crate) mod directive;
+pub(crate) mod expand;
+pub(crate) mod expr;
+pub(crate) mod macros;
+pub(crate) mod token;
+
 use std::sync::Arc;
 
 use crate::diagnostic::Span;
 use crate::source::file::AnalysisUnitId;
 use crate::source::map::{PreparedSpan, SourceMap, SpanError};
 
-pub use config::PreprocessConfig;
+pub use config::{PreprocessConfig, PreprocessMode, PreprocessOptions};
 pub use diagnostics::{PreprocessDiagnostic, RelatedLocation};
 pub use identity::preprocess_identity;
+
+/// Preprocess a loaded root into a prepared source.
+///
+/// Identity mode delegates to [`identity::preprocess_identity`]. Full mode runs
+/// the Phase 2 directive and macro engine. User-code findings are returned as
+/// `PreprocessDiagnostic`s on the prepared source; malformed internal
+/// coordinates or map construction fail with a Phase 1 [`SpanError`].
+pub fn preprocess(
+    manager: &crate::source::manager::SourceManager,
+    root: crate::source::SourceId,
+    config: impl Into<PreprocessOptions>,
+) -> Result<PreparedSource, SpanError> {
+    match config.into().mode() {
+        PreprocessMode::Identity => identity::preprocess_identity(manager, root),
+        PreprocessMode::Full => directive::preprocess_full(manager, root),
+    }
+}
 
 /// Immutable prepared buffer plus its mapping and preprocessor findings.
 #[derive(Debug)]
@@ -73,7 +96,7 @@ impl PreparedSource {
         &self.map
     }
 
-    /// Preprocessor findings (empty in Phase 1 identity mode).
+    /// Preprocessor findings (empty in identity mode).
     pub fn preprocess_diagnostics(&self) -> &[PreprocessDiagnostic] {
         &self.preprocess_diagnostics
     }

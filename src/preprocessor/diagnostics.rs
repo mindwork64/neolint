@@ -4,6 +4,7 @@
 //! pass through prepared-span resolution.
 
 use crate::diagnostic::{DiagnosticKind, Severity};
+use crate::preprocessor::token::RawSpan;
 use crate::source::map::SourceSpan;
 
 /// One secondary location attached to a diagnostic.
@@ -58,5 +59,121 @@ impl PreprocessDiagnostic {
             primary,
             related: Vec::new(),
         }
+    }
+}
+
+/// Maximum number of PRE diagnostics per preprocessing run.
+pub(crate) const MAX_PREPROCESS_DIAGNOSTICS: usize = 1_000;
+
+pub(crate) const PRE_UNKNOWN_DIRECTIVE: &str = "PRE001";
+pub(crate) const PRE_MALFORMED_DIRECTIVE: &str = "PRE002";
+pub(crate) const PRE_INVALID_DEFINE: &str = "PRE003";
+pub(crate) const PRE_INVALID_UNDEF: &str = "PRE004";
+pub(crate) const PRE_CONFLICTING_REDEFINITION: &str = "PRE005";
+pub(crate) const PRE_INVALID_IF_EXPRESSION: &str = "PRE006";
+pub(crate) const PRE_INVALID_IFDEF: &str = "PRE007";
+pub(crate) const PRE_DUPLICATE_ELSE: &str = "PRE008";
+pub(crate) const PRE_ELIF_AFTER_ELSE: &str = "PRE009";
+pub(crate) const PRE_ELIF_WITHOUT_IF: &str = "PRE010";
+pub(crate) const PRE_ELSE_WITHOUT_IF: &str = "PRE011";
+pub(crate) const PRE_ENDIF_WITHOUT_IF: &str = "PRE012";
+pub(crate) const PRE_UNTERMINATED_CONDITIONAL: &str = "PRE013";
+pub(crate) const PRE_MACRO_ARGUMENT_COUNT: &str = "PRE014";
+pub(crate) const PRE_UNTERMINATED_MACRO_CALL: &str = "PRE015";
+pub(crate) const PRE_DIRECT_RECURSION: &str = "PRE017";
+pub(crate) const PRE_INDIRECT_RECURSION: &str = "PRE018";
+pub(crate) const PRE_EXPANSION_DEPTH: &str = "PRE019";
+pub(crate) const PRE_EXPANDED_BYTES_LIMIT: &str = "PRE020";
+pub(crate) const PRE_EXPANDED_TOKENS_LIMIT: &str = "PRE021";
+pub(crate) const PRE_DIAGNOSTIC_LIMIT: &str = "PRE022";
+pub(crate) const PRE_UNSUPPORTED_MACRO_OPERATOR: &str = "PRE023";
+pub(crate) const PRE_UNSUPPORTED_DIRECTIVE: &str = "PRE024";
+pub(crate) const PRE_CONDITIONAL_DEPTH: &str = "PRE025";
+pub(crate) const PRE_DIVISION_BY_ZERO: &str = "PRE026";
+pub(crate) const PRE_EXPRESSION_OVERFLOW: &str = "PRE027";
+pub(crate) const PRE_INVALID_SHIFT: &str = "PRE028";
+pub(crate) const PRE_MALFORMED_LITERAL: &str = "PRE029";
+pub(crate) const PRE_MISSING_OPERAND: &str = "PRE030";
+
+#[derive(Debug, Clone)]
+pub(crate) struct RawRelated {
+    pub(crate) span: RawSpan,
+    pub(crate) label: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RawDiagnostic {
+    pub(crate) code: &'static str,
+    pub(crate) severity: Severity,
+    pub(crate) message: String,
+    pub(crate) primary: RawSpan,
+    pub(crate) related: Vec<RawRelated>,
+}
+
+/// Deterministic, capped diagnostic collector.
+#[derive(Debug, Default)]
+pub(crate) struct DiagSink {
+    items: Vec<RawDiagnostic>,
+    capped: bool,
+}
+
+impl DiagSink {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn items(&self) -> &[RawDiagnostic] {
+        &self.items
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        code: &'static str,
+        message: impl Into<String>,
+        primary: RawSpan,
+    ) {
+        self.push_with_related(code, message, primary, Vec::new());
+    }
+
+    pub(crate) fn push_with_related(
+        &mut self,
+        code: &'static str,
+        message: impl Into<String>,
+        primary: RawSpan,
+        related: Vec<RawRelated>,
+    ) {
+        if self.capped {
+            return;
+        }
+        if self.items.len() >= MAX_PREPROCESS_DIAGNOSTICS - 1 {
+            self.items.push(RawDiagnostic {
+                code: PRE_DIAGNOSTIC_LIMIT,
+                severity: Severity::Error,
+                message: format!(
+                    "preprocessor diagnostic limit ({MAX_PREPROCESS_DIAGNOSTICS}) reached"
+                ),
+                primary,
+                related,
+            });
+            self.capped = true;
+            return;
+        }
+        self.items.push(RawDiagnostic {
+            code,
+            severity: Severity::Error,
+            message: message.into(),
+            primary,
+            related,
+        });
+    }
+
+    pub(crate) fn extend_related(&mut self, index: usize, span: RawSpan, label: &'static str) {
+        if let Some(item) = self.items.get_mut(index) {
+            item.related.push(RawRelated { span, label });
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
     }
 }
