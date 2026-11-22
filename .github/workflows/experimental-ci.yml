@@ -4,11 +4,10 @@ on:
   push:
     branches:
       - exp/preprocessor-ast
-      - exp/preprocessor-ast/**
+      - exp-preprocessor-ast-phase-*
   pull_request:
     branches:
       - exp/preprocessor-ast
-  workflow_dispatch:
 
 permissions:
   contents: read

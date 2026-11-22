@@ -78,15 +78,21 @@ revision of this document.
 CLI arguments
   → LintConfig (config file, --disable, --severity)
   → input collection (files, directories, stdin)
-  → read whole file as UTF-8 String
-  → lex(&source)            -> Vec<Token>, Vec<Diagnostic> (LEX)
-  → parse(&tokens)          -> Vec<Diagnostic> (PAR)
-  → analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics)
-                            -> Vec<Diagnostic> (SEM)
-  → config.apply(&mut diagnostics)
-  → human / JSON rendering
+  → for each collected input (each input is an independent analysis unit):
+      read whole file as UTF-8 String
+      → lex(&source)            -> Vec<Token>, Vec<Diagnostic> (LEX)
+      → parse(&tokens)          -> Vec<Diagnostic> (PAR)
+      → analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics)
+                                -> Vec<Diagnostic> (SEM)
+      → config.apply(&mut diagnostics)
+  → human / JSON rendering (results from all inputs)
   → exit code 0 | 1 | 2
 ```
+
+The current CLI already analyzes every collected input independently: one file
+read, one token stream, one diagnostic set per input. The new architecture names
+that unit of work **AnalysisUnit** (§6) and keeps it independent, even though
+one CLI invocation may contain many such units.
 
 Current stage contracts, as implemented at the baseline:
 
@@ -140,69 +146,96 @@ Consequences that shape the new architecture:
 
 ```
               +-------------------+
-  CLI/config  |   Source Manager  |
+  CLI/config  |   Source Manager  |   one AnalysisUnit per root input
               +---------+---------+
-                        | LoadedSource: SourceId + text + kind
+                        | LoadedSource: SourceId + text + kind (per unit)
                         v
               +-------------------+
               |   Preprocessor    |  (identity in Phase 1; core in Phases 2–3)
               +---------+---------+
-                        | PreparedSource { text, SourceMap, preprocessor diagnostics }
+                        | PreparedSource { text, SourceMap, PRE diagnostics }
                         v
               +-------------------+
               |      Lexer        |  (unchanged tokenization rules)
               +---------+---------+
-                        | Token stream (prepared-buffer Spans + Eof)
+                        | Token stream (PreparedSpan + Eof)
            +------------+-------------+
            v                          v
   +------------------+       +------------------+
   |  Legacy Engine   |       |    AST Engine    |
-  | parser+semantic  |       | AST parser+SEM   |
+  | parse_legacy     |       | parse_ast        |
+  | + legacy SEM     |       | + AST SEM        |
   +--------+---------+       +--------+---------+
            |                          |
            +-------------+------------+
                          v
               +-------------------+
-              | Unified Diagnostics|  resolve spans through SourceMap,
+              | Unified Diagnostics|  resolve PreparedSpans through SourceMap,
               | + config filtering |  merge, deduplicate policy, render
               +---------+---------+
-                        v
-                 human / JSON / exit code
+                         v
+                 per-unit rendered results, then CLI-wide
+                 human / JSON output and exit code
 ```
 
-The AST engine and the legacy engine are alternatives at the top of the funnel
-but share everything before the funnel. No engine may preprocess on its own.
+The loop is: **prepare → lex → parse (legacy or AST) → resolve → merge → render**
+inside each AnalysisUnit. The AST engine and the legacy engine are alternatives
+at the top of the funnel but share everything before the funnel. No engine may
+preprocess on its own. Units never share mutable preprocessor state or
+diagnostic IDs; they may share immutable file contents (§6.3).
 
 ---
 
 ## 3. Component responsibilities (C)
 
+### AnalysisUnit (`src/source/`, orchestrated by `src/pipeline.rs`)
+
+- One AnalysisUnit is the complete independent analysis of **one root source**:
+  one root file or one stdin stream.
+- It owns:
+  - its own `SourceId` namespace (root gets the first ID);
+  - its own macro table;
+  - its own conditional stack;
+  - its own `SourceMap`;
+  - its own include graph and include stack;
+  - its own diagnostics and its own prepared buffer.
+- It is created by the CLI/pipeline for each collected input, lives until its
+  rendered results are produced, and is then dropped. No state survives.
+- It never reads mutable state from another unit. Only immutable file
+  contents may be shared through the optional cache (§6.3).
+- One CLI invocation may create many units; unit results are concatenated in
+  input order for output (§6.5).
+
 ### Source Manager (`src/source/`)
 
-- Assigns stable `SourceId` values for one analysis run.
+- Assigns stable `SourceId` values inside one AnalysisUnit.
 - Loads the root source (file or stdin) and include files on request.
 - Owns file text, display names, and line indices.
 - Enforces path policy (local files only, no network, no directory includes).
-- Detects include cycles through the active include stack.
-- Enforces file-size and file-count limits.
+- Detects include cycles through the unit's active include stack.
+- Enforces file-size and file-count limits per unit.
 - Never tokenizes and never interprets LSL or preprocessor syntax.
 
 ### Preprocessor (`src/preprocessor/`)
 
 - Scans raw text for directives, comments, and string/character boundaries.
-- Maintains the macro table, conditional stack, and include expansion.
-- Produces exactly one prepared text buffer per root analysis.
-- Produces the `SourceMap` that maps prepared ranges to original code.
+- Maintains the macro table, conditional stack, and include expansion **for one
+  AnalysisUnit**.
+- Produces exactly one prepared text buffer per unit.
+- Produces the unit's `SourceMap`, mapping `PreparedSpan` ranges to original
+  code.
 - Emits `PRE` diagnostics for directive and include problems.
 - Does not know about tokens, AST nodes, parser recovery, or semantic rules.
 - Does not perform semantic type checking or built-in argument checks.
 
 ### PreparedSource (`src/preprocessor/`)
 
-- The single text buffer handed to the lexer.
+- The single text buffer handed to the lexer for one unit.
 - Carries `Arc<SourceMap>` and preprocessor diagnostics.
 - Is immutable after construction.
 - In identity mode, `text` is byte-identical to the input file.
+- Is **not** a `SourceFile` and has no `SourceId`. Its bytes are addressed only
+  by `PreparedSpan` (§7.1).
 
 ### Lexer (`src/lexer.rs`)
 
@@ -215,31 +248,43 @@ but share everything before the funnel. No engine may preprocess on its own.
 
 ### Legacy Engine (`src/parser.rs`, `src/semantic.rs`)
 
+- Exposes the independently callable `parse_legacy(tokens)` and keeps the legacy
+  semantic analyzer.
 - Consumes the same `Vec<Token>` as the AST engine.
 - Keeps its current diagnostic codes, severities, spans, and pass order in
   legacy mode.
 - Is not modified to understand macros or includes. It sees only the prepared,
   expanded token stream.
+- **Does not evolve into the AST parser.** It stays compiled and runnable
+  through the end of the migration (§14).
 
 ### AST Engine (`src/ast/`, `src/ast_semantic/`)
 
-- Builds typed nodes with `Span` (and later origin identifiers) preserved.
+- Exposes the independently callable `parse_ast(tokens)` returning an AST plus
+  diagnostics.
+- Builds typed nodes with `Span`/`PreparedSpan` provenance preserved.
 - Parses the same prepared token stream with equivalent recovery behavior.
 - Performs semantic analysis on the AST, gradually taking over SEM rules.
 - Never runs include resolution or macro expansion itself.
+- May reuse grammar helper functions with the legacy parser only when both
+  engines remain independently runnable and their results remain comparable
+  (§4.8).
 
 ### Unified Diagnostics (new layer, introduced with CLI integration)
 
-- Resolves prepared-buffer spans through `SourceMap` to file/line/column.
-- Merges diagnostics from both engines in a deterministic order.
-- Applies `LintConfig` exactly once.
+- Resolves `PreparedSpan` values through the unit's `SourceMap` to
+  `SourceSpan`/`SourceLocation` in real files.
+- Merges diagnostics from both engines and from all units in a deterministic
+  order.
+- Applies `LintConfig` exactly once after merging.
 - Renders human and JSON output; owns the exit-code decision.
 - Keeps the primary rendered location in the existing `Diagnostic` shape and
   carries secondary locations separately (see §7).
 
 ### CLI / configuration (`src/main.rs`, `src/config.rs`)
 
-- Chooses the dialect profile and the engine.
+- Creates one AnalysisUnit per collected input.
+- Chooses the dialect profile and the engine per unit.
 - Keeps plain LSL as the default with preprocessing disabled.
 - Maps CLI/config failures to exit code 2 and lint findings to 0/1.
 - Validates all new options without panicking.
@@ -251,24 +296,51 @@ but share everything before the funnel. No engine may preprocess on its own.
 All contracts below are normative. Exact Rust signatures are finalized in
 Phase 1, but the semantics must not drift.
 
-### 4.1 CLI → Source Manager
+### 4.1 CLI → AnalysisUnit
 
-Input: root path, stdin marker, or nothing. Output: `SourceId` for a loaded root
-plus its text, or an `InputError` that maps to exit code 2.
+Input: one collected root path, a stdin marker, or nothing for that unit.
+Output: an AnalysisUnit or an `InputError` that maps to exit code 2.
 
 Invariants:
 
-- The root is read as UTF-8; invalid UTF-8 is an input error (exit 2).
+- The CLI creates one AnalysisUnit per collected input, in the deterministic
+  input order produced by directory collection.
+- Units are constructed and completed one at a time or in parallel, but their
+  results are always merged in input order.
+- A unit's root is read as UTF-8; invalid UTF-8 is an input error (exit 2).
 - A UTF-8 BOM is **not** silently stripped (today it is a lexical error; this
   behavior is preserved unless a later phase changes it explicitly).
-- stdin is read at most once per run.
-- `SourceId` values are dense and assigned in load order.
+- stdin (`-`) may appear at most once per CLI invocation. It is one unit, and
+  the stream is read once for that unit.
+- A failure in one unit does not corrupt or mutate another unit.
 
-### 4.2 Source Manager → Preprocessor
+### 4.2 AnalysisUnit → Source Manager
 
-Input: a `LoadedSource` (a `SourceId`, the file text, and its display name);
-include requests carry the requesting `SourceId` and a path/spelling. Output: a
-resolved include or a `PRE` diagnostic.
+Input: the unit's root. Output: the unit's `SourceId` namespace and loaded file
+contents.
+
+Invariants:
+
+- `SourceId` is local to the AnalysisUnit. IDs from different units must never be
+  compared, mixed, or persisted.
+- The root receives the first ID in the unit (conventionally `0`).
+- The macro table, conditional stack, include graph, `SourceMap`, and
+  diagnostics are single-unit state. They are never shared between units.
+- Rationale for strict isolation: independent root files are independent LSL
+  programs. A `#define`, an `#undef`, a conditional-stack entry, or an include
+  guard from one root must not change the analysis of another root. Leaking
+  macro state would make results depend on input order and would break the
+  existing contract that every collected file is analyzed on its own.
+- Immutable file contents (and optionally their line indices) **may** be cached
+  across units by canonical path to avoid repeated disk reads. Such a cache is
+  content-only: it never carries `SourceId`, macro tables, conditional stacks, or
+  diagnostics. Cache hits and misses must not affect output.
+
+### 4.3 Source Manager → Preprocessor
+
+Input: a `LoadedSource` (a unit-local `SourceId`, the file text, and its display
+name); include requests carry the requesting `SourceId` and a path/spelling.
+Output: a resolved include or a `PRE` diagnostic.
 
 Invariants:
 
@@ -278,9 +350,9 @@ Invariants:
 - Network paths and URLs are rejected as source-level diagnostics.
 - Canonical paths are used for cycle detection and de-duplication, but the
   user-facing spelling is preserved for messages.
-- Include depth and total file count are bounded (§12).
+- Include depth and total file count are bounded per unit (§12).
 
-### 4.3 Preprocessor → Lexer
+### 4.4 Preprocessor → Lexer
 
 Input: exactly one `PreparedSource`. Output: one token stream.
 
@@ -290,20 +362,31 @@ Invariants:
 - The prepared text is produced deterministically from the same inputs.
 - Removing directives must not merge adjacent tokens in a way that changes
   their meaning; the implementation inserts safe separation where needed.
-- The lexer's `Eof` position equals the prepared text length.
+- The prepared buffer may be empty. The lexer then emits only `Eof` at
+  `PreparedSpan(0, 0)`.
+- For non-empty buffers, the lexer's `Eof` position equals the prepared text
+  length and is addressed as the zero-length `PreparedSpan(len, len)`.
 
-### 4.4 Preprocessor → Source Map
+### 4.5 Preprocessor → Source Map
 
-Every generated byte range in the prepared buffer has an origin segment:
+Every prepared byte has exactly one origin segment, addressed by `PreparedSpan`:
 
-- Segments are sorted by generated start, are non-overlapping, and cover the
-  whole prepared buffer. Bytes with no direct user counterpart (for example
-  inserted separators) still have a segment, with origin `Generated` pointing at
-  the nearest enclosing user location; there are no unmapped holes.
+- Segments are sorted by prepared start, are non-overlapping, and cover the
+  half-open range `[0, prepared_len)`. Bytes with no direct user counterpart
+  (for example inserted separators) still have a segment, with origin
+  `Generated` pointing at the nearest enclosing real user location; there are
+  no unmapped holes.
 - A segment maps to at least one `SourceOrigin`; the origin chain is acyclic.
-- Direct (unmodified) input has a single identity segment per file.
+- The map records an **EOF anchor** `SourceSpan` in a real original file. The
+  anchor is the fallback for zero-length prepared spans at `prepared_len` and
+  for an empty prepared buffer. It is never a synthetic file and never a
+  prepared-buffer coordinate.
+- Direct (unmodified) input has a single identity segment per file plus the EOF
+  anchor.
+- The map never stores prepared bytes as a `SourceFile`; `SourceSpan` is valid
+  only for original files (§7).
 
-### 4.5 Lexer → Engines
+### 4.6 Lexer → Engines
 
 Input: `&[Token]` ending in `Eof`. Output: diagnostics.
 
@@ -311,41 +394,72 @@ Invariants:
 
 - Token order is the prepared text order.
 - Every token span lies inside the prepared buffer and on UTF-8 boundaries.
+- The `Eof` token has a zero-length prepared span at the end of the buffer; it is
+  the anchor for parser diagnostics such as `PAR013`.
 - Neither engine may assume that byte offsets are monotonic *in the original
   files*; monotonicity holds only in the prepared buffer.
-- Diagnostics use prepared-buffer spans; the unified layer resolves them.
+- Engine diagnostics carry `PreparedSpan` values; the unified layer resolves
+  them. Zero-length spans (including EOF spans) are legal and resolvable.
 
-### 4.6 Engines → Unified Diagnostics
+### 4.7 Engines → Unified Diagnostics
 
-Input: diagnostics with prepared-buffer spans (AST/legacy) or already-original
-spans (legacy compatibility path). Output: rendered diagnostics grouped by the
-original file.
+Input: diagnostics with `PreparedSpan` values (both engines), or unmodified
+legacy diagnostics when preprocessing is disabled. Output: rendered diagnostics
+grouped by original file and by unit.
 
 Invariants:
 
 - Every rendered diagnostic has a real file, line, column, and byte range in that
-  file.
+  file, including diagnostics produced at `Eof` and diagnostics in units whose
+  prepared buffer is empty.
+- When preprocessing is disabled, the legacy diagnostic path is passed through
+  unchanged (same `Span`, line, column, order), preserving baseline output.
 - Secondary locations (macro definition, include chain) never replace the
   primary location.
-- Config filtering runs once, after merging.
+- Config filtering runs once, after merging, in deterministic unit order.
 
-### 4.7 Public library API
+### 4.8 Public library API
 
 The existing public items are frozen for the transition period:
 
 ```rust
 pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>);
-pub fn parse(tokens: &[Token]) -> Vec<Diagnostic>;
+pub fn parse(tokens: &[Token]) -> Vec<Diagnostic>; // frozen alias of parse_legacy
 pub fn analyze(tokens: &[Token]) -> Vec<Diagnostic>;
 pub fn analyze_with_syntax_diagnostics(tokens: &[Token], syntax: &[Diagnostic]) -> Vec<Diagnostic>;
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 ```
 
-New entry points are **additive**:
+The two parsers are explicitly independent and independently runnable:
 
 ```rust
-// conceptual, finalized in Phase 1/3
-pub fn prepare(source: LoadedSource, config: &PreprocessConfig) -> PreparedSource;
+// Legacy parser: token-scanning validation; keeps today's behavior and codes.
+pub fn parse_legacy(tokens: &[Token]) -> Vec<Diagnostic>;
+
+// AST parser: builds a typed tree and returns its own diagnostics.
+// The exact Ast type is defined in Phase 4; this signature is normative.
+pub fn parse_ast(tokens: &[Token]) -> (Ast, Vec<Diagnostic>);
+```
+
+Contract:
+
+- `parse(tokens)` keeps its exact current signature and behavior and is
+  implemented in terms of `parse_legacy` during the transition.
+- `parse_legacy` and `parse_ast` are both public, both accept the same prepared
+  token stream, and neither is implemented by calling the other for its complete
+  result.
+- Sharing low-level grammar helpers (type checks, precedence tables, delimiter
+  matching) is allowed only while both engines stay independently runnable and
+  their outputs stay directly comparable. A shared helper must not encode
+  engine-specific recovery or diagnostic policy.
+- `parse_ast` must be callable in a build where the legacy semantic analyzer is
+  not invoked at all, and vice versa.
+
+New preprocessing entry points are **additive**:
+
+```rust
+// conceptual, finalized in Phase 1/3; one call per AnalysisUnit
+pub fn prepare(unit: &mut AnalysisUnit, config: &PreprocessConfig) -> PreparedSource;
 pub fn analyze_prepared(prepared: &PreparedSource, options: &EngineOptions) -> RunDiagnostics;
 ```
 
@@ -356,63 +470,150 @@ preprocessing side effects.
 
 ## 5. Lifecycle of one analysis (E)
 
+The CLI lifecycle contains an outer loop over units and an inner lifecycle per
+unit.
+
+**CLI-wide:**
+
 1. **Argument parsing.** Parse CLI options; reject unknown combinations with
    exit code 2. No file is touched yet.
 2. **Configuration.** Load `LintConfig`; validate rule codes; resolve dialect
    profile and engine selection; reject unsupported combinations (for example
    Firestorm extensions without a Firestorm dialect).
 3. **Input collection.** Expand directories deterministically (sorted, symlinks
-   skipped), de-duplicate displayed paths, enforce one stdin.
-4. **Root load.** Read the root as UTF-8; register it in the Source Manager.
-5. **Preparation.** Preprocess the root:
-   - identity mode: copy text unchanged, build a trivial map;
+   skipped), de-duplicate displayed paths, enforce one stdin. The result is an
+   ordered list of root inputs.
+4. **Unit loop.** For each root input, in order, run the per-unit lifecycle
+   below. A failure in one unit is recorded and does not abort the remaining
+   units (matching today's per-file behavior).
+5. **Merging.** Concatenate unit diagnostics in input order, then apply the
+   deterministic ordering policy (§11).
+6. **Configuration.** Apply disabled rules and severity overrides once to the
+   merged set.
+7. **Rendering.** Human output or JSON; exit code 0/1. Input/config failures
+   return 2 as today.
+8. **Teardown.** Drop all units; no global mutable state survives. Built-in
+   metadata stays cached in its existing `OnceLock`.
+
+**Per AnalysisUnit:**
+
+1. **Unit creation.** Allocate the unit-local `SourceId` namespace, macro table,
+   conditional stack, include graph, and `SourceMap`.
+2. **Root load.** Read the root as UTF-8 and register it as the unit's first
+   source. Unreadable/invalid root is an input error for this unit (exit 2
+   contribution) and the unit ends.
+3. **Preparation.** Preprocess the root:
+   - identity mode: copy text unchanged, build a trivial map and EOF anchor;
    - Firestorm mode: scan directives, expand macros, resolve includes in textual
      order, emit `PRE` diagnostics, build the full map.
    Failures inside preparation become diagnostics, not Rust errors, except for
-   limits that make further analysis unsafe (still diagnostics; the run
+   limits that make further analysis unsafe (still diagnostics; the unit
    continues with a bounded, truncated prepared stream).
-6. **Lexing.** Tokenize the prepared text. Lexical diagnostics are recorded with
-   prepared spans.
-7. **Engine selection.**
-   - `legacy` (default in Phase 1–5): `parse` → `analyze_with_syntax_diagnostics`.
-   - `ast` (Phase 4+): AST parser → AST semantic analyzer.
+4. **Lexing.** Tokenize the prepared text. Lexical diagnostics are recorded with
+   `PreparedSpan` values. An empty prepared buffer yields only `Eof` at
+   `PreparedSpan(0, 0)`.
+5. **Engine selection.**
+   - `legacy` (default in Phases 1–5): `parse_legacy` →
+     `analyze_with_syntax_diagnostics`.
+   - `ast` (Phase 4+): `parse_ast` → AST semantic analyzer.
    - `compare` (development/CI only, Phase 6): both, then differential report.
-8. **Resolution.** Map each diagnostic's prepared span to `SourceSpan`, then to
+6. **Resolution.** Map every `PreparedSpan` to `SourceSpan`, then to
    `SourceLocation` (file, offset, line, column). Attach secondary locations
-   from the origin chain where available.
-9. **Merging.** Apply the engine-specific deduplication policy, then sort by
-   `(source load order, start offset, code)`. Legacy single-file runs keep their
-   current order.
-10. **Configuration.** Apply disabled rules and severity overrides once.
-11. **Rendering.** Human output or JSON; exit code 0/1. Input/config failures
-    return 2 as today.
-12. **Teardown.** Drop the run; no global state survives. Built-in metadata stays
-    cached in its existing `OnceLock`.
+   from the origin chain where available. Zero-length spans at `Eof` use the
+   map's EOF anchor (§7.3).
+7. **Unit merge.** Apply the engine-specific deduplication policy and sort by
+   `(source load order, start offset, code)`. Legacy-only single-file output
+   keeps its current order.
 
-Empty input: the preprocessor produces an empty prepared buffer, the lexer
-produces only `Eof`, and the legacy parser reports `PAR013` exactly as today.
+An empty source file is a valid unit: the prepared buffer is empty, the lexer
+emits only `Eof`, the legacy parser reports `PAR013`, and the `Eof` diagnostic
+resolves to the root file at offset 0 (line 1, column 1). Conditional
+compilation that removes all user code behaves the same way, except that the EOF
+anchor comes from the last directive/anchor location (§7.3).
 
 ---
 
-## 6. Multiple source files (F)
+## 6. Analysis units and multiple source files (F)
 
-- A run has exactly one **root** file (or stdin). Every other file is an include.
+### 6.1 Definition
+
+An **AnalysisUnit** is the complete, independent analysis of one root source:
+
+- one root file, or one stdin stream;
+- its own `SourceId` namespace (root first);
+- its own macro table;
+- its own conditional stack;
+- its own `SourceMap`;
+- its own include graph and include stack;
+- its own diagnostics;
+- its own prepared buffer and token stream.
+
+One CLI invocation may create any number of AnalysisUnits: one per collected
+file, directory entry, or stdin input. A unit is **not** a CLI invocation-wide
+namespace.
+
+### 6.2 Lifecycle and isolation
+
+- The unit is created when its root starts loading and is dropped after its
+  diagnostics have been resolved and merged into the CLI-wide result.
+- All preprocessing state is unit-local. `#define`, `#undef`, conditional-stack
+  entries, include guards, and `#pragma once` state never cross unit boundaries.
+- Reason: the existing CLI contract analyzes each collected file on its own.
+  Independent roots are independent scripts; macro state leaking between them
+  would make output depend on file order, change results when a directory gains a
+  file, and break the baseline compatibility tests.
+- `SourceId` values are unit-local and must not be compared across units.
+- Units may be analyzed sequentially or in parallel. If parallel, merging is
+  still performed in input order, so the observable result is deterministic.
+
+### 6.3 Shared immutable file cache
+
+- Immutable file contents may be cached across units, keyed by canonical path
+  (optionally plus a content digest), to avoid repeated reads.
+- A cache entry contains **only** text (and optionally its immutable line
+  index). It never contains a `SourceId`, macro table, conditional stack, origin,
+  include edge, or diagnostic.
+- A cache hit must produce exactly the same output as a cold read.
+- The cache is an optimization, not an architectural component; it must be
+  possible to disable it without changing behavior. Phase 1 may omit it.
+
+### 6.4 stdin
+
+- `-` may be supplied at most once per CLI invocation and forms exactly one unit.
+- The stdin bytes are read once, recorded under a display name such as `<stdin>`,
+  and treated as the unit's root.
+- stdin cannot be `#include`d by other units.
+- Includes inside a stdin unit resolve relative to the process working directory
+  only if a later phase explicitly defines that policy; the default is to reject
+  relative includes from stdin unless an include root is supplied.
+
+### 6.5 Merging results from several units
+
+- Unit results are concatenated in the deterministic input order produced by
+  directory collection (sorted paths, de-duplicated display names).
+- Each rendered diagnostic keeps its unit's resolved file and location.
+- Configuration filtering and severity overrides are applied once to the merged
+  list.
+- Exit code: `2` if any input/config failure occurred, otherwise `1` if any
+  remaining error-severity diagnostic exists, otherwise `0`. This matches
+  today's behavior.
+- Diagnostics from one unit can never be attributed to another unit's file; the
+  unit's `SourceMap` is the only resolver for its diagnostics.
+
+### 6.6 Includes inside one unit
+
 - `SourceId` order is load order: root first, then includes in the order they are
-  first entered (depth-first, textual order). This order is the diagnostic
+  first entered (depth-first, textual order). This order is the unit's diagnostic
   grouping order.
-- `SourceFile` records: `id`, display name, optional canonical path, kind
-  (`Root`, `Included`, `Stdin`, `Prepared`), and whether it is synthetic.
-- The **prepared buffer is itself a `SourceFile`** of kind `Prepared`. Prepared
-  spans are offsets into it; original spans are offsets into root/include files.
-  Keeping the prepared buffer as a pseudo-file makes token spans unambiguous and
-  lets the `SourceMap` be a range map instead of a per-token table.
+- The prepared buffer is **not** a `SourceFile` and has no `SourceId`; its bytes
+  are addressed by `PreparedSpan` (§7).
 - Include resolution:
   - textual position matters: an include is expanded at its directive site;
-  - the same file included twice is expanded twice unless a guard or
+  - the same file included twice is expanded twice unless an include guard or
     `#pragma once` suppresses it; the Source Manager still loads it once and
     reuses the text (one `SourceId`, many expansions);
-  - cycles are detected on the active include stack using canonical paths and
-    produce a `PRE` error at the `#include` site; the include is not entered;
+  - cycles are detected on the unit's active include stack using canonical paths
+    and produce a `PRE` error at the `#include` site; the include is not entered;
   - unresolved includes produce one `PRE` error and no tokens.
 - Diagnostics are grouped per originating file for rendering. A diagnostic whose
   origin chain crosses files keeps its primary location in the file where the
@@ -432,10 +633,12 @@ The source map is a **range map with origin chains**, not a line-to-line table.
 ### 7.1 Conceptual types
 
 ```rust
-/// Dense identifier of one loaded source file within a run.
+/// Dense identifier of one original file inside one AnalysisUnit.
+/// It is never assigned to the prepared buffer.
 pub struct SourceId(u32);
 
-pub enum SourceFileKind { Root, Stdin, Included, Prepared }
+/// Original files only. The prepared buffer is not a file kind.
+pub enum SourceFileKind { Root, Stdin, Included }
 
 pub struct SourceFile {
     pub id: SourceId,
@@ -444,6 +647,13 @@ pub struct SourceFile {
     pub kind: SourceFileKind,
     pub text: Arc<str>,
     // line index is built lazily and cached
+}
+
+/// A range in the Prepared Buffer. Offsets are zero-based UTF-8 bytes.
+/// There is deliberately no SourceId here: prepared bytes are not a file.
+pub struct PreparedSpan {
+    pub start: usize,
+    pub end: usize,
 }
 
 /// A range in an original file. Offsets are zero-based UTF-8 bytes.
@@ -472,7 +682,7 @@ pub enum OriginKind {
     Generated,       // text with no direct user counterpart
 }
 
-/// One link in a provenance chain.
+/// One link in a provenance chain. Every span here is an original-file span.
 pub struct SourceOrigin {
     pub kind: OriginKind,
     pub span: SourceSpan,          // primary location for this link
@@ -484,33 +694,144 @@ pub struct SourceOrigin {
 
 /// A mapped range in the prepared buffer.
 pub struct MapSegment {
-    pub generated_start: usize,
-    pub generated_end: usize,
+    pub prepared: PreparedSpan,
     pub origin: OriginId,
+}
+
+/// The result of resolving one prepared range.
+pub struct ResolvedSpan {
+    pub primary: SourceSpan,
+    pub related: Vec<SourceSpan>,
 }
 
 pub struct SourceMap {
     files: Vec<SourceFile>,
-    segments: Vec<MapSegment>, // sorted, non-overlapping
-    origins: Vec<SourceOrigin>, // arena; chains are acyclic
+    segments: Vec<MapSegment>,   // sorted, non-overlapping, cover [0, prepared_len)
+    eof_anchor: SourceSpan,      // always a real original-file position
+    origins: Vec<SourceOrigin>,  // arena; chains are acyclic
+}
+
+impl SourceMap {
+    /// Resolve any prepared range, including zero-length ranges, EOF ranges,
+    /// and ranges that cross segment boundaries. Never returns prepared
+    /// coordinates and never returns a synthetic file.
+    pub fn resolve_span(&self, prepared: PreparedSpan) -> ResolvedSpan;
+
+    /// Resolve a single prepared byte offset to an original-file position.
+    /// `offset == prepared_len` resolves to the EOF anchor.
+    pub fn resolve_point(&self, offset: usize) -> SourceSpan;
+
+    /// Turn an original-file span into line/column coordinates.
+    pub fn location(&self, span: SourceSpan) -> SourceLocation;
+
+    /// The anchor used for empty buffers and end-of-input diagnostics.
+    pub fn eof_anchor(&self) -> SourceSpan;
 }
 ```
+
+`PreparedSpan` and `SourceSpan` are distinct types with no implicit conversion
+between them. A compiled-in mix-up is therefore a type error, not a diagnostic
+that silently points at the wrong file. `SourceSpan::source` always refers to a
+`SourceFile` registered in this unit; the prepared buffer has no `SourceId` at
+all.
 
 These are conceptual definitions. Phase 1 fixes the exact visibility, derives,
 constructors, and capacities; the semantics below are binding.
 
-### 7.2 Identification and offsets
+### 7.2 Coordinate namespaces and offsets
 
-- `SourceId` is run-local. It must never be persisted or compared across runs.
+- `SourceId` is unit-local. It must never be persisted or compared across units
+  or runs.
 - Every offset is a zero-based UTF-8 byte offset. Spans are half-open
   (`start..end`) and must lie on UTF-8 character boundaries.
-- `SourceSpan` never refers to the prepared buffer. The prepared buffer is
-  addressed by `generated_start..generated_end` in `MapSegment` and by `Span` in
-  tokens.
-- A `SourceSpan` with `start == end` is a point (used for "inserted here"
-  origins) and is allowed.
+- `PreparedSpan` addresses bytes **only** in the prepared buffer. It has no
+  `SourceId` and cannot be rendered directly.
+- `SourceSpan` addresses bytes **only** in an original `SourceFile`. It is the
+  only span type that can be converted to `SourceLocation`.
+- A prepared buffer is not a `SourceFile`; it has no display name in `files` and
+  no `SourceId`.
+- Zero-length spans are legal in both namespaces. `PreparedSpan(n, n)` denotes a
+  point in the prepared buffer; `SourceSpan(s, n, n)` denotes a point in a real
+  file. Point semantics are used for EOF, inserted text, and "declared here"
+  locations.
+- `SourceSpan` must always name a real original file. There is no synthetic or
+  "builtin" source id in this model; generated text inherits the nearest real
+  anchor.
 
-### 7.3 Lines and columns
+### 7.3 Empty input, EOF, and segment boundaries
+
+These cases are normative; Phase 1 must test each of them.
+
+**Empty source file.** The `SourceFile` has `len() == 0`. The map has no
+segments and an `eof_anchor` of `SourceSpan(root, 0, 0)`. The lexer emits only
+`Eof` at `PreparedSpan(0, 0)`. `resolve_span(PreparedSpan(0, 0))` returns
+`primary = eof_anchor`, `related = []`. `PAR013` therefore resolves to the root
+file at line 1, column 1, exactly like today's legacy output.
+
+**Empty prepared buffer from non-empty source.** Conditional compilation can
+remove all user code. The prepared buffer may be empty even though the root file
+is not. Segments then cover the empty range `[0, 0)` (vacuously), and
+`eof_anchor` is a real position derived from the last processed directive (the
+end of the last direct/anchor segment), or the root start if no anchor exists.
+EOF diagnostics still resolve to a real file and a real line/column.
+
+**EOF token and EOF diagnostics.** The lexer's `Eof` token always has
+`PreparedSpan(prepared_len, prepared_len)`. Parser diagnostics at end of input
+(for example `PAR013`, an incomplete block, or a missing closing brace) use the
+same zero-length prepared span. Resolution rule:
+
+- `resolve_point(prepared_len)` returns `eof_anchor`.
+- `resolve_span(PreparedSpan(n, n))` with `n == prepared_len` returns the anchor
+  with no related locations.
+- A zero-length prepared span that is **not** at the end resolves as a point
+  (below).
+
+**Point resolution and segment boundaries.** Segments are half-open
+`[start, end)`. For `resolve_point(offset)`:
+
+1. If `offset == prepared_len`, return `eof_anchor`.
+2. Otherwise, return the origin of the unique segment with
+   `prepared.start <= offset < prepared.end`. An offset exactly at a boundary
+   belongs to the segment that **starts** at that offset (right-biased). This
+   makes boundary resolution deterministic.
+3. If no such segment exists (only possible for a malformed map, which the
+   builder must prevent), return `eof_anchor` rather than panicking.
+
+For a zero-length `PreparedSpan(n, n)` with `n < prepared_len`, resolution uses
+`resolve_point(n)` and returns `primary = resolve_point(n)` with an empty
+`related` list.
+
+**Span crossing several segments.** A prepared span may cross any number of
+segment boundaries (a macro argument followed by macro body, then by direct
+code). `resolve_span` must:
+
+1. Split the prepared range at every segment boundary into 1..N contiguous
+   prepared runs. A zero-length span yields one point run.
+2. Resolve every run through its segment origin to an original `SourceSpan`
+   (walking the origin chain to the nearest real user span for `Generated`,
+   `TokenPaste`, and `Stringify` links).
+3. Choose `primary` by origin priority: `Direct` > `MacroArgument` >
+   `MacroDefinition` > `Include` > `TokenPaste`/`Stringify` > `Generated`.
+   Ties are broken by the leftmost prepared run. This ensures a diagnostic that
+   starts in pasted text but continues into direct code still points at the
+   user-written code when one exists.
+4. Put the remaining distinct spans into `related`, ordered left-to-right by
+   their prepared run and deduplicated by `(source, start, end)`.
+5. Never return a prepared coordinate or a synthetic file. If every run is
+   generated, every origin still points at a real anchor, so `primary` remains a
+   real user location.
+
+Consequences:
+
+- A diagnostic on a token produced by a macro argument points at the argument
+  text; the macro definition and invocation become related locations.
+- A diagnostic on a token manufactured by `##` points at the invocation site as
+  the primary location and never claims that the pasted spelling exists in a
+  file.
+- A diagnostic whose range spans two files (through an include boundary) reports
+  the primary file plus the other file as a related location.
+
+### 7.4 Lines and columns
 
 - Line indices are built per file from the file's own bytes. `\n` increments the
   line; `\r` is ignored for line counting, matching the lexer's current
@@ -524,7 +845,7 @@ constructors, and capacities; the semantics below are binding.
   used for internal ordering and debugging; rendered diagnostics use the
   original file location.
 
-### 7.4 Mapping model
+### 7.5 Mapping model
 
 - The prepared buffer is covered by ordered, non-overlapping segments.
 - Every segment has exactly one **primary origin** (`MapSegment.origin`) and an
@@ -556,7 +877,7 @@ constructors, and capacities; the semantics below are binding.
   nearest enclosing user location, so diagnostics never point at offset 0 by
   accident.
 
-### 7.5 Multiple related locations
+### 7.6 Multiple related locations
 
 A diagnostic carries:
 
@@ -589,7 +910,7 @@ pub struct MappedDiagnostic {
 - Related locations are resolved to the same `file`/line/column form and are
   deduplicated if several links point at the same span.
 
-### 7.6 Why not a line map
+### 7.7 Why not a line map
 
 Line mapping cannot represent: several macro arguments on one line, a macro
 expanding to zero or many lines, token paste, includes that overlay multiple
@@ -597,14 +918,21 @@ files, or AST nodes that span a macro boundary. Range-based segments with
 explicit chains are required, and they are usable both for tokens (range
 lookup) and for future AST nodes (span lookup).
 
-### 7.7 Lookup and performance
+### 7.8 Lookup and performance
 
-- Segment lookup is a binary search over sorted generated ranges: `O(log n)`.
+- Segment lookup is a binary search over prepared ranges: `O(log n)`.
+- Point resolution at a segment boundary is one comparison away from the binary
+  search result; `offset == prepared_len` short-circuits to the EOF anchor.
+- A span crossing `k` segments costs `O(log n + k)`. `k` is bounded by the
+  number of macro/include transitions inside one span, not by file size.
 - Origin chains are an arena; walking is `O(depth)` with a hard depth cap.
-- Each file's line index is built once per run (`O(file bytes)`), not per
+- Each file's line index is built once per unit (`O(file bytes)`), not per
   diagnostic.
 - The map is immutable and shared with `Arc`; there is no interior mutability in
   the analysis path.
+- Resolution is total: every `PreparedSpan` in `[0, prepared_len]` has a result,
+  including empty buffers. `resolve_*` must not return `Option` that callers
+  could `unwrap` on user input.
 
 ---
 
@@ -629,11 +957,6 @@ Rules:
 
 - User input is untrusted data. Indexing user-controlled offsets must go through
   checked accessors; arithmetic on offsets uses checked or saturating operations.
-- `PRE` diagnostics are `DiagnosticKind::Lexical`? **No** — introduce a dedicated
-  kind only if the documentation and JSON schema are extended. Until then `PRE`
-  diagnostics use `DiagnosticKind::Syntax` with a distinct code family and are
-  documented as preprocessing diagnostics. The final kind decision is part of
-  Phase 3 CLI integration and must be recorded here.
 - `PRE` diagnostics use the existing `DiagnosticKind::Syntax` and the `PRE`
   code family. A dedicated `DiagnosticKind` is deliberately deferred: adding a
   value to that public enum changes the documented JSON `kind` domain and needs
@@ -656,7 +979,9 @@ Rules:
 2. **Public API is frozen.** `lex`, `parse`, `analyze`,
    `analyze_with_syntax_diagnostics`, `Diagnostic`, `Span`, `Token`, and
    `TokenKind` keep their signatures and field meanings for the transition
-   period. New functionality is additive.
+   period. New functionality is additive. `parse_legacy` and `parse_ast` are
+   added as independent entry points; `parse` stays behaviorally identical to
+   `parse_legacy`.
 3. **Diagnostics are unchanged in plain LSL.** Same codes, severities, kinds,
    messages, spans, order, human output, JSON output, and exit codes. The
    existing 350 tests and the corpus manifest are the gate.
@@ -676,7 +1001,8 @@ Rules:
    preprocessor enabled but no directives produces the same diagnostics as
    legacy.
 9. **Deprecation** of legacy APIs happens only after Phase 6 parity gates; until
-   then both engines are supported and selectable.
+   then both engines are supported, public, and selectable, including for
+   differential testing.
 
 ---
 
@@ -697,15 +1023,93 @@ Rules:
 - Firestorm mode must not silently accept standard-LSL-invalid constructs that
   are not documented Firestorm behavior.
 
-### 10.2 `//fspreprocessor off`
+### 10.2 `//fspreprocessor off` (global switch, not a section)
 
-- The directive disables preprocessing for a region. It requires raw comment
-  access, so it is handled by the preprocessor scanner before the lexer.
-- When preprocessing is off, the region is copied verbatim and lexed as normal
-  LSL; `#` there follows normal lexical rules (and is an error in plain LSL).
-- The region boundaries are recorded in the source map as direct code.
+The marker is a **script-wide kill switch** in Firestorm, not a regional
+directive. Verified against
+[`fslslpreproc.cpp`](https://github.com/FirestormViewer/phoenix-firestorm/blob/4643f4acb7a50624cd30acbf6ae4b5157fa207e6/indra/newview/fslslpreproc.cpp#L1145-L1159)
+at commit `4643f4acb7a50624cd30acbf6ae4b5157fa207e6`:
 
-### 10.3 Built-ins and predefined macros
+```cpp
+std::string rinput = input;
+bool preprocessor_enabled = true;
+{
+    std::string::size_type location_index = rinput.find("//fspreprocessor off");
+    if (location_index != std::string::npos)
+    {
+        ... display_message("... disabled by script marker" ...);
+        preprocessor_enabled = false;
+    }
+}
+```
+
+Behavior that neolint must reproduce:
+
+- The check is a raw substring search over the entire original script text, not
+  a parsed comment or directive scan.
+- If the literal `//fspreprocessor off` occurs **anywhere** in the file — at the
+  start, in the middle, at the end, inside a string literal, or inside a block
+  comment — the whole script is processed with preprocessing disabled.
+- Only the first occurrence matters; there is no re-enable marker and no
+  region/section semantics.
+- When disabled, Firestorm does not run Boost.Wave, does not expand includes or
+  macros, and skips its post-processing transforms (lazy lists, switch rewriting,
+  optimizer, compression), all of which are guarded by `preprocessor_enabled`
+  (`fslslpreproc.cpp` around the `if (preprocessor_enabled)` and
+  `if (preprocessor_enabled && !errored)` blocks). The original text is then
+  compiled as ordinary LSL.
+- Firestorm displays an informational message whose line number is the count of
+  newlines before the marker. neolint mirrors this as an informational `PRE`
+  diagnostic; it never changes the exit code.
+- Because this is an area where Firestorm's behavior surprises users, the
+  implementation must be literal: do not "improve" it into section handling, and
+  do not ignore occurrences inside strings or comments.
+
+Required fixture tests (Phase 3):
+
+| Fixture | Expected behavior |
+| --- | --- |
+| marker absent | normal preprocessing |
+| marker at the very start | whole file unprocessed |
+| marker in the middle | whole file unprocessed, including code before it |
+| marker at the end | whole file unprocessed |
+| marker inside a string literal | whole file unprocessed (raw substring match) |
+| marker inside a block comment | whole file unprocessed (raw substring match) |
+
+This functionality belongs to the **preprocessor** and is implemented in
+Phase 3, not Phase 5.
+
+### 10.3 Include guards and `#pragma once`
+
+Include guards and `#pragma once` are different features and get different
+classifications.
+
+- **Classic include guards** (`#ifndef X` / `#define X` / `#endif`) are ordinary
+  standard preprocessing. They are fully supported and tested as guaranteed
+  preprocessor behavior.
+- **`#pragma once`** is a **compatible convenience of neolint**, not a
+  guaranteed Firestorm feature:
+  - Firestorm's `fslslpreproc.cpp` contains no `#pragma` handling of its own and
+    no `#pragma once` code path.
+  - Firestorm's pinned Boost.Wave is **1.90** (`autobuild.xml`, `boost`
+    dependency), and Boost.Wave 1.90 supports `#pragma once` when
+    `BOOST_WAVE_SUPPORT_PRAGMA_ONCE` is enabled, which is the default in
+    `wave_config.hpp`. Firestorm does not define or override that macro.
+  - However, Firestorm resolves includes through its own inventory-based
+    `trace_include_files` hook, and there is no Firestorm end-to-end test or
+    documentation proving `#pragma once` behavior through that layer. Boost.Wave
+    keys pragma-once state by the filename it sees, which Firestorm supplies from
+    inventory names rather than filesystem paths.
+  - Therefore neolint implements `#pragma once` as a documented, compatible
+    addition. It is **not** part of the guaranteed Firestorm compatibility suite
+    and must be tested separately from verified Firestorm behavior.
+  - If end-to-end Firestorm evidence becomes available, this classification may
+    be upgraded by updating this document and the compatibility tests.
+- `#pragma once` identity is per canonical path within one AnalysisUnit, and the
+  effect never crosses unit boundaries. This rule applies whether or not the
+  canonical path came from the filesystem or from an include lookup.
+
+### 10.4 Built-ins and predefined macros
 
 - Only documented, statically known predefined macros may be provided (for
   example file/line style macros defined by the chosen profile). Their values
@@ -713,9 +1117,9 @@ Rules:
 - No Firestorm built-in may receive a fabricated constant value. Dynamic or
   environment-dependent built-ins stay unresolved and are treated
   conservatively by semantic analysis.
-- The macro table is per-run and never global.
+- The macro table is per-AnalysisUnit and never global.
 
-### 10.4 Standard LSL safety
+### 10.5 Standard LSL safety
 
 - No directive is recognized in `Lsl` mode.
 - `switch`, `case`, `default` as a statement, lazy-list operators, and related
@@ -742,8 +1146,8 @@ Rules:
 - Include de-duplication uses canonical paths only for identity; display uses the
   spelling from the source.
 - Built-in metadata remains vendored and versioned in the repository.
-- Sorting of diagnostics uses a total, stable key: `(load order of source,
-  start offset, end offset, code, message)`.
+- Sorting of diagnostics uses a total, stable key: `(unit input order, source
+  load order inside the unit, start offset, end offset, code, message)`.
 - New tests must avoid time, randomness, and network; temporary directories
   follow the existing `temporary_directory()` pattern in the integration tests.
 
@@ -758,10 +1162,10 @@ provisional; Phase 1/2 must fix them as constants and add tests.
 | --- | --- | --- |
 | Root file size | existing practical limits; explicit cap in Phase 1 | Source Manager |
 | Included file size | 4 MiB | Source Manager |
-| Source files per run | 256 | Source Manager |
+| Source files per AnalysisUnit | 256 | Source Manager |
 | Include depth | 64 | Preprocessor include stack |
 | Macro expansion depth | 64 | Preprocessor expander |
-| Expanded bytes/tokens per run | 8 MiB / 1,000,000 tokens | Preprocessor |
+| Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor |
 | Origin chain depth | 64 | Source Map |
 | Preprocessor diagnostics | 1,000 | Preprocessor |
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
@@ -771,7 +1175,7 @@ provisional; Phase 1/2 must fix them as constants and add tests.
 Requirements:
 
 - Exceeding a limit produces a single, specific `PRE`/`AST` diagnostic and stops
-  the affected expansion; the rest of the run continues.
+  the affected expansion; the rest of the unit continues.
 - Limits are checked before allocation where possible.
 - Limit tests must be part of Phase 2/3/4 acceptance.
 - No limit may depend on machine memory size.
@@ -786,22 +1190,36 @@ Requirements:
    each public function and each invariant (spans, UTF-8 boundaries, segment
    ordering, chain construction, directive scanning edge cases).
 2. **Contract tests** for the source map: every prepared range resolves to a
-   file and a valid offset; identity mapping round-trips byte offsets; line and
-   column match the lexer's semantics, including CRLF and multi-byte characters.
-3. **Preprocessor tests** (Phases 2–3): one fixture per directive and per macro
+   real file and a valid offset; identity mapping round-trips byte offsets; line
+   and column match the lexer's semantics, including CRLF and multi-byte
+   characters; `PreparedSpan`/`SourceSpan` separation is enforced by the type
+   system. Mandatory cases: empty source file, empty prepared buffer,
+   `Eof`/`PAR013` resolution, zero-length spans, points exactly on segment
+   boundaries, and spans crossing several segments.
+3. **AnalysisUnit isolation tests**: two roots in one CLI invocation must not
+   share macros, conditional-stack state, include guards, `SourceId` namespaces,
+   or diagnostics; changing one file's `#define` must not change the other
+   file's output; order of units must not change results.
+4. **Preprocessor tests** (Phases 2–3): one fixture per directive and per macro
    form, plus malformed and adversarial inputs (unterminated conditionals,
    recursive macros, paste bombs, include cycles, missing includes, path
-   traversal).
-4. **Integration tests** via the public API and the binary
+   traversal). The `//fspreprocessor off` fixture matrix from §10.2 is required,
+   including marker occurrences inside strings and block comments.
+5. **`#pragma once` tests** are a separate suite from verified Firestorm
+   compatibility tests (§10.3). They may assert neolint behavior, but the test
+   names and documentation must not claim Firestorm parity.
+6. **Integration tests** via the public API and the binary
    (`env!("CARGO_BIN_EXE_neolint")`), in the existing `tests/` style, using
    temporary directories.
-5. **Golden corpus**: existing `corpus/{small,medium,large,invalid}` plus a new
+7. **Golden corpus**: existing `corpus/{small,medium,large,invalid}` plus a new
    preprocessor corpus. Plain-LSL golden results must not change.
-6. **Differential Legacy↔AST harness** (Phase 4+): compare normalized
+8. **Differential Legacy↔AST harness** (Phase 4+): compare normalized
    diagnostics as a multiset of `(code, severity, source, start, end)`, plus a
-   per-code report. Order is compared only through the documented deterministic
+   per-code report. The harness calls the public `parse_legacy`/`parse_ast` and
+   both semantic entry points independently; neither engine is a wrapper around
+   the other. Order is compared only through the documented deterministic
    policy.
-7. **Fallback/fuzz-style tests without dependencies**: deterministic generators
+9. **Fallback/fuzz-style tests without dependencies**: deterministic generators
    over token/directive alphabets, bounded by iteration counts, run in normal
    `cargo test`.
 
@@ -812,45 +1230,68 @@ Requirements:
 - No test uses the network, sleeps, or depends on host locale/time zone.
 - Tests must pass on MSRV 1.75; Phase 1+ should add an MSRV check step to the
   experimental workflow (separate from the required quality steps).
-- CI: `experimental-ci.yml` runs the same quality gate as `ci.yml` on the
-  experimental branch and on PRs targeting it; `ci.yml` runs only for `main`
-  pushes and PRs targeting `main`.
+- CI: `experimental-ci.yml` runs on pushes to `exp/preprocessor-ast` and to flat
+  `exp-preprocessor-ast-phase-*` branches, and on PRs targeting
+  `exp/preprocessor-ast`. It has no `workflow_dispatch`, because the file is not
+  on the default branch and manual dispatch is not an active trigger in this
+  isolation model. `ci.yml` runs only for `main` pushes and PRs targeting
+  `main`.
 
 ---
 
 ## 14. Legacy → AST migration strategy (N)
 
-Migration is incremental and evidence-driven.
+Migration is incremental and evidence-driven. The two parsers are separate
+implementations, not stages of the same code.
 
-1. **Rule ownership matrix.** For every `SEMxxx` (and `PARxxx` where the AST
+1. **Parser independence.** `parse_legacy` and `parse_ast` are both public and
+   independently callable. `parse_ast` must not be implemented by calling
+   `parse_legacy` for its full result, and `parse_legacy` must not depend on AST
+   types. Shared grammar helpers are allowed only when they contain no
+   engine-specific diagnostic or recovery policy.
+2. **Rule ownership matrix.** For every `SEMxxx` (and `PARxxx` where the AST
    parser owns recovery), record: legacy owner, AST owner, parity status,
    known differences, and the test that proves parity. The matrix lives next to
    the AST semantic code and is updated in the same commit as behavior changes.
-2. **Shadow comparison.** In `compare` mode, run both engines on the same
+3. **Shadow comparison.** In `compare` mode, run both engines on the same
    prepared tokens, resolve both results, and compare normalized multisets.
    Differences are reported as a development artifact, never as user findings.
-3. **Parity thresholds.** A rule may move to the AST engine only when:
+4. **Parser parity criteria.** Before an AST parser change may replace legacy
+   parsing for a construct, all of the following must hold on the full corpus
+   (`small`, `medium`, `large`, `invalid`) and the grammar inventory tests:
+   - accept/reject decisions match;
+   - `(code, severity, normalized span)` multisets match, or every difference is
+     a documented, tested fix;
+   - `Eof`/empty-input diagnostics (`PAR013` and incomplete-construct cases)
+     match;
+   - recovery produces the same number of independent findings per malformed
+     construct;
+   - no new panic on malformed or deeply nested input.
+   The differential report is attached to the change. Full rule-by-rule parity
+   is the Phase 6 gate; construct-level parser parity is the Phase 4 gate.
+5. **Parity thresholds for rules.** A rule may move to the AST engine only when:
    - its corpus and unit-test results match legacy exactly, or
    - every difference is documented as an intentional fix and covered by a test.
-4. **Ordering policy.** Unified output is sorted deterministically, so rule
+6. **Ordering policy.** Unified output is sorted deterministically, so rule
    migration does not reshuffle user output. Legacy-only mode keeps the current
    pass order to avoid breaking existing golden tests.
-5. **No duplicate findings.** When both engines run for a user-visible mode, the
+7. **No duplicate findings.** When both engines run for a user-visible mode, the
    merge layer must deduplicate by `(code, primary span)`. Duplicate detection is
    part of the Phase 6 acceptance criteria.
-6. **Feature gating.** AST engine selection is a CLI/config option in the
+8. **Feature gating.** AST engine selection is a CLI/config option in the
    experimental branch. Default stays legacy until Phase 6 stabilization.
-7. **Rollback.** The legacy engine remains compiled and selectable through the
-   end of Phase 6; removal requires a separate decision and a major-version
-   boundary.
-8. **Documentation.** Every behavioral difference introduced by AST rules is
-   added to `docs/diagnostics.md` with an example and a boundary note.
+9. **Rollback.** The legacy parser and semantic analyzer remain compiled,
+   public, and selectable through the end of Phase 6; removal requires a
+   separate decision and a major-version boundary. Legacy differential testing
+   must remain possible until that decision.
+10. **Documentation.** Every behavioral difference introduced by AST rules is
+    added to `docs/diagnostics.md` with an example and a boundary note.
 
 ---
 
 ## 15. Phase plan (O)
 
-### Phase 0 — Experimental branch, CI, architecture contracts (this phase)
+### Phase 0 — Experimental branch, CI, architecture contracts
 
 - **Goal:** create a safe, isolated development contour and freeze contracts.
 - **Deliverables:** `exp/preprocessor-ast` branch; `experimental-ci.yml`;
@@ -859,7 +1300,9 @@ Migration is incremental and evidence-driven.
 - **Acceptance criteria:**
   - branch starts exactly at the baseline;
   - `main` is untouched;
-  - experimental CI triggers only for the experimental branch and its PRs;
+  - experimental CI triggers for the integration branch, flat
+    `exp-preprocessor-ast-phase-*` branches, and PRs targeting the integration
+    branch;
   - stable CI triggers only for `main` pushes and PRs;
   - full existing test suite, fmt, clippy, and rustdoc pass;
   - no runtime/source behavior changes outside CI and docs.
@@ -867,32 +1310,70 @@ Migration is incremental and evidence-driven.
 - **Done when:** the branch is pushed, both workflows show the expected
   triggers, and the report records SHAs and run URLs.
 
+#### Phase 0.1 — Contract corrections (completed by this revision)
+
+- **Goal:** remove ambiguities and factual errors from the Phase 0 contracts
+  before any runtime component exists.
+- **Corrections:**
+  - split `PreparedSpan` (prepared buffer only) from `SourceSpan` (original
+    files only); the prepared buffer is no longer a `SourceFile` and has no
+    `SourceId`;
+  - define EOF, empty-buffer, zero-length, boundary, and cross-segment
+    resolution, including `PAR013` on an empty prepared buffer;
+  - introduce the AnalysisUnit and define multi-root CLI behavior, isolation,
+    optional shared immutable file cache, stdin, and result merging;
+  - make `parse_legacy` and `parse_ast` explicit, independent public entry
+    points, with `parse` frozen as an alias of the legacy behavior;
+  - correct `//fspreprocessor off` to Firestorm's global, raw-substring
+    semantics and move it to Phase 3;
+  - classify `#pragma once` as a compatible neolint convenience, separate from
+    verified Firestorm behavior;
+  - replace the impossible `exp/preprocessor-ast/**` CI trigger with the flat
+    `exp-preprocessor-ast-phase-*` pattern and remove `workflow_dispatch`.
+- **Dependencies:** Phase 0.
+- **Acceptance criteria:** all ten criteria in the Phase 0.1 task statement,
+  no runtime code changes, and the full CI gate passes.
+
 ### Phase 1 — Source Manager, Source Map, Identity Preprocessor
 
 - **Goal:** make multi-file provenance and line resolution real without changing
   analysis.
 - **Functionality:**
-  - `SourceId`, `SourceFile`, `SourceSpan`, `SourceLocation`, `SourceOrigin`,
-    `SourceMap`;
+  - `SourceId`, `SourceFile`, `PreparedSpan`, `SourceSpan`, `SourceLocation`,
+    `SourceOrigin`, `SourceMap` with `resolve_span`, `resolve_point`,
+    `location`, and `eof_anchor`;
+  - `AnalysisUnit` with unit-local `SourceId` namespace, map, diagnostics, and
+    preprocessor state placeholders (macro table/conditional stack are empty
+    until Phase 2);
   - per-file line index with lexer-compatible columns;
-  - Source Manager with root/stdin loading and deterministic IDs;
-  - identity preprocessor producing a byte-identical prepared buffer and a
-    single identity segment;
+  - Source Manager with root/stdin loading and deterministic per-unit IDs;
+  - identity preprocessor producing a byte-identical prepared buffer, a single
+    identity segment, and an EOF anchor;
   - `PreparedSource` and a resolved-diagnostic API (no CLI change yet).
-- **Modules:** `src/source/{mod.rs,file.rs,line_index.rs,map.rs,manager.rs}`,
-  `src/preprocessor/{mod.rs,identity.rs,config.rs}`.
-- **Dependencies:** Phase 0.
+- **Modules:** `src/source/{mod.rs,file.rs,line_index.rs,map.rs,manager.rs,unit.rs}`,
+  `src/preprocessor/{mod.rs,identity.rs,config.rs}`, `src/pipeline.rs` (unit
+  orchestration).
+- **Dependencies:** Phase 0/0.1 contracts.
 - **Acceptance criteria:**
   - identity prepared text equals input bytes for all fixtures;
-  - map covers the buffer, segments sorted and non-overlapping;
+  - map covers `[0, prepared_len)`, segments sorted and non-overlapping;
+  - `resolve_span`/`resolve_point` are total for empty buffers, EOF
+    (`prepared_len`), zero-length ranges, boundary offsets, and cross-segment
+    ranges; they never return prepared coordinates or synthetic files;
+  - `PAR013` on an empty source resolves to root `(0, 0)`, line 1, column 1;
   - every offset resolves to the same line/column as the current lexer for
     ASCII, UTF-8, CRLF, and empty files;
-  - no public legacy API change;
+  - creating two AnalysisUnits in one run keeps their `SourceId` namespaces and
+    diagnostics isolated;
+  - no public legacy API change; `parse_legacy` exists as a thin explicit
+    wrapper while `parse` keeps its exact behavior;
   - no new dependencies; MSRV 1.75.
 - **Tests:** unit tests for map construction/lookup, identity round-trip,
-  UTF-8/CRLF columns, empty input, and malformed offsets (must not panic).
-- **Done when:** the full suite passes and the identity path is covered by
-  contract tests.
+  UTF-8/CRLF columns, empty source, empty buffer, EOF/PAR013, zero-length and
+  cross-segment spans, boundary points, multi-unit isolation, and malformed
+  offsets (must not panic).
+- **Done when:** the full suite passes and identity/EOF/unit-isolation paths are
+  covered by contract tests.
 
 ### Phase 2 — Preprocessor core
 
@@ -922,10 +1403,14 @@ Migration is incremental and evidence-driven.
 
 - **Goal:** complete the preprocessor and connect it to the legacy pipeline
   behind an explicit opt-in.
-- **Functionality:** nested includes, include guards, `#pragma once`, `#` and
-  `##`, variadic macros, predefined macros/built-ins (documented only), include
-  graph and cycle detection, CLI/config options, diagnostic rendering through
-  the source map, exit-code policy, JSON note extension if approved.
+- **Functionality:** nested includes, classic include guards, `#` and `##`,
+  variadic macros, the global `//fspreprocessor off` kill switch (§10.2),
+  predefined macros/built-ins (documented only), include graph and cycle
+  detection, CLI/config options, diagnostic rendering through the source map,
+  exit-code policy, JSON note extension if approved.
+- **Conditional compatibility addition:** `#pragma once` is implemented as a
+  neolint convenience classified separately from verified Firestorm behavior
+  (§10.3), with its own tests.
 - **Modules:** `src/preprocessor/{include.rs,builtins.rs}`, `src/pipeline.rs`
   (or equivalent orchestration), `src/main.rs`, `src/config.rs`,
   `src/diagnostic.rs` (only if an additive note type is approved).
@@ -934,6 +1419,10 @@ Migration is incremental and evidence-driven.
   - include cycles, missing files, remote paths, and depth limits produce
     diagnostics without panics;
   - the same include included twice behaves per documented guard rules;
+  - `#pragma once` behavior is covered by its own suite and is not presented as
+    verified Firestorm compatibility;
+  - the `//fspreprocessor off` fixture matrix passes, including marker
+    occurrences inside strings and block comments (whole file disabled);
   - `#`/`##` origins never claim a literal user file range;
   - plain LSL mode output is byte-identical to baseline;
   - enabling the preprocessor without directives yields the same diagnostics as
@@ -941,7 +1430,8 @@ Migration is incremental and evidence-driven.
   - CLI/config errors still exit 2; preprocessing findings exit 1 through the
     normal severity path.
 - **Tests:** include-tree fixtures in temporary directories, cycle/limit tests,
-  macro operator tests, CLI integration tests, source-map rendering tests,
+  macro operator tests, the six marker fixtures from §10.2, the separate
+  `#pragma once` suite, CLI integration tests, source-map rendering tests,
   golden plain-LSL comparison.
 - **Done when:** the preprocessor is usable end-to-end behind a flag, documented,
   and covered by integration tests.
@@ -952,27 +1442,35 @@ Migration is incremental and evidence-driven.
   changing diagnostic behavior.
 - **Functionality:** AST types for declarations, functions, states, events,
   statements, expressions, types, and literals; spans preserved on every node;
-  recovery equivalent to legacy; explicit recursion depth guard; parser API.
+  recovery equivalent to legacy; explicit recursion depth guard; public
+  `parse_ast(tokens) -> (Ast, Vec<Diagnostic>)`.
 - **Modules:** `src/ast/{mod.rs,node.rs,types.rs,parser.rs}`.
-- **Dependencies:** Phases 1–3 (prepared stream and source map), legacy parser as
-  the behavioral reference.
+- **Dependencies:** Phases 1–3 (prepared stream and source map), with the legacy
+  parser as the behavioral reference and the frozen `parse_legacy` entry point.
 - **Acceptance criteria:**
+  - `parse_ast` is independently callable and does not delegate its full result
+    to `parse_legacy`; `parse_legacy`/`parse` remain unchanged and public;
   - accept/reject decisions match legacy on the valid and invalid corpus;
   - diagnostic codes and spans match legacy or differences are documented;
+  - the parser parity criteria in §14.4 pass on the full corpus and grammar
+    inventory;
   - malformed and deeply nested inputs never panic;
   - AST nodes retain prepared spans, and every node can be resolved through the
     source map.
 - **Tests:** grammar inventory parity, corpus valid/invalid parity, recovery
-  tests, depth/limit tests, AST shape tests for representative programs.
-- **Done when:** the AST parser parses the whole corpus with parity and the
-  differential harness reports only documented deltas.
+  tests, depth/limit tests, AST shape tests for representative programs, and a
+  differential harness that invokes both parsers directly.
+- **Done when:** the AST parser parses the whole corpus with parity, the
+  differential harness reports only documented deltas, and both parsers are
+  independently runnable.
 
 ### Phase 5 — Firestorm extensions
 
 - **Goal:** add Firestorm-only syntax behind explicit flags.
 - **Functionality:** `switch`/`case`/`default`/`break`, lazy lists,
-  `USE_SWITCHES`, `USE_LAZY_LISTS`, `//fspreprocessor off` interactions, dialect
-  profile plumbing, AST nodes for the new constructs.
+  `USE_SWITCHES`, `USE_LAZY_LISTS`, dialect profile plumbing, AST nodes for the
+  new constructs. The global `//fspreprocessor off` switch is **not** part of
+  this phase: it is preprocessor behavior implemented in Phase 3 (§10.2).
 - **Modules:** `src/ast/ext/` (or `src/ast/firestorm.rs`), preprocessor dialect
   profile updates.
 - **Dependencies:** Phase 4 (AST) and Phase 3 (dialect/profile plumbing).
@@ -983,7 +1481,8 @@ Migration is incremental and evidence-driven.
   - source map works for extension constructs;
   - documentation lists supported and unsupported Firestorm behavior.
 - **Tests:** positive/negative dialect matrix, switch fallthrough/break,
-  lazy-list operators, preprocessing-off regions, interaction tests.
+  lazy-list operators, and interaction tests with a script already disabled by
+  the Phase 3 `//fspreprocessor off` marker.
 - **Done when:** the dialect matrix is fully covered and the standard mode
   remains unchanged.
 
@@ -1002,7 +1501,9 @@ Migration is incremental and evidence-driven.
   - no duplicate findings in user-visible output;
   - deterministic ordering and stable output across runs;
   - performance within documented bounds on the corpus;
-  - legacy engine still selectable until stabilization is signed off.
+  - the legacy parser (`parse_legacy`) and legacy semantic analyzer remain
+    public, compiled, and selectable until stabilization is signed off, so
+    differential testing stays possible.
 - **Tests:** per-rule parity tests, differential corpus runs, dedup/ordering
   tests, new-rule positive/negative tests, regression corpus.
 - **Done when:** the AST engine is the default in the experimental branch, the
@@ -1018,7 +1519,7 @@ src/
   lib.rs                  public API surface (legacy re-exports stay stable)
   diagnostic.rs           Diagnostic/Span/Severity/DiagnosticKind (shared)
   lexer.rs                tokenizer only; no directive knowledge
-  parser.rs               legacy token parser (frozen behavior)
+  parser.rs               legacy token parser: parse_legacy + frozen parse alias
   semantic.rs             legacy semantic analyzer (frozen behavior)
   builtins.rs             vendored LSL metadata (unchanged)
   config.rs               lint configuration (extended additively later)
@@ -1027,8 +1528,10 @@ src/
     mod.rs                re-exports
     file.rs               SourceId, SourceFile, kinds, text ownership
     line_index.rs         byte offset -> line/column (lexer-compatible)
-    map.rs                SourceSpan, SourceOrigin, SourceMap, segments
-    manager.rs            loading roots/includes, path policy, cycles, limits
+    map.rs                PreparedSpan, SourceSpan, SourceOrigin, SourceMap,
+                          segments, EOF anchor, resolve_span/resolve_point
+    manager.rs            per-unit loading, path policy, cycles, limits
+    unit.rs               AnalysisUnit: per-root namespace, map, diagnostics
 
   preprocessor/
     mod.rs                prepare(), PreprocessConfig, PreparedSource
@@ -1043,7 +1546,7 @@ src/
   ast/
     mod.rs                AST root and re-exports
     node.rs               node types with spans
-    parser.rs             AST parser and recovery
+    parser.rs             AST parser and recovery: independent parse_ast
     ext.rs (Phase 5)      Firestorm-only nodes
 
   ast_semantic/
@@ -1053,7 +1556,7 @@ src/
     flow.rs
     rules/                per-rule modules, ownership matrix
 
-  pipeline.rs             (optional) stage orchestration shared by CLI/tests
+  pipeline.rs             per-unit orchestration shared by CLI/tests
 ```
 
 Rules for the structure:
@@ -1065,15 +1568,17 @@ Rules for the structure:
 - **Preprocessor** owns everything between raw bytes and prepared bytes:
   directive detection, conditional evaluation, macro expansion, include
   resolution, stringification, pasting, profile built-ins, and the map.
-- **Source Map** lives in `src/source/map.rs` and is owned by the run, not by
-  the preprocessor or the lexer. The preprocessor is its only writer during
-  construction; consumers get an immutable `Arc`.
+- **Source Map** lives in `src/source/map.rs` and is owned by an
+  **AnalysisUnit**, not by the CLI invocation, the preprocessor, or the lexer.
+  The preprocessor is its only writer during construction; consumers get an
+  immutable `Arc`. `SourceId` values never cross unit boundaries.
 - **AST types** live in `src/ast/`; AST semantic rules live in
   `src/ast_semantic/`. The AST must not import preprocessor internals; it only
   sees tokens and spans.
-- **Both semantic engines** are reachable through one pipeline entry point that
-  selects `Legacy`, `Ast`, or `Compare`; they share `Vec<Token>` and the
-  `SourceMap`. No engine calls the other.
+- **Both parser and semantic engine pairs** are reachable through one pipeline
+  entry point that selects `Legacy`, `Ast`, or `Compare`; they share
+  `Vec<Token>` and the unit's `SourceMap`. `parse_legacy` and `parse_ast` are
+  separate public functions; no engine calls the other for its full result.
 - **Diagnostics** stay in `src/diagnostic.rs`; the unified resolution layer is a
   thin module (for example `src/diagnostic/resolve.rs`) added when CLI
   integration starts, keeping the core type stable.
@@ -1110,6 +1615,21 @@ Risks tracked from the baseline analysis:
    guardrails.
 10. Firestorm behavior must be documented, not guessed; unknown built-ins stay
     unresolved.
+11. EOF and empty-buffer resolution are easy to get subtly wrong (offset 0,
+    synthetic anchors, `PAR013`). The Phase 1 contract tests in §7.3 are
+    mandatory, not optional.
+12. Per-unit isolation is a correctness property, not an optimization. A shared
+    macro table or a shared `SourceId` namespace would make output depend on
+    input order and break the existing per-file contract.
+13. Maintaining two parsers duplicates grammar knowledge. Shared helpers are
+    allowed only within the independence rules in §4.8 and §14; parity must be
+    proven by the differential harness, not assumed.
+14. `//fspreprocessor off` is a raw substring match, so it can trigger inside a
+    string or comment. This is intentional Firestorm-compatible behavior and
+    must not be "fixed" into comment-aware matching.
+15. `#pragma once` is supported by the pinned Boost.Wave but not proven
+    end-to-end through Firestorm's inventory include layer; keep it in the
+    separate compatibility bucket until evidence exists.
 
 Open questions to resolve during implementation (with an update to this
 document):
@@ -1119,11 +1639,9 @@ document):
 - Are related locations exposed in JSON in Phase 3, and under which schema
   versioning rule?
 - Exact CLI spelling for dialect/preprocessor/extension flags.
-- Whether `#pragma once` identity is per canonical path or per loaded
-  `SourceId` (they coincide today; the contract must state it).
-- Whether the prepared buffer is one concatenated string per run (current plan)
-  or one per file (rejected for now: a single buffer keeps token spans
-  unambiguous).
+- Whether the prepared buffer is one concatenated string per AnalysisUnit
+  (current plan) or one per file (rejected for now: a single buffer keeps token
+  spans unambiguous). It is always per unit, never per CLI invocation.
 - MSRV verification belongs in the experimental workflow as an additional step;
   it is not part of the required Phase 0 quality gate.
 
@@ -1131,26 +1649,38 @@ document):
 
 ## 18. Glossary
 
+- **AnalysisUnit:** the independent analysis of one root file or stdin stream;
+  owns its `SourceId` namespace, macro table, conditional stack, include graph,
+  `SourceMap`, and diagnostics.
 - **Prepared source / prepared buffer:** the single UTF-8 text produced by the
-  preprocessor and consumed by the lexer.
-- **Generated range:** a byte range in the prepared buffer.
-- **Source span:** a byte range in an original root/include file.
+  preprocessor and consumed by the lexer. It is not a `SourceFile`.
+- **Prepared span (`PreparedSpan`):** a byte range in the prepared buffer,
+  with no `SourceId`.
+- **Source span (`SourceSpan`):** a byte range in an original root/include file,
+  always with a real `SourceId`.
+- **EOF anchor:** a real original-file `SourceSpan` used for empty prepared
+  buffers and zero-length spans at the end of input.
 - **Origin:** one link describing where prepared bytes came from.
-- **Origin chain:** the ordered list of origins from generated bytes back to the
+- **Origin chain:** the ordered list of origins from prepared bytes back to the
   root file.
 - **Direct code:** bytes copied unchanged from a file.
 - **Identity mode:** preprocessing that copies input bytes unchanged; the
   Phase 1 default and the legacy compatibility anchor.
 - **Dialect profile:** the explicit set of language/preprocessor/extension
-  behaviors for a run (`Lsl`, `Firestorm` plus flags).
-- **Legacy engine:** the current token-based parser and semantic analyzer.
-- **AST engine:** the future AST parser and AST semantic analyzer.
+  behaviors for a unit (`Lsl`, `Firestorm` plus flags).
+- **Legacy engine:** the frozen token-based `parse_legacy` parser and legacy
+  semantic analyzer; remains public through the migration.
+- **AST engine:** the independent `parse_ast` parser and AST semantic analyzer.
+- **Parity:** agreement between legacy and AST engines on a defined diagnostic
+  multiset, or a documented and tested intentional difference.
 - **Unified diagnostics:** the layer that resolves, merges, filters, orders, and
-  renders findings from either engine.
+  renders findings from either engine and from all units.
 
 ---
 
-## 19. References in the current codebase
+## 19. References
+
+### Current codebase
 
 - Pipeline and CLI exit codes: `src/main.rs`.
 - Token model and lexing rules: `src/lexer.rs` (`Token`, `TokenKind`, `lex`).
@@ -1162,4 +1692,19 @@ document):
 - Vendored metadata: `src/builtins.rs`, `data/`.
 - Stable quality gate: `.github/workflows/ci.yml`.
 - Experimental quality gate: `.github/workflows/experimental-ci.yml`.
-- Compatibility evidence: `tests/`, `corpus/manifest.txt`, `tests/grammar_inventory.rs`.
+- Compatibility evidence: `tests/`, `corpus/manifest.txt`,
+  `tests/grammar_inventory.rs`.
+
+### External behavior evidence
+
+- Firestorm preprocessor source:
+  [`indra/newview/fslslpreproc.cpp`](https://github.com/FirestormViewer/phoenix-firestorm/blob/4643f4acb7a50624cd30acbf6ae4b5157fa207e6/indra/newview/fslslpreproc.cpp)
+  at commit `4643f4acb7a50624cd30acbf6ae4b5157fa207e6`. Marker check at lines
+  1145–1159; preprocessing/extension guards around the `preprocessor_enabled`
+  branches.
+- Firestorm Boost pin: `autobuild.xml` (`boost` dependency) at the same commit
+  references Boost 1.90.
+- Boost.Wave 1.90 `#pragma once` support:
+  `include/boost/wave/util/interpret_pragma.hpp` and
+  `include/boost/wave/wave_config.hpp` (`BOOST_WAVE_SUPPORT_PRAGMA_ONCE`
+  defaults to 1) at tag `boost-1.90.0`.
