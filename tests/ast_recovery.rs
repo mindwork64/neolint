@@ -348,7 +348,7 @@ fn recursion_skip_consumes_whole_if_else_and_do_while() {
     }
     let do_source = format!("default {{ state_entry() {{ {do_while} integer later = 1; }} }}");
 
-    for source in [if_source, do_source] {
+    for (source, is_if) in [(if_source, true), (do_source, false)] {
         let (ast, diagnostics) = parse(&source);
         assert_eq!(
             diagnostics
@@ -369,13 +369,25 @@ fn recursion_skip_consumes_whole_if_else_and_do_while() {
         let TopLevel::State(default) = &ast.items[0] else {
             panic!("state")
         };
-        assert!(local_names(default.events[0].body.as_ref().unwrap()).contains(&"later"));
         let body = default.events[0].body.as_ref().unwrap();
-        assert!(!body.statements.iter().any(|statement| {
-            matches!(
-                &statement.kind,
-                StatementKind::While(_) | StatementKind::If(_)
-            ) && statement.span.start > body.statements.last().unwrap().span.start
-        }));
+        assert_eq!(
+            body.statements.len(),
+            2,
+            "unexpected sibling nodes: {body:#?}"
+        );
+        if is_if {
+            assert!(matches!(body.statements[0].kind, StatementKind::If(_)));
+        } else {
+            assert!(matches!(body.statements[0].kind, StatementKind::DoWhile(_)));
+        }
+        assert!(matches!(body.statements[1].kind, StatementKind::Local(_)));
+        assert!(
+            !body
+                .statements
+                .iter()
+                .any(|statement| matches!(statement.kind, StatementKind::While(_))),
+            "do/while suffix leaked as a sibling: {body:#?}"
+        );
+        assert_eq!(local_names(body), vec!["later"]);
     }
 }
