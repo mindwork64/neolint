@@ -1,13 +1,14 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5 and Phase 6A implemented on the experimental branch**;
+Status: **Phases 1–5, 6A and 6B implemented on the experimental branch**;
 this document remains the normative contract for the remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
-implemented; the Phase 6A AST structural semantics foundation is implemented,
-while broader AST semantics and engine migration remain future work.
+implemented; the Phase 6A structural semantics foundation and Phase 6B
+expression-typing/call-signature rules are implemented, while broader AST
+semantics and engine migration remain future work.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -2884,7 +2885,7 @@ access/assignment/casts/indices/spans/malformed recovery and deep nesting.
 `tests/ast_bridge.rs` resolves every new node span through identity, macro and
 include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
-### Phase 6 — AST semantic analyzer and migration (Phase 6A implemented)
+### Phase 6 — AST semantic analyzer and migration (Phase 6A/6B implemented)
 
 #### Phase 6A implementation record
 
@@ -2921,6 +2922,52 @@ nested switch scopes. No intentional diagnostic deltas exist in this slice.
 or severity changes, no AST semantic rules beyond these four, and no changes to
 Legacy parser/analyzer behavior. SEM002–SEM006, SEM008–SEM019, SEM022 and SEM023
 remain Legacy-only.
+
+#### Phase 6B implementation record
+
+**Status:** implemented independently in `src/ast_semantic/{types.rs,calls.rs}`
+and focused rule modules; still not connected to `AnalysisRun`, CLI, pipeline,
+preprocessor or SourceMap. Legacy remains the only user-visible semantic engine.
+
+**Expression typing.** `infer_expression_type` operates on typed AST expressions
+and returns `Option<String>`, conservatively `None` when no type is provable. It
+covers literals, list/vector/rotation literals, visible identifiers, built-in
+constants, explicit casts, component reads, unary/binary operators, and known
+built-in/user call returns. Identifier resolution uses declaration spans so
+use-before-declaration and nested shadowing follow Legacy source-order rules.
+Function declarations are not treated as values.
+
+**Signatures.** User signatures come from the first AST function with a body;
+built-in function/event signatures and constants come from the existing vendored
+`builtins::definitions()` data. No duplicate catalogue was added. Untyped user
+functions have the Legacy `void` return type.
+
+**Rules.** SEM002/SEM004 (built-in arity/type), SEM003 (canonical event parameter
+count/type), and SEM005/SEM006 (user arity/type) are implemented in focused rule
+modules. `src/ast_semantic/calls.rs` visits every call exactly once across all
+expression-bearing fields, including switch conditions/labels/arms and lazy-list
+indices. A user function sharing a built-in name receives both checks, preserving
+Legacy multiplicity.
+
+**Recovery/suppression.** `CallExpression` stores opening/closing parenthesis
+spans and `declared_argument_count`/`arguments_complete` so syntax diagnostics
+inside an argument list suppress SEM002–SEM006 like Legacy and malformed arity is
+still counted. `EventHandler` stores `declared_parameter_count`, preserving
+malformed parameter positions for SEM003. Unknown extension events remain
+unchecked.
+SEM001 also mirrors Legacy's top-level-call-in-global-initializer quirk.
+
+**Parity.** `tests/ast_semantic_parity.rs` compares full normalized multisets for
+the nine migrated codes over every corpus fixture. Focused tests assert exact
+messages/spans for SEM002–SEM006, every expression-bearing call position,
+built-in/user name collisions, first-definition behavior, implicit conversions,
+syntax suppression, Firestorm switch/lazy traversal and malformed events. The
+type resolver has unit tests for the complete Legacy binary result matrix,
+cast pairs, components, source-order lookup and call returns. No intentional
+diagnostic deltas exist in this slice.
+
+**Boundary.** SEM008–SEM019, SEM022 and SEM023 remain Legacy-only. No CLI/pipeline
+selection, new SEM codes, severity changes or Legacy behavior changes.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
