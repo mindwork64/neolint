@@ -66,6 +66,9 @@ pub(crate) fn collect_facts<'a>(ast: &'a Ast, scopes: &ScopeTree) -> ExpressionF
                     };
                     let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
                     push_statements(&mut work, &body.statements, scope);
+                    for reference in event.recovered_parameter_references.iter().rev() {
+                        work.push(WorkItem::Expression(reference, scope));
+                    }
                 }
             }
             TopLevel::Error(_) => {}

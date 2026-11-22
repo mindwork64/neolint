@@ -106,6 +106,9 @@ fn infer_at(
         ExpressionKind::Vector(_) => Some("vector".to_owned()),
         ExpressionKind::Rotation(_) => Some("rotation".to_owned()),
         ExpressionKind::Call(call) => {
+            if !call.matched_close {
+                return None;
+            }
             let ExpressionKind::Identifier(callee) = &call.callee.kind else {
                 return None;
             };

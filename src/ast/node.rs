@@ -138,6 +138,8 @@ pub struct EventHandler {
     pub declared_parameter_count: usize,
     /// Declared type kinds in Legacy parameter-types order.
     pub declared_parameter_types: Vec<TypeKind>,
+    /// Malformed parameter identifiers retained for unresolved-variable checks.
+    pub recovered_parameter_references: Vec<Expression>,
     /// Handler body; `None` when the opening block delimiter is missing.
     pub body: Option<Block>,
 }
@@ -463,6 +465,8 @@ pub struct CallExpression {
     pub declared_argument_count: usize,
     /// Whether all argument expressions were parsed without recovery.
     pub arguments_complete: bool,
+    /// Whether a real closing parenthesis matched this call.
+    pub matched_close: bool,
     /// Arguments successfully parsed before any recovery.
     pub arguments: Vec<Expression>,
 }

@@ -1,9 +1,8 @@
 # SEM rule ownership matrix
 
-Phase 6 is incremental. Phase 6A migrated the structural rules, Phase 6B the
-call/event signature rules, Phase 6C the return/control-flow rules and Phase 6D
-the expression/assignment rules below; the remaining rules stay owned by the
-Legacy token analyzer and do not run in the AST engine yet.
+Phase 6 is incremental. Phases 6A–6E migrate the rules below; only SEM022 and
+SEM023 remain owned by the Legacy token analyzer and are not yet implemented in
+the AST engine.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -18,8 +17,8 @@ Legacy token analyzer and do not run in the AST engine yet.
 | SEM009 | `analyze_jump_labels` | `ast_semantic::flow::check_jumps` | migrated in 6C | exact | none | `sem009_and_sem010_exact_messages_and_spans`, full corpus |
 | SEM010 | `analyze_jump_labels` | `ast_semantic::flow::check_jumps` | migrated in 6C | exact | none | `sem009_and_sem010_exact_messages_and_spans`, full corpus |
 | SEM011 | `analyze_missing_return_paths` | `ast_semantic::flow::check_missing_returns` | migrated in 6C | exact | none | `sem011_exact_message_and_span`, full corpus |
-| SEM012 | `analyze_unresolved_variables` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM013 | `analyze_deprecated_function_calls` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
+| SEM012 | `analyze_unresolved_variables` | `ast_semantic::rules::unresolved_variables` | migrated in 6E | exact | none | `sem012_exact_warning_and_suppression_boundaries`, full corpus |
+| SEM013 | `analyze_deprecated_function_calls` | `ast_semantic::rules::deprecated_calls` | migrated in 6E | exact | none | `sem013_exact_warning_and_canonical_metadata`, full corpus |
 | SEM014 | `analyze_explicit_casts` | `ast_semantic::rules::explicit_casts` | migrated in 6D | exact | none | `sem014_exact_cast_message_and_target_span`, full corpus |
 | SEM015 | `analyze_variable_initializers` | `ast_semantic::rules::variable_initializers` | migrated in 6D | exact | none | `sem015_exact_initializer_message_and_name_span`, full corpus |
 | SEM016 | `analyze_variable_assignments` | `ast_semantic::rules::assignments` | migrated in 6D | exact | none | `sem016_exact_assignment_message_and_target_span`, full corpus |
@@ -146,3 +145,24 @@ Legacy token analyzer and do not run in the AST engine yet.
 - SEM019 marks all recognized component write targets first, then reports
   invalid component reads; a write is never double-reported as a read.
 - Unknown/unresolved types and malformed/Error expressions remain conservative.
+
+## Phase 6E symbol warnings and deprecated calls
+
+- SEM012 consumes source-ordered `ExpressionSite`s. Visible variables/parameters
+  resolve through `ScopeTree::lookup_value_at`; canonical constants are known;
+  direct call callees are not variable references.
+- Unknown-call argument ranges suppress SEM012 only when the AST has a real
+  matched closing parenthesis. Identifiers in malformed/unmatched calls remain
+  eligible, matching Legacy's lack of a suppression range.
+- Unknown extension event bodies suppress SEM012 only when the state and event
+  bodies are structurally closed. Canonical event bodies are analyzed normally.
+- SEM013 is independent: it uses only `definitions().deprecated_functions`,
+  suppresses user-function shadowing, requires a real matched close, ignores
+  syntax errors inside matched arguments and is unaffected by SEM012's unknown
+  event/call boundaries. Candidates are sorted by callee source offset.
+- `CallExpression::matched_close` is additive parser metadata distinguishing a
+  real `)` from malformed-call recovery; no parser diagnostics changed.
+  Malformed unmatched calls retain eligible identifier expressions for SEM012
+  without creating an argument suppression range. Malformed event parameter
+  identifiers are likewise retained as recovered references, without treating
+  them as declared parameters.

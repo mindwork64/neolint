@@ -25,6 +25,7 @@ struct ParsedArguments {
     complete: bool,
     close_span: Span,
     declared_count: usize,
+    matched_close: bool,
 }
 
 struct Parser<'a> {
@@ -372,6 +373,7 @@ impl<'a> Parser<'a> {
                                     .iter()
                                     .map(|parameter| parameter.ty.kind)
                                     .collect(),
+                                recovered_parameter_references: Vec::new(),
                                 parameters,
                                 body,
                             });
@@ -396,6 +398,8 @@ impl<'a> Parser<'a> {
                                         .count_declared_parameters(parameter_open, close),
                                     declared_parameter_types: self
                                         .parameter_type_kinds_between(parameter_open, close),
+                                    recovered_parameter_references: self
+                                        .recover_parameter_references(parameter_open, close),
                                     body: Some(body),
                                 });
                             } else {
@@ -1272,6 +1276,7 @@ impl<'a> Parser<'a> {
                         close_paren_span: parsed.close_span,
                         declared_argument_count: parsed.declared_count,
                         arguments_complete: parsed.complete,
+                        matched_close: parsed.matched_close,
                         arguments: parsed.arguments,
                     }),
                 };
@@ -1537,21 +1542,35 @@ impl<'a> Parser<'a> {
                 complete: true,
                 close_span: self.previous_span(),
                 declared_count: 0,
+                matched_close: true,
             });
         }
         loop {
             let Some(expression) = self.parse_expression_at(1, depth) else {
                 self.synchronize_arguments();
-                if self.current == 0 || self.tokens[self.current - 1].kind != TokenKind::RParen {
-                    return None;
+                if self.current > 0 && self.tokens[self.current - 1].kind == TokenKind::RParen {
+                    let close = self.current - 1;
+                    return Some(ParsedArguments {
+                        arguments,
+                        complete: false,
+                        close_span: self.tokens[close].span,
+                        declared_count: self.count_call_arguments(open, close),
+                        matched_close: true,
+                    });
                 }
-                let close = self.current - 1;
-                return Some(ParsedArguments {
-                    arguments,
-                    complete: false,
-                    close_span: self.tokens[close].span,
-                    declared_count: self.count_call_arguments(open, close),
-                });
+                if arguments.is_empty() && self.check(TokenKind::Semicolon) {
+                    let recovered = self.recover_argument_identifiers(open + 1, self.current);
+                    if !recovered.is_empty() {
+                        return Some(ParsedArguments {
+                            declared_count: recovered.len(),
+                            arguments: recovered,
+                            complete: false,
+                            close_span: self.here_span(),
+                            matched_close: false,
+                        });
+                    }
+                }
+                return None;
             };
             arguments.push(expression);
             if !self.matches(TokenKind::Comma) {
@@ -1565,19 +1584,32 @@ impl<'a> Parser<'a> {
                 arguments,
                 complete: true,
                 close_span: self.tokens[close].span,
+                matched_close: true,
             });
         }
-        let close = self.matching_call_close(open)?;
-        while self.current <= close {
-            self.advance();
+        if let Some(close) = self.matching_call_close(open) {
+            while self.current <= close {
+                self.advance();
+            }
+            let declared_count = self.count_call_arguments(open, close);
+            return Some(ParsedArguments {
+                arguments,
+                complete: false,
+                close_span: self.tokens[close].span,
+                declared_count,
+                matched_close: true,
+            });
         }
-        let declared_count = self.count_call_arguments(open, close);
-        Some(ParsedArguments {
-            arguments,
-            complete: false,
-            close_span: self.tokens[close].span,
-            declared_count,
-        })
+        if self.check(TokenKind::Semicolon) {
+            return Some(ParsedArguments {
+                declared_count: arguments.len(),
+                arguments,
+                complete: false,
+                close_span: self.here_span(),
+                matched_close: false,
+            });
+        }
+        None
     }
 
     fn matching_call_close(&self, open: usize) -> Option<usize> {
@@ -2249,6 +2281,74 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    fn recover_parameter_references(&self, open: usize, close: usize) -> Vec<Expression> {
+        let mut expressions = Vec::new();
+        let mut index = open + 1;
+        while index < close {
+            if self.tokens[index].kind != TokenKind::Identifier {
+                index += 1;
+                continue;
+            }
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| self.tokens.get(index));
+            let next = self.tokens.get(index + 1);
+            if previous.is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Dot | TokenKind::At | TokenKind::KwJump | TokenKind::KwState
+                ) || is_type_token(token.kind)
+            }) || next.is_some_and(|token| token.kind == TokenKind::LParen)
+            {
+                index += 1;
+                continue;
+            }
+            expressions.push(Expression {
+                span: self.tokens[index].span,
+                kind: ExpressionKind::Identifier(Identifier {
+                    name: self.tokens[index].lexeme.clone(),
+                    span: self.tokens[index].span,
+                }),
+            });
+            index += 1;
+        }
+        expressions
+    }
+
+    fn recover_argument_identifiers(&self, start: usize, end: usize) -> Vec<Expression> {
+        let mut expressions = Vec::new();
+        let mut index = start;
+        while index < end {
+            if self.tokens[index].kind != TokenKind::Identifier {
+                index += 1;
+                continue;
+            }
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| self.tokens.get(index));
+            let next = self.tokens.get(index + 1);
+            if previous.is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Dot | TokenKind::At | TokenKind::KwJump | TokenKind::KwState
+                ) || is_type_token(token.kind)
+            }) || next.is_some_and(|token| token.kind == TokenKind::LParen)
+            {
+                index += 1;
+                continue;
+            }
+            expressions.push(Expression {
+                span: self.tokens[index].span,
+                kind: ExpressionKind::Identifier(Identifier {
+                    name: self.tokens[index].lexeme.clone(),
+                    span: self.tokens[index].span,
+                }),
+            });
+            index += 1;
+        }
+        expressions
     }
 
     fn recover_return_flow_nodes(

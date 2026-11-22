@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 const MIGRATED: &[&str] = &[
     "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM008", "SEM009",
-    "SEM010", "SEM011", "SEM014", "SEM015", "SEM016", "SEM017", "SEM018", "SEM019", "SEM020",
-    "SEM021",
+    "SEM010", "SEM011", "SEM012", "SEM013", "SEM014", "SEM015", "SEM016", "SEM017", "SEM018",
+    "SEM019", "SEM020", "SEM021",
 ];
 
 type Normalized = (
@@ -99,7 +99,7 @@ fn visit_lsl(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn corpus_nineteen_migrated_rules_match_legacy_exactly() {
+fn corpus_twenty_one_migrated_rules_match_legacy_exactly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut files = Vec::new();
     visit_lsl(&root, &mut files);
@@ -938,7 +938,18 @@ fn switch_case_expressions_use_switch_scope() {
     let (ast, syntax) =
         parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
     let ast_semantic = analyze_ast(&ast, &syntax);
-    assert_eq!(normalize(&legacy), normalize(&ast_semantic));
+    // Legacy does not understand Firestorm switch syntax and can treat the
+    // contextual `case` word as an unresolved identifier; SEM012 is not an
+    // oracle for this extension-only source.
+    let legacy = normalize(&legacy)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.0 != "SEM012")
+        .collect::<Vec<_>>();
+    let ast_normalized = normalize(&ast_semantic)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.0 != "SEM012")
+        .collect::<Vec<_>>();
+    assert_eq!(legacy, ast_normalized);
     assert!(ast_semantic.iter().any(|diagnostic| {
         diagnostic.code == "SEM006"
             && diagnostic.message == "takes argument 1 has type string, expected integer"
@@ -1757,4 +1768,224 @@ fn firestorm_switch_initializers_are_validated_without_speculation() {
         2,
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn focused_symbol_warning_parity() {
+    for source in [
+        "default { state_entry() { llOwnerSay(missing); } }",
+        "integer global; default { state_entry() { integer local; llOwnerSay(global); llOwnerSay(local); } }",
+        "integer f(integer parameter) { return parameter; } default { }",
+        "default { state_entry(integer parameter) { llOwnerSay(parameter); } }",
+        "default { state_entry() { llOwnerSay(later); integer later; } }",
+        "default { state_entry() { llOwnerSay((string)TRUE); } }",
+        "integer f() { @label; jump label; state default; return 1; } default { }",
+        "vector v; default { state_entry() { float x = v.x; } }",
+        "default { state_entry() { unknown_function(missing, (integer)other, [third]); } }",
+        "default { state_entry() { unknown_function(llOwnerSay(missing)); } }",
+        "default { state_entry() { llOwnerSay((string)unknown_function(missing)); } }",
+        "default { state_entry() { llOwnerSay(missing); unknown_function(other); } }",
+        "default { custom_event() { llOwnerSay(missing); } }",
+        "default { state_entry() { llOwnerSay(missing); } }",
+        "integer f() { return 1; } default { state_entry() { llOwnerSay(f); } }",
+        "default { state_entry() { unknown_function(missing; } }",
+        "default { state_entry() { llOwnerSay(missing); llOwnerSay(missing); } }",
+        "default { state_entry() { integer x; x = missing; } }",
+        "default { state_entry() { if (missing) { } } }",
+        "default { state_entry() { for (missing; missing; missing) { } } }",
+        "default { custom_event(integer provided) { llOwnerSay(provided); } }",
+        "default { custom_event() { llOwnerSay(missing);",
+        "default { state_entry() { unknown_function(missing, nested(other)); } }",
+        "default { state_entry() { unknown_function(, missing; } }",
+        "default { state_entry() { unknown_function(1 + ; } }",
+        "default { state_entry() { llOwnerSay((string)unknown_function(missing)); } }",
+    ] {
+        assert_parity(source);
+    }
+}
+
+fn expected_warning(
+    code: &'static str,
+    kind: neolint::DiagnosticKind,
+    message: String,
+    source: &str,
+    start: usize,
+    len: usize,
+) -> Diagnostic {
+    Diagnostic {
+        code,
+        severity: neolint::Severity::Warning,
+        kind,
+        message,
+        span: span(source, start, len),
+    }
+}
+
+#[test]
+fn sem012_exact_warning_and_suppression_boundaries() {
+    let source = "default { state_entry() { llOwnerSay(missing); } }";
+    let missing = source.find("missing").unwrap();
+    assert_eq!(
+        migrated(&semantic(source)).into_iter().cloned().collect::<Vec<_>>(),
+        vec![expected_warning(
+            "SEM012",
+            neolint::DiagnosticKind::Semantic,
+            "variable 'missing' is not declared in the current script; verify that it is provided by the scripting environment".to_owned(),
+            source,
+            missing,
+            "missing".len()
+        )]
+    );
+
+    let source = "default { state_entry() { unknown_function(missing, other); } }";
+    assert!(!semantic(source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM012"));
+
+    let source = "default { custom_event() { llOwnerSay(missing); } }";
+    assert!(!semantic(source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM012"));
+
+    let source = "default { state_entry() { llOwnerSay(missing); } }";
+    assert!(semantic(source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM012"));
+
+    let source = "default { state_entry() { unknown_function(missing; } }";
+    assert_eq!(
+        semantic(source)
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM012")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn sem013_exact_warning_and_canonical_metadata() {
+    let names = neolint::builtins::definitions()
+        .deprecated_functions
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!names.is_empty());
+    for name in &names {
+        let source = format!("default {{ state_entry() {{ {name}(); }} }}");
+        let diagnostics = semantic(&source);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "SEM013")
+                .count(),
+            1,
+            "{name}: {diagnostics:?}"
+        );
+        let expected_span = span(&source, source.find(name).unwrap(), name.len());
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "SEM013"
+                && diagnostic.severity == neolint::Severity::Warning
+                && diagnostic.kind == neolint::DiagnosticKind::Lint
+                && diagnostic.message == format!("call to deprecated LSL function '{name}'")
+                && diagnostic.span == expected_span
+        }));
+        assert_parity(&source);
+    }
+
+    let name = names[0].clone();
+    let source =
+        format!("integer {name}() {{ return 1; }} default {{ state_entry() {{ {name}(); }} }}");
+    assert!(!semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+    assert_parity(&source);
+
+    let source = format!("default {{ custom_event() {{ {name}(); }} }}");
+    assert!(semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+    assert_parity(&source);
+
+    let source = format!("default {{ state_entry() {{ unknown_function({name}()); }} }}");
+    assert!(semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+    assert_parity(&source);
+}
+
+#[test]
+fn sem013_ignores_declarations_and_unmatched_calls() {
+    let name = neolint::builtins::definitions()
+        .deprecated_functions
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    let source = format!("integer {name}; default {{ }}");
+    assert!(!semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+    assert_parity(&source);
+
+    let source = format!("default {{ state_entry() {{ {name}(; }} }}");
+    assert!(!semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+}
+
+#[test]
+fn sem012_preserves_source_order_and_multiplicity() {
+    let source =
+        "default { state_entry() { llOwnerSay(first); llOwnerSay(second); llOwnerSay(first); } }";
+    let diagnostics = semantic(source);
+    let unresolved = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "SEM012")
+        .collect::<Vec<_>>();
+    assert_eq!(unresolved.len(), 3, "{diagnostics:?}");
+    assert!(unresolved
+        .windows(2)
+        .all(|pair| pair[0].span.start <= pair[1].span.start));
+    assert_parity(source);
+}
+
+#[test]
+fn sem013_matched_malformed_arguments_still_warn() {
+    let name = neolint::builtins::definitions()
+        .deprecated_functions
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    let source = format!("default {{ state_entry() {{ {name}(,); }} }}");
+    assert!(semantic(&source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM013"));
+    assert_parity(&source);
+}
+
+#[test]
+fn sem013_preserves_source_order_for_nested_calls() {
+    let names = neolint::builtins::definitions()
+        .deprecated_functions
+        .iter()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    if names.len() < 2 {
+        return;
+    }
+    let source = format!(
+        "default {{ state_entry() {{ {outer}({inner}()); }} }}",
+        outer = names[0],
+        inner = names[1]
+    );
+    let diagnostics = semantic(&source);
+    let deprecated = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "SEM013")
+        .collect::<Vec<_>>();
+    assert_eq!(deprecated.len(), 2, "{diagnostics:?}");
+    assert!(deprecated[0].span.start <= deprecated[1].span.start);
+    assert_parity(&source);
 }

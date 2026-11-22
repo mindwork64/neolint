@@ -28,7 +28,7 @@ pub(crate) fn check(
         let Some(signature) = builtins::definitions().functions.get(callee.name.as_str()) else {
             continue;
         };
-        if call_contains_syntax_error(site, syntax_diagnostics) {
+        if !site.call.matched_close || call_contains_syntax_error(site, syntax_diagnostics) {
             continue;
         }
         let expected_count = signature.parameters.len();
