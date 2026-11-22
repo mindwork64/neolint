@@ -1050,6 +1050,14 @@ fn binary_precedence(kind: TokenKind) -> Option<(u8, bool)> {
 /// synchronization boundaries. Tested malformed input is handled without a
 /// panic, but extremely deep nesting remains a documented practical limitation.
 pub fn parse(tokens: &[Token]) -> Vec<Diagnostic> {
+    parse_legacy(tokens)
+}
+
+/// Explicit legacy parser entry point.
+///
+/// This is the independently callable token-scanning parser. [`parse`] remains a
+/// frozen alias with the same behavior.
+pub fn parse_legacy(tokens: &[Token]) -> Vec<Diagnostic> {
     Parser::new(tokens).run()
 }
 

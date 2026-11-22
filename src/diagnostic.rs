@@ -6,6 +6,8 @@
 //! it as human-readable text or JSON.
 use std::fmt;
 
+pub mod resolve;
+
 /// Zero-based byte offsets and one-based human-readable line/column positions.
 /// Source range and position metadata for a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
