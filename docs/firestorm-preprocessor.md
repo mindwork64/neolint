@@ -52,8 +52,17 @@ include directories. URL/FTP/UNC paths are rejected. See
 Firestorm's inventory-based include hook has not been proven end-to-end, so this
 is not part of the guaranteed Firestorm compatibility suite.
 
+## Switch and lazy-list syntax
+
+Phase 3's preprocessor does not rewrite `switch`/`case`/`default`/`break` or
+lazy-list indexing. Phase 5 adds independent effective gates and a separate AST
+representation of the original source constructs in
+`parse_ast_with_options`; the CLI still runs the Legacy engine. The gates are
+driven by `PreprocessSettings` and the active `USE_SWITCHES`/`USE_LAZY_LISTS`
+macros, with `//fspreprocessor off` taking priority.
+
 ## Not implemented
 
-Dynamic built-ins, GNU comma-swallowing, `__VA_OPT__`, Firestorm switch/lazy-list
-syntax, Firestorm-specific file enumeration, viewer inventory, and viewer
-optimizer/compression transforms are outside Phase 3.
+Dynamic built-ins, GNU comma-swallowing, `__VA_OPT__`, source-to-source switch or
+lazy-list rewriting, Firestorm-specific file enumeration, viewer inventory, and
+viewer optimizer/compression transforms are outside Phase 5.

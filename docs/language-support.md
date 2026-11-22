@@ -57,6 +57,68 @@ Vector variables support `.x`, `.y`, and `.z`. Rotation variables support `.x`, 
 
 Identifiers are currently ASCII-only. Non-ASCII characters are accepted inside comments and string contents, but not in identifiers.
 
+## Firestorm extensions (opt-in)
+
+Firestorm's LSL preprocessor supports several syntax extensions. Neolint parses
+them only in the independent AST engine and only when the corresponding gate is
+enabled; the normal legacy CLI path and plain LSL parsing do not accept them.
+The preprocessor dialect alone does not enable either extension.
+
+### Switches
+
+With `switches` enabled, the AST parser accepts Firestorm `switch` statements:
+
+```lsl
+switch (value)
+{
+    case 1:
+        first();
+    case 2:
+        second();
+        break;
+    default:
+        third();
+}
+```
+
+Case order and fallthrough are preserved. Missing `break` is therefore not an
+error and is not converted into an isolated block. `default` is optional,
+duplicate cases/defaults are retained as separate AST arms, and nested switches
+and case blocks are supported. `break;` is contextual: inside a switch it is a
+break statement (including inside nested blocks); outside a switch it remains an
+ordinary identifier expression.
+
+### Lazy lists
+
+With `lazy_lists` enabled, the AST parser represents these Firestorm-confirmed
+forms:
+
+```lsl
+myList[index] = value;          // single-index assignment
+(integer)myList[index];         // typed extraction
+(string)myList[index];
+(list)myList[index];
+(list)myList[first,last];       // list range extraction
+```
+
+Supported typed extractions are integer, float, string, key, vector, rotation,
+and list. The typed reference may be fully parenthesized. The parser preserves
+LHS/RHS/index structure and spans; it does not rewrite source to
+`lazy_list_set` or `llList2*`. Bare reads without a typed cast, compound indexed
+assignment, deletion, more than two indices, and non-identifier bases are not
+part of confirmed Firestorm behavior and are not promised here. `quaternion` is
+not added to the type system.
+
+### Enabling gates
+
+The preprocessing API exposes independent `switches` and `lazy_lists` settings,
+and Firestorm's `USE_SWITCHES`/`USE_LAZY_LISTS` macros are detected from the real
+active macro state (including includes) and latch once defined. The
+`//fspreprocessor off` kill switch disables preprocessing and both extensions.
+`PreparedSource` exposes the effective gates; pass them to
+`AstParseOptions`/`parse_ast_with_options`. The CLI still runs the Legacy engine
+and does not expose an AST mode.
+
 ## Built-in functions and events
 
 Built-in functions, event-handler signatures, and constants are based on the canonical LSL definitions published by [Second Life](https://github.com/secondlife/lsl-definitions). Neolint also warns about calls to canonical LSL functions marked as deprecated.
