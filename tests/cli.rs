@@ -805,6 +805,39 @@ fn json_object_is_structurally_valid(text: &str) -> bool {
     json_is_structurally_valid(text, '{', '}')
 }
 
+/// Rules whose human compare line reports a non-zero or unknown delta.
+fn divergent_rules(stderr: &str) -> std::collections::BTreeSet<String> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let (_, after_rule) = line.split_once(" rule ")?;
+            let (code, fields) = after_rule.split_once(':')?;
+            if !code.starts_with("SEM") {
+                return None;
+            }
+            let field_value = |name: &str| {
+                fields
+                    .split_whitespace()
+                    .find_map(|field| field.strip_prefix(name))
+            };
+            let missing = field_value("missing=")?;
+            let extra = field_value("extra=")?;
+            (missing != "0" || extra != "0").then(|| code.to_owned())
+        })
+        .collect()
+}
+
+/// Assert the only cross-engine semantic divergence is the documented SEM002.
+fn assert_only_sem002_diverges(stderr: &str) {
+    assert_eq!(
+        divergent_rules(stderr),
+        ["SEM002".to_owned()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        "expected exactly SEM002 to diverge: {stderr}"
+    );
+}
+
 #[test]
 fn global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039() {
     let directory = temporary_directory();
@@ -1226,29 +1259,7 @@ fn compare_exit_codes_follow_mismatch_and_failure_precedence() {
         stderr.contains("rule SEM002: legacy=1 ast=0 missing=1 extra=0"),
         "{stderr}"
     );
-    let nonzero_rule_deltas: std::collections::BTreeSet<String> = stderr
-        .lines()
-        .filter_map(|line| {
-            let (_, after_rule) = line.split_once(" rule ")?;
-            let (code, fields) = after_rule.split_once(':')?;
-            if !code.starts_with("SEM") {
-                return None;
-            }
-            let field_value = |name: &str| {
-                fields
-                    .split_whitespace()
-                    .find_map(|field| field.strip_prefix(name))
-            };
-            let missing = field_value("missing=")?;
-            let extra = field_value("extra=")?;
-            (missing != "0" || extra != "0").then(|| code.to_owned())
-        })
-        .collect();
-    assert_eq!(
-        nonzero_rule_deltas,
-        ["SEM002".to_owned()].into_iter().collect(),
-        "the documented fixture divergence must be exactly SEM002: {stderr}"
-    );
+    assert_only_sem002_diverges(&stderr);
     assert!(
         stderr.contains("missing SEM002 error semantic message="),
         "{stderr}"
@@ -1393,6 +1404,7 @@ fn compare_report_is_computed_before_config_filtering() {
         stderr.contains("rule SEM002: legacy=1 ast=0 missing=1 extra=0"),
         "{stderr}"
     );
+    assert_only_sem002_diverges(&stderr);
     assert!(stderr.contains("missing SEM002 error semantic"), "{stderr}");
 
     let downgraded = run_args(&[
@@ -1406,6 +1418,7 @@ fn compare_report_is_computed_before_config_filtering() {
     let stdout = String::from_utf8(downgraded.stdout).unwrap();
     assert!(stdout.contains("warning[SEM002]"), "{stdout}");
     let stderr = String::from_utf8(downgraded.stderr).unwrap();
+    assert_only_sem002_diverges(&stderr);
     assert!(stderr.contains("missing SEM002 error semantic"), "{stderr}");
     assert!(!stderr.contains("missing SEM002 warning"), "{stderr}");
 

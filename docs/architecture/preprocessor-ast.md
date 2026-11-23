@@ -2150,8 +2150,9 @@ Requirements:
 - Exceeding a preprocessor or AST limit produces a single, specific `PRE`/`AST`
   diagnostic and stops the affected expansion; the rest of the unit continues.
   The compare fingerprint budget is different: it emits no diagnostic at all.
-  It marks the comparison incomplete (`comparison_complete = false`) and the
-  Compare CLI then exits 3 instead of claiming parity.
+  It marks the comparison incomplete (`comparison_complete = false`), and the
+  Compare CLI then exits 3 instead of claiming parity, unless an earlier input
+  or configuration failure already forces exit 2.
 - The 100,000-fingerprint compare budget is checked by a cheap `[usize; 23]`
   counting pass **before** any fingerprint is materialised. It counts only
   `SEM001`..=`SEM023`, so a long stream of `LEX`/`PAR`/`PRE` findings never
@@ -2312,6 +2313,11 @@ Requirements:
 9. **Fallback/fuzz-style tests without dependencies**: deterministic generators
    over token/directive alphabets, bounded by iteration counts, run in normal
    `cargo test`.
+10. **Allocation-counted work-bound proof**: `tests/compare_budget_enforcement.rs`
+    uses a test-only counting `GlobalAlloc` to show that the over-budget
+    comparator performs a constant number of allocation calls and constant byte
+    volume, proving the SEM fingerprint budget is enforced before
+    materialisation.
 
 ### Requirements
 
@@ -3354,9 +3360,11 @@ corpus-relative; Compare reports the genuine delta.
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 797 passed, 0 failed.
-- `cargo test --release --all-targets --all-features` → exit 0, 797 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 797 passed.
+- `cargo test --all-targets --all-features` → exit 0, 803 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 803 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 803 passed.
+- `cargo test --test compare_budget_enforcement -- --nocapture` → exit 0;
+  N+1 and 2N+1 comparator calls each allocate 1 time / 2576 bytes.
 - `cargo test --test legacy_golden` → exit 0, 2 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
