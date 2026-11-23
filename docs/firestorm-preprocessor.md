@@ -56,8 +56,10 @@ is not part of the guaranteed Firestorm compatibility suite.
 
 Phase 3's preprocessor does not rewrite `switch`/`case`/`default`/`break` or
 lazy-list indexing. Phase 5 adds independent effective gates and a separate AST
-representation of the original source constructs in
-`parse_ast_with_options`; the CLI still runs the Legacy engine. The gates are
+representation of the original source constructs in `parse_ast_with_options`.
+The CLI runs the AST engine by default on the experimental Phase 6H branch, so
+these constructs are parsed when the gates are on; explicit `--engine legacy`
+runs the Legacy engine, which does not parse them. The gates are
 driven by `PreprocessSettings` and the active `USE_SWITCHES`/`USE_LAZY_LISTS`
 macros, with `//fspreprocessor off` taking priority.
 

@@ -191,7 +191,21 @@ pub(crate) fn cap_rendered(
     prepared: &crate::preprocessor::PreparedSource,
     rendered: &mut Vec<crate::diagnostic::resolve::RenderedDiagnostic>,
 ) -> Result<(), crate::source::map::SpanError> {
+    cap_rendered_with(prepared, rendered, |_| true)
+}
+
+/// Drop diagnostics rejected by `keep` in place, then apply the rendered cap.
+///
+/// The predicate runs before the limit check so display-suppressed findings
+/// cannot trigger [`PRE_DIAGNOSTIC_OVERFLOW`]. `retain` compacts the existing
+/// vector; no second diagnostic collection is allocated.
+pub(crate) fn cap_rendered_with(
+    prepared: &crate::preprocessor::PreparedSource,
+    rendered: &mut Vec<crate::diagnostic::resolve::RenderedDiagnostic>,
+    mut keep: impl FnMut(&crate::diagnostic::resolve::RenderedDiagnostic) -> bool,
+) -> Result<(), crate::source::map::SpanError> {
     use crate::diagnostic::resolve::RenderedDiagnostic;
+    rendered.retain(&mut keep);
     if rendered.len() <= MAX_TOTAL_DIAGNOSTICS {
         return Ok(());
     }

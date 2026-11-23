@@ -1,8 +1,8 @@
 //! Independent semantic analysis over the typed AST.
 //!
 //! Phases 6A–6F implement all existing SEM001–SEM023 diagnostics without token
-//! scanning. The module is not wired into the CLI or pipeline and does not import
-//! preprocessor or SourceMap internals.
+//! scanning. The AST engine invokes this analyzer for AST and Compare analysis;
+//! the module remains independent of preprocessor and SourceMap internals.
 
 pub mod scopes;
 

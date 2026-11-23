@@ -34,9 +34,9 @@ pub use diagnostic::resolve::{
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 pub use engine::{
-    compare_semantic_diagnostics, AnalysisEngine, DiagnosticFingerprint, EngineAnalysisError,
-    EngineAnalysisOptions, EngineComparisonReport, RuleComparison, RunEngineAnalysis,
-    UnitComparison, UnitEngineAnalysis, MAX_COMPARE_DETAILS_PER_RULE,
+    compare_semantic_diagnostics, AnalysisEngine, DiagnosticFingerprint, DisplaySuppression,
+    EngineAnalysisError, EngineAnalysisOptions, EngineComparisonReport, RuleComparison,
+    RunEngineAnalysis, UnitComparison, UnitEngineAnalysis, MAX_COMPARE_DETAILS_PER_RULE,
     MAX_COMPARE_FINGERPRINTS_PER_ENGINE, SEM_CODES,
 };
 pub use lexer::{lex, Token, TokenKind};

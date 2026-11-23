@@ -9,7 +9,8 @@ disable = SEM001, SEM003
 # Keep the diagnostic but make it non-failing
 severity.SEM004 = warning
 
-# Select the analysis engine; legacy is the default
+# Select the analysis engine; AST is the default on the Phase 6H branch.
+# Keep this line to restore the historical Legacy pipeline.
 engine = legacy
 ```
 
@@ -24,19 +25,53 @@ Blank lines and text after `#` are ignored. Leading and trailing whitespace is i
 | `preprocess = true\|false` | Enable/disable full preprocessing. |
 | `dialect = lsl\|firestorm` | Select the preprocessing dialect; `firestorm` enables preprocessing. |
 | `include_dir = PATH` | Add an include search directory (repeatable). |
-| `engine = legacy\|ast\|compare` | Select the analysis engine; `legacy` is the default. |
+| `engine = legacy\|ast\|compare` | Select the analysis engine; `ast` is the default on the experimental Phase 6H branch, and `legacy` restores the historical pipeline. |
 
-Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, and invalid engine values cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `legacy`.
+Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, and invalid engine values cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `ast` on the experimental Phase 6H branch; add `engine = legacy` to restore the historical Legacy pipeline.
 
 Multiple `severity.*` lines, multiple `disable` lines, and multiple `include_dir` lines are supported. Disabled-rule filtering and severity overrides are applied only to displayed diagnostics, before CLI overrides. Include directories preserve file order; quoted includes search the including file's directory first. `#pragma once` is a neolint convenience, not a verified Firestorm guarantee.
 
 ## Precedence
 
-1. Default diagnostic severity and the default `engine = legacy`.
+1. Default diagnostic severity and the default `engine = ast` on the experimental Phase 6H branch.
 2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, and `engine`.
 3. Command-line `--disable`, `--severity`, `--dialect`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
 
 The command line wins for the same rule. A non-empty CLI include-directory list replaces the configured list; CLI `--dialect` overrides the configured dialect; CLI `--engine` overrides the configured engine. Rule disabling and severity overrides affect only the displayed diagnostic stream: a disabled rule does not appear in that stream, and a severity of `warning` or `info` does not cause exit code 1 unless changed to `error`. In `--engine compare` mode the parity report is computed from the raw pre-configuration streams, so it can still report a disabled rule and select exit code 3; severity overrides do not change the report's raw severities.
+
+## Migration note (Phase 6H)
+
+On the experimental Phase 6H branch, AST is the default engine. Existing
+configuration files without an `engine` line now select AST, and the library
+default `LintConfig::default()` does too. This is a behavioral default change
+even though the Rust signatures are unchanged.
+
+- Add `engine = legacy` to a configuration file, or pass `--engine legacy`, to
+  restore the historical Legacy pipeline.
+- The stable `main` branch and the published v1.0.0 release are unaffected.
+- The default no-preprocess AST run is unit-based and capped at 10,000 rendered
+  diagnostics per unit plus the invocation-wide limit; overflow appends a
+  terminal `PRE039` and exits 1. Explicit Legacy without preprocessing remains
+  uncapped.
+- Unit-based runs of every engine, including `--engine legacy --preprocess`,
+  apply display suppression before the rendered-diagnostic cap, so disabling a
+  rule can avoid a terminal `PRE039`.
+- The stdin label follows the preparation path, not the engine: unit-based runs
+  (default AST, explicit `--engine ast`/`--engine compare`, and any preprocessed
+  run including `--engine legacy --preprocess`) render `<stdin>`; only the
+  direct plain-Legacy path (preprocessing off) renders `-`.
+- Firestorm `switch` statements are accepted by AST when the switches gate is
+  enabled; explicit Legacy rejects them.
+- An event or declaration identifier that collides with a builtin name is a
+  Legacy-only `SEM002` error; `default { llSay() { } }` is an error under Legacy
+  and clean under AST.
+- Without preprocessing, a raw `#define` reports `LEX000` under both engines;
+  Legacy also emits `SEM012` for `define` and the macro name, while AST does not.
+- Diagnostic ordering follows each engine's pass order, so AST and Legacy can
+  order the same findings differently. Neither stream is globally sorted.
+
+The SEM002 and `#define` differences are accepted AST/Legacy deltas analyzed in
+the [Phase 6H implementation record](architecture/preprocessor-ast.md#phase-6h-implementation-record).
 
 ## Examples
 

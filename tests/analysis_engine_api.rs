@@ -6,7 +6,8 @@
 use neolint::preprocessor::PreprocessSettings;
 use neolint::{
     lex, parser::parse_legacy, AnalysisEngine, AnalysisRun, AstParseOptions, DiagnosticKind,
-    EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity, Span, SpanError,
+    DisplaySuppression, EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity,
+    Span, SpanError,
 };
 
 fn assert_legacy_equal(left: &[RenderedDiagnostic], right: &[RenderedDiagnostic]) {
@@ -20,7 +21,7 @@ fn assert_legacy_equal(left: &[RenderedDiagnostic], right: &[RenderedDiagnostic]
 
 #[test]
 fn selector_contract_is_exact() {
-    assert_eq!(AnalysisEngine::default(), AnalysisEngine::Legacy);
+    assert_eq!(AnalysisEngine::default(), AnalysisEngine::Ast);
     for (value, expected) in [
         ("legacy", AnalysisEngine::Legacy),
         ("ast", AnalysisEngine::Ast),
@@ -35,6 +36,18 @@ fn selector_contract_is_exact() {
     assert!(!AnalysisEngine::Legacy.requires_prepared_source());
     assert!(AnalysisEngine::Ast.requires_prepared_source());
     assert!(AnalysisEngine::Compare.requires_prepared_source());
+}
+
+#[test]
+fn legacy_parse_alias_is_identical_to_parse_legacy() {
+    for source in [
+        "integer g;\ndefault { state_entry() { llSay(0); } }",
+        "default { state_entry() { integer x = ; llSay(0); } }",
+        "#define WIDTH 2\ninteger x = WIDTH;\ndefault { state_entry() { } }\n",
+    ] {
+        let (tokens, _) = lex(source);
+        assert_eq!(neolint::parse(&tokens), parse_legacy(&tokens), "{source:?}");
+    }
 }
 
 #[test]
@@ -262,6 +275,34 @@ fn frozen_analyze_signatures_and_error_conversion_are_stable() {
 }
 
 #[test]
+fn frozen_run_analyze_equals_concatenated_unit_analyses() {
+    let mut run = AnalysisRun::new().unwrap();
+    let plain = run
+        .add_legacy_text(
+            "plain.lsl",
+            "integer g;\ninteger g;\ndefault { state_entry() { llSay(0); } }",
+        )
+        .unwrap();
+    let prepared = run
+        .add_prepared_text(
+            "prepared.lsl",
+            "default { state_entry() { integer x = ; llSay(0); } }",
+        )
+        .unwrap();
+
+    let mut expected = Vec::new();
+    for index in [plain, prepared] {
+        expected.extend(run.unit(index).unwrap().analyze().unwrap());
+    }
+    let run_level = run.analyze().unwrap();
+    assert!(!run_level.is_empty());
+    assert_legacy_equal(&run_level, &expected);
+
+    let legacy_engine = run.analyze_with_engine(AnalysisEngine::Legacy).unwrap();
+    assert_legacy_equal(&run_level, legacy_engine.diagnostics());
+}
+
+#[test]
 fn empty_and_malformed_inputs_do_not_panic_in_any_engine() {
     let malformed = "default { state_entry() { integer x = ; llSay(0); } }";
     for source in ["", malformed] {
@@ -372,6 +413,78 @@ fn prepared_cap_boundary_is_exact() {
             assert_eq!(frozen.diagnostic(), legacy.diagnostic(), "{lines} lines");
         }
     }
+}
+
+#[test]
+fn suppression_precedes_prepared_cap_but_frozen_entry_points_do_not_suppress() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("prepared.lsl", &source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let options = EngineAnalysisOptions::default();
+
+    let suppression = DisplaySuppression::new(["SEM012".to_owned()]);
+    let suppressed = unit
+        .analyze_with_engine_options_suppressed(AnalysisEngine::Ast, &options, &suppression)
+        .unwrap();
+    assert!(suppressed.diagnostics().is_empty());
+
+    for diagnostics in [
+        unit.analyze_with_engine(AnalysisEngine::Ast)
+            .unwrap()
+            .into_diagnostics(),
+        unit.analyze().unwrap(),
+        run.analyze().unwrap(),
+    ] {
+        assert_eq!(diagnostics.len(), limit);
+        assert_eq!(diagnostics.last().unwrap().diagnostic().code, "PRE039");
+    }
+
+    let unrelated = DisplaySuppression::new(["SEM001".to_owned()]);
+    let still_capped = unit
+        .analyze_with_engine_options_suppressed(AnalysisEngine::Ast, &options, &unrelated)
+        .unwrap();
+    assert_eq!(still_capped.diagnostics().len(), limit);
+    assert_eq!(
+        still_capped.diagnostics().last().unwrap().diagnostic().code,
+        "PRE039"
+    );
+}
+
+#[test]
+fn suppression_precedes_plain_cap_but_frozen_analyze_does_not_suppress() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = format!(
+        "{}default {{ }}\n",
+        "integer duplicate;\n".repeat(limit + 2)
+    );
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_legacy_text("plain.lsl", &source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let suppression = DisplaySuppression::new(["SEM001".to_owned()]);
+
+    let suppressed = unit
+        .analyze_with_engine_options_suppressed(
+            AnalysisEngine::Legacy,
+            &EngineAnalysisOptions::default(),
+            &suppression,
+        )
+        .unwrap();
+    assert!(suppressed.diagnostics().is_empty());
+
+    let frozen = unit.analyze().unwrap();
+    assert_eq!(frozen.len(), limit);
+    assert_eq!(frozen.last().unwrap().diagnostic().code, "PRE039");
+}
+
+fn unresolved_variable_flood(statements: usize) -> String {
+    let mut source = String::from("default { state_entry() {\n");
+    for _ in 0..statements {
+        source.push_str("x = 1;\n");
+    }
+    source.push_str("} }\n");
+    source
 }
 
 #[test]

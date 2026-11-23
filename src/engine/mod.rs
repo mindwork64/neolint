@@ -1,9 +1,13 @@
 //! Engine-aware analysis selection and result envelopes.
 //!
-//! The module is additive: [`AnalysisUnit::analyze`](crate::source::AnalysisUnit::analyze)
-//! and [`AnalysisRun::analyze`](crate::pipeline::AnalysisRun::analyze) keep their
-//! frozen Legacy behavior, while the engine API can additionally run the
-//! independent AST analyzer or compare both semantic streams.
+//! On the experimental Phase 6H branch [`AnalysisEngine::Ast`] is the default
+//! engine; [`AnalysisEngine::Legacy`] remains available as the explicit
+//! rollback engine, and [`AnalysisEngine::Compare`] stays opt-in. The frozen
+//! [`AnalysisUnit::analyze`](crate::source::AnalysisUnit::analyze) and
+//! [`AnalysisRun::analyze`](crate::pipeline::AnalysisRun::analyze) entry points
+//! keep their Legacy behavior regardless of the selector default, while the
+//! engine API can additionally run the independent AST analyzer or compare
+//! both semantic streams.
 //!
 //! Comparison fingerprints always carry raw prepared coordinates. Rendering into
 //! original source coordinates happens only for the displayed diagnostic stream.
@@ -11,6 +15,7 @@
 pub mod compare;
 pub(crate) mod wiring;
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::diagnostic::resolve::RenderedDiagnostic;
@@ -24,12 +29,21 @@ pub use compare::{
 };
 
 /// Which semantic analyzer the engine API runs.
+///
+/// The default is [`AnalysisEngine::Ast`] on the experimental Phase 6H branch.
+/// [`AnalysisEngine::Legacy`] is the explicit rollback engine, and
+/// [`AnalysisEngine::Compare`] remains opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnalysisEngine {
     /// Frozen Legacy lexer/parser/semantic pipeline.
-    #[default]
+    ///
+    /// Select explicitly with `--engine legacy` or `engine = legacy`. It is no
+    /// longer the default but keeps the direct plain-Legacy execution path.
     Legacy,
     /// Independent typed-AST semantic analyzer.
+    ///
+    /// This is the default engine on the experimental Phase 6H branch.
+    #[default]
     Ast,
     /// Run both analyzers and report their raw semantic streams.
     Compare,
@@ -104,6 +118,36 @@ impl std::error::Error for EngineAnalysisError {
 impl From<SpanError> for EngineAnalysisError {
     fn from(error: SpanError) -> Self {
         Self::Span(error)
+    }
+}
+
+/// Rule codes whose findings are suppressed from display.
+///
+/// Suppression is display-only: it does not change analysis or severity, and a
+/// disabled rule still runs. The set participates before the rendered-diagnostic
+/// cap, so findings suppressed here cannot trigger the terminal `PRE039`
+/// overflow diagnostic. Severity overrides are not display suppression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisplaySuppression {
+    codes: HashSet<String>,
+}
+
+impl DisplaySuppression {
+    /// Build a suppression set from rule codes.
+    pub fn new(codes: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            codes: codes.into_iter().collect(),
+        }
+    }
+
+    /// Whether `code` is suppressed from display.
+    pub fn is_suppressed(&self, code: &str) -> bool {
+        self.codes.contains(code)
+    }
+
+    /// Whether no rule code is suppressed.
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
     }
 }
 
@@ -241,8 +285,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_legacy() {
-        assert_eq!(AnalysisEngine::default(), AnalysisEngine::Legacy);
+    fn default_is_ast() {
+        assert_eq!(AnalysisEngine::default(), AnalysisEngine::Ast);
+        assert_eq!(AnalysisEngine::default().as_str(), "ast");
     }
 
     #[test]
@@ -273,6 +318,20 @@ mod tests {
         assert!(!AnalysisEngine::Legacy.requires_prepared_source());
         assert!(AnalysisEngine::Ast.requires_prepared_source());
         assert!(AnalysisEngine::Compare.requires_prepared_source());
+    }
+
+    #[test]
+    fn display_suppression_tracks_exact_rule_codes() {
+        let empty = DisplaySuppression::default();
+        assert!(empty.is_empty());
+        assert!(!empty.is_suppressed("SEM012"));
+
+        let suppression = DisplaySuppression::new(["SEM012".to_owned(), "PRE039".to_owned()]);
+        assert!(!suppression.is_empty());
+        assert!(suppression.is_suppressed("SEM012"));
+        assert!(suppression.is_suppressed("PRE039"));
+        assert!(!suppression.is_suppressed("sem012"));
+        assert!(!suppression.is_suppressed("SEM013"));
     }
 
     fn report(matched: bool) -> EngineComparisonReport {

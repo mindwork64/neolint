@@ -2,15 +2,20 @@
 //!
 //! Pipeline:
 //! argument parsing → configuration loading/validation → input collection
-//! (files, directories, stdin) → source reading → [`neolint::lex`] →
-//! [`neolint::parse`] → [`neolint::analyze`] → configuration application →
+//! (files, directories, stdin) → source reading → engine selection → per-unit
+//! preparation (identity or full preprocessing, or the direct Legacy path) →
+//! [`neolint::lex`] → the selected engine ([`neolint::parse_legacy`] with
+//! [`neolint::semantic::analyze_with_syntax_diagnostics`], [`neolint::parse_ast`]
+//! with AST semantic analysis, or Compare) → configuration application →
 //! human/JSON rendering → exit code.
 //!
-//! The default plain-LSL Legacy path is unchanged. With `--preprocess`, units
-//! use the full preprocessor; with `--engine ast`/`--engine compare` and no
-//! preprocessing, units use identity preparation so the engine API has a source
-//! map. `compare` prints a semantic-parity report on stderr and exits with code
-//! 3 when any unit's comparison is unmatched.
+//! The default analysis engine is AST. With no preprocessing, units use
+//! identity preparation so the engine API has a source map. Explicit
+//! `--engine legacy` (or `engine = legacy`) without preprocessing keeps the
+//! unchanged direct plain-Legacy loop, which is uncapped at run level. With
+//! `--preprocess`, every engine uses the full preprocessor. `--engine compare`
+//! prints a semantic-parity report on stderr and exits with code 3 when any
+//! unit's comparison is unmatched.
 //!
 //! Exit codes are `0` when no error-severity diagnostics remain, `1` when at
 //! least one error-severity diagnostic remains, `2` for command-line,
@@ -317,8 +322,9 @@ fn run() -> i32 {
         );
     }
 
-    // Ast/Compare without preprocessing still need a prepared source (identity
-    // preparation). Plain Legacy keeps the direct, uncapped loop below.
+    // AST (the default) and Compare without preprocessing still need a prepared
+    // source (identity preparation). Only explicit Legacy keeps the direct,
+    // uncapped plain loop below.
     if config.engine() != AnalysisEngine::Legacy {
         return run_units(
             &paths,
@@ -472,6 +478,7 @@ fn run_units(
     let options = EngineAnalysisOptions {
         collect_tokens: show_tokens,
     };
+    let suppression = config.display_suppression();
     let expected_units = unit_indexes.len();
     let mut analyzed_units = 0usize;
     let mut results = Vec::new();
@@ -490,14 +497,15 @@ fn run_units(
             input_failed = true;
             continue;
         };
-        let analysis = match unit.analyze_with_engine_options(engine, &options) {
-            Ok(analysis) => analysis,
-            Err(error) => {
-                eprintln!("neolint: cannot analyze unit {index}: {error}");
-                input_failed = true;
-                continue;
-            }
-        };
+        let analysis =
+            match unit.analyze_with_engine_options_suppressed(engine, &options, &suppression) {
+                Ok(analysis) => analysis,
+                Err(error) => {
+                    eprintln!("neolint: cannot analyze unit {index}: {error}");
+                    input_failed = true;
+                    continue;
+                }
+            };
         analyzed_units += 1;
 
         if engine == AnalysisEngine::Compare {
@@ -1005,7 +1013,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: legacy (default), ast, or compare\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = legacy\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
         env!("CARGO_PKG_VERSION")
     );
 }

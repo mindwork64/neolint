@@ -6,7 +6,7 @@
 //! the binary. Parsing and validation return human readable errors so the CLI
 //! can exit with code 2 without panicking.
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::engine::AnalysisEngine;
+use crate::engine::{AnalysisEngine, DisplaySuppression};
 use crate::preprocessor::PreprocessDialect;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -35,7 +35,8 @@ impl LintConfig {
     /// Blank lines and comments are ignored. Supported settings are
     /// `disable = RULE[, RULE...]`, `severity.RULE = error|warning|info`,
     /// `preprocess = true|false`, `dialect = lsl|firestorm`,
-    /// `include_dir = PATH`, and `engine = legacy|ast|compare`.
+    /// `include_dir = PATH`, and `engine = legacy|ast|compare`. A configuration
+    /// without an `engine` setting selects [`AnalysisEngine::Ast`].
     ///
     /// # Errors
     ///
@@ -174,7 +175,11 @@ impl LintConfig {
         &self.include_dirs
     }
 
-    /// Configured analysis engine, defaulting to [`AnalysisEngine::Legacy`].
+    /// Configured analysis engine, defaulting to [`AnalysisEngine::Ast`].
+    ///
+    /// On the experimental Phase 6H branch a configuration without an `engine`
+    /// setting selects AST. [`AnalysisEngine::Legacy`] must be selected
+    /// explicitly to restore the Legacy pipeline.
     pub fn engine(&self) -> AnalysisEngine {
         self.engine
     }
@@ -214,6 +219,16 @@ impl LintConfig {
                 diagnostic.severity = *severity;
             }
         }
+    }
+
+    /// Disabled rule codes as display suppression.
+    ///
+    /// The set combines config-file `disable =` values with command-line
+    /// `--disable` values. Severity overrides are deliberately excluded because
+    /// a downgraded rule still produces diagnostics and still counts toward the
+    /// rendered-diagnostic cap.
+    pub fn display_suppression(&self) -> DisplaySuppression {
+        DisplaySuppression::new(self.disabled_rules.iter().cloned())
     }
 }
 
@@ -297,6 +312,19 @@ mod tests {
     }
 
     #[test]
+    fn display_suppression_contains_disabled_rules_but_not_severity_overrides() {
+        let mut config = LintConfig::parse("disable = SEM012\nseverity.SEM013 = info\n").unwrap();
+        config.disable(vec!["SEM014".to_owned()]).unwrap();
+
+        let suppression = config.display_suppression();
+        assert!(!suppression.is_empty());
+        assert!(suppression.is_suppressed("SEM012"));
+        assert!(suppression.is_suppressed("SEM014"));
+        assert!(!suppression.is_suppressed("SEM013"));
+        assert!(!suppression.is_suppressed("SEM001"));
+    }
+
+    #[test]
     fn rejects_unknown_settings_and_invalid_severities() {
         assert!(LintConfig::parse("enabled = false").is_err());
         assert!(LintConfig::parse("severity.SEM001 = fatal").is_err());
@@ -352,11 +380,11 @@ mod engine_config_tests {
     use super::*;
 
     #[test]
-    fn default_engine_is_legacy() {
-        assert_eq!(LintConfig::default().engine(), AnalysisEngine::Legacy);
+    fn default_engine_is_ast() {
+        assert_eq!(LintConfig::default().engine(), AnalysisEngine::Ast);
         assert_eq!(
             LintConfig::parse("# no engine setting\n").unwrap().engine(),
-            AnalysisEngine::Legacy
+            AnalysisEngine::Ast
         );
     }
 
@@ -388,9 +416,9 @@ mod engine_config_tests {
     }
 
     #[test]
-    fn old_config_without_engine_still_parses_as_legacy() {
+    fn old_config_without_engine_parses_as_ast() {
         let config = LintConfig::parse("disable = SEM001\nseverity.SEM004 = warning\n").unwrap();
-        assert_eq!(config.engine(), AnalysisEngine::Legacy);
+        assert_eq!(config.engine(), AnalysisEngine::Ast);
     }
 
     #[test]
