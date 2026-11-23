@@ -5,6 +5,14 @@
 
 use crate::diagnostic::resolve::{LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic};
 use crate::diagnostic::Diagnostic;
+use crate::engine::compare::compare_semantic_diagnostics;
+use crate::engine::wiring::{
+    analyze_ast as analyze_ast_semantics, analyze_legacy as analyze_legacy_semantics, AstSyntax,
+    LegacySyntax,
+};
+use crate::engine::{
+    AnalysisEngine, EngineAnalysisError, EngineAnalysisOptions, UnitEngineAnalysis,
+};
 use crate::preprocessor::PreparedSource;
 use crate::semantic::analyze_with_syntax_diagnostics;
 use crate::source::file::{AnalysisUnitId, SourceFileKind, SourceId};
@@ -91,33 +99,46 @@ impl AnalysisUnit {
     /// Preprocessor diagnostics, when present, are converted first.
     pub fn analyze(&self) -> Result<Vec<RenderedDiagnostic>, SpanError> {
         if let Some(prepared) = &self.prepared {
-            let mut rendered = Vec::new();
-            for diagnostic in prepared.preprocess_diagnostics() {
-                rendered.push(RenderedDiagnostic::from_preprocess(
-                    diagnostic.clone(),
-                    prepared,
-                )?);
-            }
-            let text = prepared.text();
-            let (tokens, lexical) = crate::lex(text);
-            let syntax = crate::parse_legacy(&tokens);
-            let semantic = analyze_with_syntax_diagnostics(&tokens, &syntax);
-            for diagnostic in lexical.into_iter().chain(syntax).chain(semantic) {
-                rendered.push(RenderedDiagnostic::from_prepared(
-                    PreparedDiagnostic::new(
-                        diagnostic.code,
-                        diagnostic.severity,
-                        diagnostic.kind,
-                        diagnostic.message,
-                        diagnostic.span,
-                    ),
-                    prepared,
-                )?);
-            }
-            crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
-            return Ok(rendered);
+            return Ok(self
+                .analyze_prepared(prepared, AnalysisEngine::Legacy, false)?
+                .into_diagnostics());
         }
+        let (rendered, _tokens) = self.analyze_plain(false)?;
+        Ok(rendered)
+    }
 
+    /// Run an engine-aware analysis with default options.
+    ///
+    /// `Ast` and `Compare` require a prepared source; a plain no-map unit is
+    /// rejected before any analysis work, leaving the unit untouched.
+    pub fn analyze_with_engine(
+        &self,
+        engine: AnalysisEngine,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        self.analyze_with_engine_options(engine, &EngineAnalysisOptions::default())
+    }
+
+    /// Run an engine-aware analysis with explicit options.
+    pub fn analyze_with_engine_options(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        if let Some(prepared) = &self.prepared {
+            return Ok(self.analyze_prepared(prepared, engine, options.collect_tokens)?);
+        }
+        if engine.requires_prepared_source() {
+            return Err(EngineAnalysisError::PreparedSourceRequired { unit: self.id });
+        }
+        let (diagnostics, tokens) = self.analyze_plain(options.collect_tokens)?;
+        Ok(UnitEngineAnalysis::new(diagnostics, None, tokens))
+    }
+
+    /// Plain no-map Legacy path, shared by `analyze` and the engine API.
+    fn analyze_plain(
+        &self,
+        collect_tokens: bool,
+    ) -> Result<(Vec<RenderedDiagnostic>, Vec<crate::lexer::Token>), SpanError> {
         let root = self.legacy_root().ok_or(SpanError::NotLegacyUnit)?;
         let text = self.manager.text(root).ok_or(SpanError::UnknownSourceId)?;
         let (tokens, lexical) = crate::lex(text);
@@ -157,7 +178,84 @@ impl AnalysisUnit {
             let tagged = self.legacy_diagnostic(diagnostic)?;
             rendered.push(RenderedDiagnostic::from_legacy(tagged, self)?);
         }
-        Ok(rendered)
+        let tokens = if collect_tokens { tokens } else { Vec::new() };
+        Ok((rendered, tokens))
+    }
+
+    /// Prepared path, shared by `analyze` and the engine API.
+    ///
+    /// The prepared text is lexed exactly once and the same immutable token
+    /// slice is handed to every parser/semantic stage. Parser diagnostics are
+    /// kept engine-local through the private `LegacySyntax`/`AstSyntax`
+    /// wrappers. The AST semantic stream is never appended to a Compare display
+    /// stream; display keeps the frozen Legacy stream.
+    fn analyze_prepared(
+        &self,
+        prepared: &PreparedSource,
+        engine: AnalysisEngine,
+        collect_tokens: bool,
+    ) -> Result<UnitEngineAnalysis, SpanError> {
+        let mut rendered = Vec::new();
+        for diagnostic in prepared.preprocess_diagnostics() {
+            rendered.push(RenderedDiagnostic::from_preprocess(
+                diagnostic.clone(),
+                prepared,
+            )?);
+        }
+        let text = prepared.text();
+        let (tokens, lexical) = crate::lex(text);
+        let options = crate::ast::AstParseOptions::from_flags(
+            prepared.switches_enabled(),
+            prepared.lazy_lists_enabled(),
+        );
+        let mut comparison = None;
+        let display: Vec<Diagnostic> = match engine {
+            AnalysisEngine::Legacy => {
+                let legacy_syntax = LegacySyntax::parse(&tokens);
+                let legacy_semantic = analyze_legacy_semantics(&tokens, &legacy_syntax);
+                let mut display = lexical;
+                display.extend(legacy_syntax.into_diagnostics());
+                display.extend(legacy_semantic);
+                display
+            }
+            AnalysisEngine::Ast => {
+                let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
+                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax);
+                let mut display = lexical;
+                display.extend(ast_syntax.into_diagnostics());
+                display.extend(ast_semantic);
+                display
+            }
+            AnalysisEngine::Compare => {
+                let legacy_syntax = LegacySyntax::parse(&tokens);
+                let legacy_semantic = analyze_legacy_semantics(&tokens, &legacy_syntax);
+                let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
+                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax);
+                comparison = Some(compare_semantic_diagnostics(
+                    &legacy_semantic,
+                    &ast_semantic,
+                ));
+                let mut display = lexical;
+                display.extend(legacy_syntax.into_diagnostics());
+                display.extend(legacy_semantic);
+                display
+            }
+        };
+        for diagnostic in display {
+            rendered.push(RenderedDiagnostic::from_prepared(
+                PreparedDiagnostic::new(
+                    diagnostic.code,
+                    diagnostic.severity,
+                    diagnostic.kind,
+                    diagnostic.message,
+                    diagnostic.span,
+                ),
+                prepared,
+            )?);
+        }
+        crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
+        let tokens = if collect_tokens { tokens } else { Vec::new() };
+        Ok(UnitEngineAnalysis::new(rendered, comparison, tokens))
     }
 
     /// Tag a frozen legacy diagnostic with this unit.
@@ -172,5 +270,107 @@ impl AnalysisUnit {
             return Err(SpanError::NotLegacyUnit);
         }
         Ok(LegacyDiagnostic::new(diagnostic, self.id))
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+    use crate::ast_semantic::analyze_ast as run_ast_semantic;
+    use crate::pipeline::AnalysisRun;
+
+    fn prepared_unit(source: &str) -> (AnalysisRun, usize) {
+        let mut run = AnalysisRun::new().unwrap();
+        let index = run.add_prepared_text("root.lsl", source).unwrap();
+        (run, index)
+    }
+
+    /// The AST engine display is exactly `lexical ++ ast_syntax ++ ast_semantic`,
+    /// wired to the AST parser's own findings.
+    #[test]
+    fn ast_engine_display_matches_independently_wired_oracle() {
+        let source =
+            "integer g;\ninteger g;\ndefault { state_entry() { integer x = ; llSay(0); } }";
+        let (run, index) = prepared_unit(source);
+        let unit = run.unit(index).unwrap();
+        let prepared = unit.prepared_source().unwrap();
+        let analysis = unit.analyze_with_engine(AnalysisEngine::Ast).unwrap();
+
+        let (tokens, lexical) = crate::lex(prepared.text());
+        let (ast, ast_syntax) = crate::ast::parse_ast_with_options(
+            &tokens,
+            crate::ast::AstParseOptions::from_flags(
+                prepared.switches_enabled(),
+                prepared.lazy_lists_enabled(),
+            ),
+        );
+        let ast_semantic = run_ast_semantic(&ast, &ast_syntax);
+        let expected: Vec<Diagnostic> = lexical
+            .into_iter()
+            .chain(ast_syntax)
+            .chain(ast_semantic)
+            .collect();
+        assert_eq!(analysis.diagnostics().len(), expected.len());
+        for (rendered, expected) in analysis.diagnostics().iter().zip(expected.iter()) {
+            assert_eq!(rendered.diagnostic(), expected);
+            assert_eq!(rendered.source(), unit.root().unwrap());
+        }
+        assert!(analysis.comparison().is_none());
+    }
+
+    /// Compare reports exactly the comparator result over the two raw streams and
+    /// displays only the Legacy stream.
+    #[test]
+    fn compare_engine_report_matches_raw_stream_oracle() {
+        let source =
+            "integer g;\ninteger g;\ndefault { state_entry() { integer x = ; llSay(0); } }";
+        let (run, index) = prepared_unit(source);
+        let unit = run.unit(index).unwrap();
+        let prepared = unit.prepared_source().unwrap();
+        let analysis = unit.analyze_with_engine(AnalysisEngine::Compare).unwrap();
+
+        let (tokens, lexical) = crate::lex(prepared.text());
+        let legacy_syntax = crate::parse_legacy(&tokens);
+        let legacy_semantic =
+            crate::semantic::analyze_with_syntax_diagnostics(&tokens, &legacy_syntax);
+        let (ast, ast_syntax) = crate::ast::parse_ast_with_options(
+            &tokens,
+            crate::ast::AstParseOptions::from_flags(
+                prepared.switches_enabled(),
+                prepared.lazy_lists_enabled(),
+            ),
+        );
+        let ast_semantic = run_ast_semantic(&ast, &ast_syntax);
+        let oracle = compare_semantic_diagnostics(&legacy_semantic, &ast_semantic);
+        assert_eq!(analysis.comparison(), Some(&oracle));
+
+        let expected: Vec<Diagnostic> = lexical
+            .into_iter()
+            .chain(legacy_syntax)
+            .chain(legacy_semantic)
+            .collect();
+        assert_eq!(analysis.diagnostics().len(), expected.len());
+        for (rendered, expected) in analysis.diagnostics().iter().zip(expected.iter()) {
+            assert_eq!(rendered.diagnostic(), expected);
+        }
+    }
+
+    /// The refactored `analyze()` keeps the frozen Legacy diagnostic stream
+    /// identical to `analyze_with_engine(Legacy)`.
+    #[test]
+    fn legacy_engine_display_is_unchanged_by_engine_refactor() {
+        let source =
+            "integer g;\ninteger g;\ndefault { state_entry() { integer x = ; llSay(0); } }";
+        let (run, index) = prepared_unit(source);
+        let unit = run.unit(index).unwrap();
+        let plain = unit.analyze().unwrap();
+        let legacy = unit.analyze_with_engine(AnalysisEngine::Legacy).unwrap();
+        assert_eq!(plain.len(), legacy.diagnostics().len());
+        for (plain, legacy) in plain.iter().zip(legacy.diagnostics().iter()) {
+            assert_eq!(plain.diagnostic(), legacy.diagnostic());
+            assert_eq!(plain.source(), legacy.source());
+            assert_eq!(plain.related(), legacy.related());
+        }
+        assert!(legacy.comparison().is_none());
     }
 }
