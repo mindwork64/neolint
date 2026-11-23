@@ -20,6 +20,22 @@ fn neolint() -> Command {
     Command::new(env!("CARGO_BIN_EXE_neolint"))
 }
 
+fn run_args(args: &[&str]) -> std::process::Output {
+    neolint().args(args).output().unwrap()
+}
+
+fn run_args_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = neolint()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn unresolved_variable_warning_does_not_fail_cli_by_default() {
     let directory = temporary_directory();
@@ -749,7 +765,7 @@ fn included_file_diagnostics_use_the_included_path_and_keep_json_shape() {
     fs::remove_dir_all(directory).unwrap();
 }
 
-fn json_array_is_structurally_valid(text: &str) -> bool {
+fn json_is_structurally_valid(text: &str, opening: char, closing: char) -> bool {
     let mut stack = Vec::new();
     let mut in_string = false;
     let mut escaped = false;
@@ -768,21 +784,25 @@ fn json_array_is_structurally_valid(text: &str) -> bool {
         }
         match ch {
             '"' => in_string = true,
-            '[' | '{' => stack.push(ch),
-            ']' => {
-                if stack.pop() != Some('[') {
-                    return false;
-                }
-            }
-            '}' if stack.pop() != Some('{') => return false,
-            '}' => {}
+            '[' => stack.push(']'),
+            '{' => stack.push('}'),
+            ']' | '}' if stack.pop() != Some(ch) => return false,
+            ']' | '}' => {}
             _ => {}
         }
     }
     !in_string
         && stack.is_empty()
-        && text.trim_start().starts_with('[')
-        && text.trim_end().ends_with(']')
+        && text.trim_start().starts_with(opening)
+        && text.trim_end().ends_with(closing)
+}
+
+fn json_array_is_structurally_valid(text: &str) -> bool {
+    json_is_structurally_valid(text, '[', ']')
+}
+
+fn json_object_is_structurally_valid(text: &str) -> bool {
+    json_is_structurally_valid(text, '{', '}')
 }
 
 #[test]
@@ -820,5 +840,516 @@ fn global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039() {
         !stdout.contains("b.lsl"),
         "later file retained diagnostics beyond the budget"
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+const CLEAN_SOURCE: &str = "default { state_entry() { llSay(0, \"hi\"); } }\n";
+const ERROR_SOURCE: &str = "default { state_entry() { llOwnerSay(42); } }\n";
+const DISC_SOURCE: &str = "default { llSay() { } }\n";
+// Deliberately corrupted input: an unbalanced `while (i < n(` condition, a
+// function that can reach its end without returning, and an event named
+// `llSay`. The SEM002 divergence is parser-recovery behavior on invalid input,
+// not a parity defect.
+const MISMATCH_SOURCE: &str = "integer i;\ninteger n;\ninteger f() {\n}\ndefault {\n    llSay() {\n        while (i < n( {\n    }\n}\n";
+const FIRESTORM_SIMPLE: &str =
+    "#define USE_SWITCHES\ndefault { state_entry() { llOwnerSay(\"ok\"); } }\n";
+const FIRESTORM_SWITCH: &str = "#define USE_SWITCHES\ndefault {\n    state_entry() {\n        integer value = 1;\n        switch (value) {\n            case 1:\n                llOwnerSay(\"one\");\n                break;\n            default:\n                break;\n        }\n    }\n}\n";
+
+fn write_file(directory: &std::path::Path, name: &str, contents: &str) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn engine_defaults_to_legacy_and_old_config_without_engine_keeps_legacy() {
+    let directory = temporary_directory();
+    let source = write_file(&directory, "event.lsl", DISC_SOURCE);
+    let config = write_file(
+        &directory,
+        "old.conf",
+        "disable = SEM001\nseverity.SEM004 = warning\n",
+    );
+    let source = source.to_str().unwrap();
+    let config = config.to_str().unwrap();
+
+    let default = run_args(&[source]);
+    let explicit = run_args(&["--engine", "legacy", source]);
+    let configured = run_args(&["--config", config, source]);
+
+    for output in [&default, &explicit, &configured] {
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("SEM002"));
+    }
+    assert_eq!(default.stdout, explicit.stdout);
+    assert_eq!(default.stderr, explicit.stderr);
+    assert_eq!(default.stdout, configured.stdout);
+    assert_eq!(default.stderr, configured.stderr);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn engine_flag_accepts_separate_and_equals_forms_for_each_engine() {
+    let directory = temporary_directory();
+    let source = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
+    let source = source.to_str().unwrap();
+
+    for arguments in [
+        vec!["--engine", "legacy"],
+        vec!["--engine=legacy"],
+        vec!["--engine", "ast"],
+        vec!["--engine=ast"],
+        vec!["--engine", "compare"],
+        vec!["--engine=compare"],
+    ] {
+        let mut args = arguments.clone();
+        args.push(source);
+        let output = run_args(&args);
+        assert_eq!(output.status.code(), Some(0), "{arguments:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if arguments
+            .iter()
+            .any(|argument| argument.contains("compare"))
+        {
+            assert!(stderr.contains("compare unit 0"), "{arguments:?}: {stderr}");
+            assert!(stderr.contains("matched=true"), "{arguments:?}: {stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{arguments:?}: {stderr}");
+        }
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn config_engine_selects_ast_or_compare_and_cli_overrides() {
+    let directory = temporary_directory();
+    let source = write_file(&directory, "event.lsl", DISC_SOURCE);
+    let ast_config = write_file(&directory, "ast.conf", "engine = ast\n");
+    let compare_config = write_file(&directory, "compare.conf", "engine = compare\n");
+    let source = source.to_str().unwrap();
+    let ast_config = ast_config.to_str().unwrap();
+    let compare_config = compare_config.to_str().unwrap();
+
+    let configured_ast = run_args(&["--config", ast_config, source]);
+    assert_eq!(configured_ast.status.code(), Some(0));
+    let stdout = String::from_utf8(configured_ast.stdout).unwrap();
+    assert!(!stdout.contains("SEM002"), "{stdout}");
+    assert!(configured_ast.stderr.is_empty());
+
+    let overridden = run_args(&["--config", ast_config, "--engine", "compare", source]);
+    assert_eq!(overridden.status.code(), Some(3));
+    let stdout = String::from_utf8(overridden.stdout).unwrap();
+    let stderr = String::from_utf8(overridden.stderr).unwrap();
+    assert!(stdout.contains("SEM002"), "{stdout}");
+    assert!(stderr.contains("compare unit 0"), "{stderr}");
+    assert!(stderr.contains("matched=false"), "{stderr}");
+
+    let configured_compare = run_args(&["--config", compare_config, source]);
+    assert_eq!(configured_compare.status.code(), Some(3));
+    assert!(String::from_utf8(configured_compare.stderr)
+        .unwrap()
+        .contains("compare unit 0"));
+
+    let ast_over_compare = run_args(&["--config", compare_config, "--engine", "ast", source]);
+    assert_eq!(ast_over_compare.status.code(), Some(0));
+    let stdout = String::from_utf8(ast_over_compare.stdout).unwrap();
+    assert!(!stdout.contains("SEM002"), "{stdout}");
+    assert!(ast_over_compare.stderr.is_empty());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn invalid_missing_and_empty_engine_values_exit_two() {
+    let directory = temporary_directory();
+    let source = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
+    let source = source.to_str().unwrap();
+
+    let invalid = run_args(&["--engine", "bogus", source]);
+    assert_eq!(invalid.status.code(), Some(2));
+    let stderr = String::from_utf8(invalid.stderr).unwrap();
+    assert!(stderr.contains("invalid engine 'bogus'"), "{stderr}");
+    assert!(
+        stderr.contains("expected legacy, ast or compare"),
+        "{stderr}"
+    );
+
+    let uppercase = run_args(&["--engine", "AST", source]);
+    assert_eq!(uppercase.status.code(), Some(2));
+    assert!(String::from_utf8(uppercase.stderr)
+        .unwrap()
+        .contains("invalid engine 'AST'"));
+
+    let missing = run_args(&["--engine"]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8(missing.stderr)
+        .unwrap()
+        .contains("--engine requires 'legacy', 'ast' or 'compare'"));
+
+    let empty = run_args(&["--engine=", source]);
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(String::from_utf8(empty.stderr)
+        .unwrap()
+        .contains("--engine requires 'legacy', 'ast' or 'compare'"));
+
+    let config = write_file(&directory, "bad.conf", "engine = faster\n");
+    let bad_config = run_args(&["--config", config.to_str().unwrap(), source]);
+    assert_eq!(bad_config.status.code(), Some(2));
+    let stderr = String::from_utf8(bad_config.stderr).unwrap();
+    assert!(stderr.contains("invalid config"), "{stderr}");
+    assert!(
+        stderr.contains("line 1: invalid engine value 'faster'"),
+        "{stderr}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn ast_and_compare_work_without_preprocessing_via_identity_preparation() {
+    let directory = temporary_directory();
+    let clean = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
+    let macro_source = write_file(
+        &directory,
+        "macro.lsl",
+        "#define X 1\ninteger x = X;\ndefault { state_entry() { } }\n",
+    );
+
+    let ast_clean = run_args(&["--engine", "ast", clean.to_str().unwrap()]);
+    assert_eq!(ast_clean.status.code(), Some(0));
+
+    let compare_clean = run_args(&["--engine", "compare", clean.to_str().unwrap()]);
+    assert_eq!(compare_clean.status.code(), Some(0));
+    let stderr = String::from_utf8(compare_clean.stderr).unwrap();
+    assert!(stderr.contains("matched=true"), "{stderr}");
+
+    let ast_macro = run_args(&["--engine", "ast", macro_source.to_str().unwrap()]);
+    assert_eq!(ast_macro.status.code(), Some(1));
+    let ast_stdout = String::from_utf8(ast_macro.stdout.clone()).unwrap();
+    assert!(ast_stdout.contains("LEX000"), "{ast_stdout}");
+
+    let legacy_macro = run_args(&[macro_source.to_str().unwrap()]);
+    assert_eq!(legacy_macro.status.code(), Some(1));
+    let legacy_stdout = String::from_utf8(legacy_macro.stdout).unwrap();
+    assert!(legacy_stdout.contains("LEX000"), "{legacy_stdout}");
+    assert!(
+        legacy_stdout.contains("variable 'define'"),
+        "{legacy_stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn engines_support_preprocess_includes_and_stdin() {
+    let directory = temporary_directory();
+    let includes = directory.join("includes");
+    fs::create_dir_all(&includes).unwrap();
+    write_file(&includes, "defs.lsl", "#define GREETING \"hi\"\n");
+    let source = write_file(
+        &directory,
+        "root.lsl",
+        "#include \"defs.lsl\"\ndefault { state_entry() { llOwnerSay(GREETING); } }\n",
+    );
+
+    for engine in ["legacy", "ast", "compare"] {
+        let output = run_args(&[
+            "--engine",
+            engine,
+            "--preprocess",
+            "-I",
+            includes.to_str().unwrap(),
+            source.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(0), "{engine}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if engine == "compare" {
+            assert!(stderr.contains("matched=true"), "{stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{engine}: {stderr}");
+        }
+    }
+
+    for engine in ["legacy", "ast", "compare"] {
+        let output = run_args_with_stdin(&["--engine", engine, "-"], ERROR_SOURCE.as_bytes());
+        assert_eq!(output.status.code(), Some(1), "{engine}: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("error[SEM004]"), "{engine}: {stdout}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if engine == "compare" {
+            assert!(stderr.contains("<stdin>"), "{stderr}");
+            assert!(stderr.contains("matched=true"), "{stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{engine}: {stderr}");
+        }
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn engines_support_firestorm_dialect() {
+    let directory = temporary_directory();
+    let simple = write_file(&directory, "simple.lsl", FIRESTORM_SIMPLE);
+    let switch = write_file(&directory, "switch.lsl", FIRESTORM_SWITCH);
+
+    for engine in ["legacy", "ast", "compare"] {
+        let output = run_args(&[
+            "--engine",
+            engine,
+            "--dialect",
+            "firestorm",
+            simple.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(0), "{engine}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if engine == "compare" {
+            assert!(stderr.contains("matched=true"), "{stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{engine}: {stderr}");
+        }
+    }
+
+    let ast_switch = run_args(&[
+        "--engine",
+        "ast",
+        "--dialect",
+        "firestorm",
+        switch.to_str().unwrap(),
+    ]);
+    assert_eq!(ast_switch.status.code(), Some(0));
+    let ast_stdout = String::from_utf8(ast_switch.stdout).unwrap();
+    assert!(ast_stdout.contains("no diagnostics"), "{ast_stdout}");
+
+    let legacy_switch = run_args(&["--dialect", "firestorm", switch.to_str().unwrap()]);
+    assert_eq!(legacy_switch.status.code(), Some(1));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_report_uses_stderr_and_json_stdout_keeps_old_schema() {
+    let directory = temporary_directory();
+    let source = write_file(&directory, "mismatch.lsl", MISMATCH_SOURCE);
+
+    let output = run_args(&[
+        "--engine",
+        "compare",
+        "--format",
+        "json",
+        source.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(3));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(json_array_is_structurally_valid(&stdout), "{stdout}");
+    assert!(!stdout.contains("\"engine\""), "{stdout}");
+    for field in [
+        "\"file\":",
+        "\"code\":\"SEM002\"",
+        "\"severity\":",
+        "\"kind\":",
+        "\"message\":",
+        "\"line\":",
+        "\"column\":",
+        "\"end_line\":",
+        "\"end_column\":",
+        "\"start\":",
+        "\"end\":",
+    ] {
+        assert!(stdout.contains(field), "missing {field}: {stdout}");
+    }
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(json_object_is_structurally_valid(&stderr), "{stderr}");
+    for field in [
+        "\"engine\":\"compare\"",
+        "\"units\":[",
+        "\"unit\":0",
+        "\"path\":",
+        "\"matched\":false",
+        "\"comparison_complete\":true",
+        "\"details_truncated\":false",
+        "\"legacy_count\":",
+        "\"ast_count\":",
+        "\"by_rule\":[",
+        "\"missing_total\":",
+        "\"extra_total\":",
+        "\"missing_from_ast\":[",
+        "\"extra_in_ast\":[",
+        "\"message\":",
+        "\"start\":",
+        "\"end_line\":",
+        "\"end_column\":",
+    ] {
+        assert!(stderr.contains(field), "missing {field}: {stderr}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_exit_codes_follow_mismatch_and_failure_precedence() {
+    let directory = temporary_directory();
+    let clean = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
+    let error = write_file(&directory, "error.lsl", ERROR_SOURCE);
+    let mismatch = write_file(&directory, "mismatch.lsl", MISMATCH_SOURCE);
+
+    let matched_clean = run_args(&["--engine", "compare", clean.to_str().unwrap()]);
+    assert_eq!(matched_clean.status.code(), Some(0));
+
+    let matched_error = run_args(&["--engine", "compare", error.to_str().unwrap()]);
+    assert_eq!(matched_error.status.code(), Some(1));
+    let stdout = String::from_utf8(matched_error.stdout.clone()).unwrap();
+    assert!(stdout.contains("error[SEM004]"), "{stdout}");
+    assert!(String::from_utf8(matched_error.stderr)
+        .unwrap()
+        .contains("matched=true"));
+
+    let downgraded = run_args(&[
+        "--engine",
+        "compare",
+        "--severity",
+        "SEM004=warning",
+        error.to_str().unwrap(),
+    ]);
+    assert_eq!(downgraded.status.code(), Some(0));
+
+    let mismatched = run_args(&["--engine", "compare", mismatch.to_str().unwrap()]);
+    assert_eq!(mismatched.status.code(), Some(3));
+    let stderr = String::from_utf8(mismatched.stderr).unwrap();
+    assert!(stderr.contains("matched=false"), "{stderr}");
+    assert!(
+        stderr.contains("rule SEM002: legacy=1 ast=0 missing=1 extra=0"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("missing SEM002 error semantic message="),
+        "{stderr}"
+    );
+    assert!(stderr.contains("start="), "{stderr}");
+    assert!(stderr.contains("end_line="), "{stderr}");
+    assert!(stderr.contains("complete=true truncated=false"), "{stderr}");
+
+    let missing_input = run_args(&["--engine", "compare", "does-not-exist.lsl"]);
+    assert_eq!(missing_input.status.code(), Some(2));
+
+    let bad_config = write_file(&directory, "bad.conf", "engine = faster\n");
+    let config_failure = run_args(&[
+        "--engine",
+        "compare",
+        "--config",
+        bad_config.to_str().unwrap(),
+        clean.to_str().unwrap(),
+    ]);
+    assert_eq!(config_failure.status.code(), Some(2));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_report_has_one_section_per_unit_in_input_order() {
+    let directory = temporary_directory();
+    let first = write_file(&directory, "a.lsl", CLEAN_SOURCE);
+    let second = write_file(&directory, "b.lsl", CLEAN_SOURCE);
+    let tree = directory.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    write_file(&tree, "z.lsl", CLEAN_SOURCE);
+    write_file(&tree, "a.lsl", CLEAN_SOURCE);
+
+    let multi = run_args(&[
+        "--engine",
+        "compare",
+        first.to_str().unwrap(),
+        second.to_str().unwrap(),
+    ]);
+    assert_eq!(multi.status.code(), Some(0));
+    let stderr = String::from_utf8(multi.stderr).unwrap();
+    assert_eq!(stderr.matches("neolint: compare unit 0 ").count(), 1);
+    assert_eq!(stderr.matches("neolint: compare unit 1 ").count(), 1);
+    let first_label = format!("compare unit 0 {}", first.display());
+    let second_label = format!("compare unit 1 {}", second.display());
+    let first_position = stderr.find(&first_label).unwrap();
+    let second_position = stderr.find(&second_label).unwrap();
+    assert!(first_position < second_position, "{stderr}");
+
+    let directory_run = run_args(&["--engine", "compare", tree.to_str().unwrap()]);
+    assert_eq!(directory_run.status.code(), Some(0));
+    let stderr = String::from_utf8(directory_run.stderr).unwrap();
+    assert_eq!(stderr.matches("neolint: compare unit 0 ").count(), 1);
+    assert_eq!(stderr.matches("neolint: compare unit 1 ").count(), 1);
+    let sorted_first = stderr
+        .find(&format!("compare unit 0 {}", tree.join("a.lsl").display()))
+        .unwrap();
+    let sorted_second = stderr
+        .find(&format!("compare unit 1 {}", tree.join("z.lsl").display()))
+        .unwrap();
+    assert!(sorted_first < sorted_second, "{stderr}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn tokens_are_identical_across_engines_and_json_combination_is_rejected() {
+    let directory = temporary_directory();
+    let clean = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
+    let preprocessed = write_file(
+        &directory,
+        "pre.lsl",
+        "#define X 1\ninteger x = X;\ndefault { state_entry() { } }\n",
+    );
+
+    let legacy = run_args(&["--tokens", clean.to_str().unwrap()]);
+    let ast = run_args(&["--engine", "ast", "--tokens", clean.to_str().unwrap()]);
+    let compare = run_args(&["--engine", "compare", "--tokens", clean.to_str().unwrap()]);
+    for output in [&legacy, &ast, &compare] {
+        assert_eq!(output.status.code(), Some(0));
+    }
+    assert_eq!(legacy.stdout, ast.stdout);
+    assert_eq!(legacy.stdout, compare.stdout);
+    assert!(legacy.stderr.is_empty());
+    assert!(ast.stderr.is_empty());
+    assert!(String::from_utf8(compare.stderr)
+        .unwrap()
+        .contains("compare unit 0"));
+
+    let legacy_pre = run_args(&["--preprocess", "--tokens", preprocessed.to_str().unwrap()]);
+    let ast_pre = run_args(&[
+        "--engine",
+        "ast",
+        "--preprocess",
+        "--tokens",
+        preprocessed.to_str().unwrap(),
+    ]);
+    let compare_pre = run_args(&[
+        "--engine",
+        "compare",
+        "--preprocess",
+        "--tokens",
+        preprocessed.to_str().unwrap(),
+    ]);
+    for output in [&legacy_pre, &ast_pre, &compare_pre] {
+        assert_eq!(output.status.code(), Some(0));
+    }
+    assert_eq!(legacy_pre.stdout, ast_pre.stdout);
+    assert_eq!(legacy_pre.stdout, compare_pre.stdout);
+
+    for engine in ["legacy", "ast", "compare"] {
+        let output = run_args(&[
+            "--engine",
+            engine,
+            "--tokens",
+            "--format",
+            "json",
+            clean.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(2), "{engine}");
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("--tokens cannot be combined with --format json"));
+    }
+
     fs::remove_dir_all(directory).unwrap();
 }

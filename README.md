@@ -40,10 +40,11 @@ neolint ./scripts/
 neolint --config .neolint.conf ./scripts/
 neolint --disable SEM001,SEM004 ./scripts/
 neolint --severity SEM004=warning script.lsl
+neolint --engine ast script.lsl
 cat script.lsl | neolint -
 ```
 
-Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/input/config error. Warnings and info diagnostics do not fail unless configured as errors.
+Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/input/config error, `3` unmatched semantic comparison in `--engine compare` mode. Warnings and info diagnostics do not fail unless configured as errors.
 
 ## User documentation
 

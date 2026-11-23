@@ -45,9 +45,9 @@
 //! Firestorm extension latch, so the dialect's preprocessing path is exercised.
 //!
 //! `run_cases` takes extra argv that is inserted before the positional inputs.
-//! A later slice can therefore add a parallel test that calls
-//! `run_cases(&["--engine", "legacy"])` and asserts the same goldens. No
-//! `--engine` flag exists yet, so no such test is enabled here.
+//! The default test and the explicit `--engine legacy` test both assert the same
+//! pre-change goldens, so selecting Legacy through the new flag is byte-for-byte
+//! identical to the unmodified base.
 //!
 //! These fixtures are LF-only and CI is Linux; path rendering uses `/`. The
 //! `directory` case pins recursive collection order (`a.lsl` before
@@ -207,4 +207,9 @@ fn run_cases(extra_args: &[&str]) {
 #[test]
 fn default_invocation_matches_pre_change_goldens() {
     run_cases(&[]);
+}
+
+#[test]
+fn explicit_legacy_engine_matches_pre_change_goldens() {
+    run_cases(&["--engine", "legacy"]);
 }
