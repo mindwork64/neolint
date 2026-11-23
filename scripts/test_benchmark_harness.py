@@ -68,6 +68,21 @@ class CrossPassConsistencyTests(unittest.TestCase):
         self.assertEqual([problem["row"] for problem in problems], ["drifting"])
 
 
+class HarnessSourceDigestTests(unittest.TestCase):
+    def test_digest_covers_every_harness_source_file(self):
+        digest = bench.harness_source_digest()
+        self.assertEqual(set(digest["files"]), {"bench/bench.py", "bench/workloads.py"})
+        for entry in digest["files"].values():
+            self.assertEqual(len(entry["sha256"]), 64)
+            self.assertGreater(entry["bytes"], 0)
+
+    def test_digest_is_stable_across_calls(self):
+        self.assertEqual(
+            bench.harness_source_digest()["combined_sha256"],
+            bench.harness_source_digest()["combined_sha256"],
+        )
+
+
 class ProvenanceFieldTests(unittest.TestCase):
     def test_sha256_verification_reports_only_the_digest_check(self):
         # The digest check must not be described as a source-commit proof; that is

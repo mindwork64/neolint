@@ -371,6 +371,37 @@ def cross_pass_inconsistencies(summaries) -> list:
     return problems
 
 
+HARNESS_SOURCES = ("bench/bench.py", "bench/workloads.py")
+
+
+def harness_source_digest() -> dict:
+    """Digest of the harness code actually executing, independent of git state.
+
+    The commit recorded in the metadata can only be trusted if the tracked
+    worktree was clean when the run started; the file digest is what remains
+    verifiable even after later documentation commits move HEAD.
+    """
+    files = {}
+    for relative in HARNESS_SOURCES:
+        path = REPO / relative
+        files[relative] = {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+    combined = hashlib.sha256()
+    for relative in sorted(files):
+        combined.update(f"{relative}\0{files[relative]['sha256']}\n".encode("utf-8"))
+    return {"files": files, "combined_sha256": combined.hexdigest()}
+
+
+def worktree_is_dirty() -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(result.stdout.strip())
+
+
 def git_show(commit: str, format_string: str) -> str | None:
     result = subprocess.run(
         ["git", "show", "-s", f"--format={format_string}", commit],
@@ -435,7 +466,7 @@ def verify_build(commit: str, expected_sha256: str, scratch: pathlib.Path) -> di
     return result
 
 
-def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict) -> dict:
+def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict, harness_dirty: bool, harness_source: dict) -> dict:
     rustc = subprocess.run(["rustc", "-Vv"], capture_output=True, text=True, check=False)
     cargo = subprocess.run(["cargo", "-V"], capture_output=True, text=True, check=False)
     cpu_model = "unknown"
@@ -452,6 +483,8 @@ def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict) -
         "harness_commit": git("rev-parse", "HEAD"),
         "harness_tree": git("rev-parse", "HEAD^{tree}"),
         "harness_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "harness_dirty": harness_dirty,
+        "harness_source": harness_source,
         "binary_source_commit": binary_provenance.get("commit"),
         "binary_source_tree": binary_provenance.get("tree"),
         "binary_sha256_verified": binary_provenance.get("sha256_verified", False),
@@ -490,7 +523,12 @@ def write_summary(path, meta, summaries, variance):
     lines.append("# neolint CLI benchmark — Phase 8 baseline\n")
     lines.append(
         f"- harness revision: `{meta['harness_commit']}` (tree `{meta['harness_tree']}`), "
-        f"branch `{meta['harness_branch']}`"
+        f"branch `{meta['harness_branch']}`, worktree "
+        f"{'DIRTY' if meta['harness_dirty'] else 'clean'}"
+    )
+    lines.append(
+        f"- harness source digest: `{meta['harness_source']['combined_sha256']}` "
+        f"(over {', '.join(sorted(meta['harness_source']['files']))})"
     )
     if meta["binary_source_build_verified"]:
         verification = (
@@ -573,6 +611,11 @@ def main(argv=None):
         help="refuse to measure unless the binary has this SHA-256",
     )
     parser.add_argument(
+        "--allow-dirty-harness",
+        action="store_true",
+        help="capture evidence even when the harness worktree has uncommitted changes",
+    )
+    parser.add_argument(
         "--verify-build",
         action="store_true",
         help="rebuild the binary source commit in a throwaway worktree and compare SHA-256",
@@ -593,6 +636,19 @@ def main(argv=None):
     if not binary.exists():
         print(f"binary missing: {binary}", file=sys.stderr)
         return 1
+
+    harness_dirty = worktree_is_dirty()
+    harness_source = harness_source_digest()
+    if harness_dirty and not args.allow_dirty_harness:
+        print(
+            "harness worktree is dirty; commit or stash the harness before capturing evidence "
+            "(or pass --allow-dirty-harness and accept that harness_commit does not describe "
+            "the code that ran)",
+            file=sys.stderr,
+        )
+        return 8
+    if harness_dirty:
+        print("WARNING: harness worktree is dirty; harness_commit does not describe the code that ran", file=sys.stderr)
 
     binary_sha = sha256_file(binary)
     if args.expect_binary_sha256 and binary_sha != args.expect_binary_sha256:
@@ -677,7 +733,7 @@ def main(argv=None):
             )
 
     inconsistencies = cross_pass_inconsistencies(summaries)
-    meta = metadata(fixtures, rows, binary, provenance)
+    meta = metadata(fixtures, rows, binary, provenance, harness_dirty, harness_source)
     meta["cross_pass_consistent"] = not inconsistencies
     meta["cross_pass_inconsistencies"] = inconsistencies
     variance = {}
