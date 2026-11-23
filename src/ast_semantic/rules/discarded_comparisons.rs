@@ -15,6 +15,8 @@ pub(crate) fn check(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnos
                 };
                 if body.closed {
                     scan_body(body, syntax_diagnostics, &mut diagnostics);
+                } else {
+                    scan_closed_descendant_blocks(body, syntax_diagnostics, &mut diagnostics);
                 }
             }
             TopLevel::State(state) => {
@@ -24,6 +26,8 @@ pub(crate) fn check(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnos
                     };
                     if body.closed {
                         scan_body(body, syntax_diagnostics, &mut diagnostics);
+                    } else {
+                        scan_closed_descendant_blocks(body, syntax_diagnostics, &mut diagnostics);
                     }
                 }
             }
@@ -31,6 +35,51 @@ pub(crate) fn check(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnos
         }
     }
     diagnostics
+}
+
+/// Legacy starts a scan at every independently matched `{ ... }` pair. When a
+/// top-level function/event body is unclosed, its loose statements are not a
+/// scan range, but complete nested blocks inside it are still scanned. Search
+/// only for those closed descendants and let each become its own scan root.
+fn scan_closed_descendant_blocks(
+    body: &crate::ast::Block,
+    syntax_diagnostics: &[Diagnostic],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut work: Vec<_> = body.statements.iter().rev().collect();
+    while let Some(statement) = work.pop() {
+        match &statement.kind {
+            StatementKind::Block(block) if block.closed => {
+                scan_body(block, syntax_diagnostics, diagnostics);
+            }
+            StatementKind::Block(block) => {
+                work.extend(block.statements.iter().rev());
+            }
+            StatementKind::If(if_statement) => {
+                if let Some(else_branch) = &if_statement.else_branch {
+                    work.push(else_branch);
+                }
+                work.push(&if_statement.then_branch);
+            }
+            StatementKind::For(for_statement) => work.push(&for_statement.body),
+            StatementKind::While(while_statement) => work.push(&while_statement.body),
+            StatementKind::DoWhile(do_while) => work.push(&do_while.body),
+            StatementKind::Switch(switch) => {
+                for arm in switch.arms.iter().rev() {
+                    work.extend(arm.statements.iter().rev());
+                }
+            }
+            StatementKind::Empty
+            | StatementKind::Local(_)
+            | StatementKind::Return(_)
+            | StatementKind::Jump(_)
+            | StatementKind::StateChange(_)
+            | StatementKind::Label(_)
+            | StatementKind::Expression(_)
+            | StatementKind::Break(_)
+            | StatementKind::Error(_) => {}
+        }
+    }
 }
 
 fn scan_body(

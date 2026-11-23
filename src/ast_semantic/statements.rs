@@ -3,18 +3,21 @@
 use crate::ast::{Block, Statement, StatementKind};
 
 /// Visit statements in deterministic source order, including nested blocks,
-/// unbraced control bodies and switch arm statements. Unclosed nested blocks
-/// are not traversed.
+/// unbraced control bodies and switch arm statements. Real statement nodes are
+/// traversed even when a nested block is unclosed; the caller decides whether
+/// an unclosed block can be used as an independent scan root.
 pub(crate) fn visit_statements(body: &Block, mut visit: impl FnMut(&Statement)) {
     let mut work: Vec<&Statement> = body.statements.iter().rev().collect();
     while let Some(statement) = work.pop() {
         visit(statement);
         match &statement.kind {
             StatementKind::Block(block) => {
-                if block.closed {
-                    for statement in block.statements.iter().rev() {
-                        work.push(statement);
-                    }
+                // Legacy scans statements inside an unmatched nested brace too
+                // when an enclosing complete body gives the scanner a range.
+                // The AST nodes are still real; the missing close only affects
+                // whether this block can be used as an independent scan root.
+                for statement in block.statements.iter().rev() {
+                    work.push(statement);
                 }
             }
             StatementKind::If(if_statement) => {

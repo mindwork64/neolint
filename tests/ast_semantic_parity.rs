@@ -2107,3 +2107,22 @@ fn firestorm_switch_arms_receive_sem023() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn sem023_scans_closed_nested_blocks_inside_unclosed_outer_bodies() {
+    let source = "integer f() { if (TRUE) { integer a; integer b; a == b; }";
+    let tokens = lex(source).0;
+    let syntax = parse_legacy(&tokens);
+    let legacy = analyze_with_syntax_diagnostics(&tokens, &syntax);
+    let (ast, ast_syntax) = parse_ast(&tokens);
+    let ast_diagnostics = analyze_ast(&ast, &ast_syntax);
+    let legacy_sem023: Vec<_> = legacy.iter().filter(|item| item.code == "SEM023").collect();
+    let ast_sem023: Vec<_> = ast_diagnostics
+        .iter()
+        .filter(|item| item.code == "SEM023")
+        .collect();
+    assert_eq!(legacy_sem023.len(), 1, "{legacy:#?}");
+    assert_eq!(ast_sem023.len(), 1, "{ast_diagnostics:#?}");
+    assert_eq!(legacy_sem023[0].span, ast_sem023[0].span);
+    assert_parity(source);
+}
