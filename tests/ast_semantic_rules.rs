@@ -1,7 +1,7 @@
 //! Focused SEM024 regression coverage over the AST semantic analyzer.
 
 use neolint::ast::{parse_ast, parse_ast_with_options, Ast, AstParseOptions};
-use neolint::ast_semantic::analyze_ast;
+use neolint::ast_semantic::{analyze_ast, analyze_ast_with_environment};
 use neolint::{lex, Diagnostic, DiagnosticKind, Severity, Span};
 
 fn parse(source: &str, options: AstParseOptions) -> (Ast, Vec<Diagnostic>) {
@@ -685,6 +685,40 @@ fn call_graph_budget_overflow_suppresses_sem026() {
 }
 
 #[test]
+fn production_edge_budget_overflow_suppresses_sem026() {
+    let mut source = String::new();
+    for index in 0..4_096 {
+        let first = (index + 1) % 4_096;
+        let second = (index + 2) % 4_096;
+        let third = (index + 3) % 4_096;
+        source.push_str(&format!(
+            "f{index}() {{ f{first}(); f{second}(); f{third}(); }}\n"
+        ));
+    }
+    source.push_str("default { state_entry() { } }\n");
+    let (ast, syntax) = parse(&source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn production_work_budget_overflow_suppresses_sem026() {
+    let mut source = String::new();
+    for index in 0..4_096 {
+        let next = (index + 1) % 4_096;
+        // Unique edges stay below the edge cap while repeated call sites push
+        // the checked work counter past its production limit.
+        source.push_str(&format!(
+            "f{index}() {{ f{next}(); f{next}(); f{next}(); f{next}(); }}\n"
+        ));
+    }
+    source.push_str("default { state_entry() { } }\n");
+    let (ast, syntax) = parse(&source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
 fn sem025_and_sem026_are_deterministic_and_ordered_by_declaration() {
     let source = "integer callee(integer unused) { return 1; }\nalpha() { }\nbeta() { }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
     let parameter_start = source.find("unused").unwrap();
@@ -734,4 +768,179 @@ fn sem024_keeps_reads_inside_unreachable_functions_while_sem026_reports_the_func
     assert!(!sem026(&diagnostics)
         .iter()
         .any(|diagnostic| diagnostic.message.contains("reachable_helper")));
+}
+
+#[test]
+fn chained_assignment_is_write_write_read() {
+    let source = "default { state_entry() { integer a; integer b; integer c; a = b = c; } }\n";
+    let a_start = source.find("integer a;").unwrap() + "integer ".len();
+    let b_start = source.find("integer b;").unwrap() + "integer ".len();
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![
+            expected_unused(source, a_start, "a"),
+            expected_unused(source, b_start, "b"),
+        ]
+    );
+}
+
+#[test]
+fn assignment_inside_a_call_argument_is_a_write() {
+    let source =
+        "default { state_entry() { integer target; llOwnerSay((string)(target = 1)); } }\n";
+    let start = source.find("integer target;").unwrap() + "integer ".len();
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![expected_unused(source, start, "target")]
+    );
+}
+
+#[test]
+fn component_increment_is_rejected_by_the_parser_and_suppresses_sem024() {
+    // LSL increment/decrement applies to variables, not components. The parser
+    // rejects both forms, so the unit fails closed instead of guessing that the
+    // base variable was read.
+    let source = "default { state_entry() { vector v; v.x++; ++v.x; } }\n";
+    let (ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert_eq!(
+        syntax
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec!["PAR011", "PAR011"]
+    );
+    assert!(sem024(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn lazy_list_simple_write_is_a_base_write() {
+    let source = "default { state_entry() { list l; l[0] = 1; } }\n";
+    let start = source.find("list l;").unwrap() + "list ".len();
+    let options = AstParseOptions::lsl().with_lazy_lists_enabled(true);
+    assert_eq!(
+        sem024(&semantic_valid_with(source, options)),
+        vec![expected_unused(source, start, "l")]
+    );
+}
+
+#[test]
+fn parenthesized_assignment_target_is_a_write() {
+    let source = "default { state_entry() { integer a; (a) = 1; } }\n";
+    let start = source.find("integer a;").unwrap() + "integer ".len();
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![expected_unused(source, start, "a")]
+    );
+}
+
+#[test]
+fn for_initializer_assignment_is_a_write() {
+    let source = "default { state_entry() { integer index; for (index = 0; 0; ) { } } }\n";
+    let start = source.find("integer index;").unwrap() + "integer ".len();
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![expected_unused(source, start, "index")]
+    );
+}
+
+#[test]
+fn assignment_inside_a_switch_case_expression_is_a_write() {
+    let source =
+        "default { state_entry() { integer target; switch (1) { case (target = 1): break; } } }\n";
+    let start = source.find("integer target;").unwrap() + "integer ".len();
+    let options = AstParseOptions::lsl().with_switches_enabled(true);
+    assert_eq!(
+        sem024(&semantic_valid_with(source, options)),
+        vec![expected_unused(source, start, "target")]
+    );
+}
+
+#[test]
+fn self_referential_initializer_counts_as_a_read() {
+    let source = "default { state_entry() { integer a = a; } }\n";
+    assert!(sem024(&semantic(source)).is_empty());
+}
+
+#[test]
+fn use_before_declaration_binds_to_the_outer_declaration() {
+    let source = "default { state_entry() { integer outer; { llOwnerSay((string)outer); integer outer; } } }\n";
+    let inner_start = source.match_indices("outer").nth(2).unwrap().0;
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![expected_unused(source, inner_start, "outer")]
+    );
+}
+
+#[test]
+fn identifier_matching_is_case_sensitive() {
+    let source = "default { state_entry() { integer Value; llOwnerSay((string)value); } }\n";
+    let value_start = source.find("Value").unwrap();
+    let diagnostics = semantic(source);
+    assert_eq!(
+        sem024(&diagnostics),
+        vec![expected_unused(source, value_start, "Value")]
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM012" && diagnostic.message.contains("'value'")),
+        "case-variant use must remain unresolved: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn nested_scope_unused_variables_are_reported_in_source_order() {
+    let source = "default { state_entry() { integer a; { integer b; } integer c; } }\n";
+    let a_start = source.find("integer a;").unwrap() + "integer ".len();
+    let b_start = source.find("integer b;").unwrap() + "integer ".len();
+    let c_start = source.find("integer c;").unwrap() + "integer ".len();
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![
+            expected_unused(source, a_start, "a"),
+            expected_unused(source, b_start, "b"),
+            expected_unused(source, c_start, "c"),
+        ]
+    );
+}
+
+#[test]
+fn environment_failure_suppresses_only_the_phase7_rules() {
+    let source = "integer unused_global;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let (ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+
+    let baseline = analyze_ast(&ast, &syntax);
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            baseline.iter().any(|diagnostic| diagnostic.code == code),
+            "baseline missing {code}: {baseline:?}"
+        );
+    }
+
+    let suppressed = analyze_ast_with_environment(&ast, &syntax, false);
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            !suppressed.iter().any(|diagnostic| diagnostic.code == code),
+            "unreliable environment must suppress {code}: {suppressed:?}"
+        );
+    }
+
+    fn is_phase7(diagnostic: &Diagnostic) -> bool {
+        matches!(diagnostic.code, "SEM024" | "SEM025" | "SEM026")
+    }
+    let baseline_other: Vec<Diagnostic> = baseline
+        .iter()
+        .filter(|diagnostic| !is_phase7(diagnostic))
+        .cloned()
+        .collect();
+    let suppressed_other: Vec<Diagnostic> = suppressed
+        .iter()
+        .filter(|diagnostic| !is_phase7(diagnostic))
+        .cloned()
+        .collect();
+    assert_eq!(
+        suppressed_other, baseline_other,
+        "environment flag must not change SEM001-SEM023 output"
+    );
 }

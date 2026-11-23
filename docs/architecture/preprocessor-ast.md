@@ -3574,9 +3574,12 @@ dependencies and no production `unwrap`/`expect`/panic. MSRV remains Rust 1.75.
 (`ea3d42f910e5c330266861aa97fd1901745a92f2`) added the shared identifier-use
 model and `SEM024`; Slice 2 (`a246d27d4203225d903e611078e49f32f2849e17`) added
 `SEM025`, `SEM026`, call-site ownership and the bounded call graph; Slice 3
-(this change) adds the documentation contract, this record, analysis-unit
-isolation and ordering regressions, and documentation validation. Stable `main`
-and the published v1.0.0 release are untouched.
+(`28c87ce8dde541caa88bc9bb2713a4f6ba059c5a`) added the documentation contract,
+this record, analysis-unit isolation and ordering regressions, and
+documentation validation. Phase 7b (this change) closes the post-audit findings:
+the environment-reliability gate, source-ordered SEM024/SEM025 output, and the
+contract-shape regression matrix. Stable `main` and the published v1.0.0 release
+are untouched.
 
 **Objective.** Add three conservative AST-native lint diagnostics — `SEM024`
 (variable is never read), `SEM025` (parameter is never read) and `SEM026`
@@ -3597,8 +3600,8 @@ source offset and records only `Read`/`ReadWrite`, preserving declaration-order
 visibility and shadowing. Plain assignment targets and direct call callees are
 not reads; compound assignment targets, `++`/`--`, component reads, initializer
 expressions, loop clauses and switch/lazy-list expressions are. The rules render
-one finding per unread symbol in scope registration order at the declaration
-name span.
+one finding per unread symbol in source order (sorted by declaration name-span
+start) at the declaration name span.
 
 **Call ownership and call graph.** `src/ast_semantic/calls.rs` visits every call
 exactly once and assigns `CallSite.owner ∈ {GlobalInitializer, EventHandler,
@@ -3613,12 +3616,20 @@ indirect calls and calls without a real closing parenthesis create no edge or
 root. Reachability is an iterative, cycle-safe worklist with deduplicated edges,
 and unreachable nodes are reported in declaration order.
 
-**Fail-closed policy.** `unit_is_reliable` returns false when parser diagnostics
-exist, recovered function signatures exist, a top-level `Error` or any
-`ExpressionKind::Error` exists, or any function/event/state body is missing,
-unclosed or contains an `Error` statement. All three rules then emit nothing.
-The gate is deliberately unit-wide because a hidden read or call could live in
-any malformed region; a partial optimistic result is not reported.
+**Fail-closed policy.** `src/source/unit.rs::analyze_prepared` sets the
+environment flag false when the unit has an error-severity preprocessor
+diagnostic (for example a missing include or `#error`) or an error-severity
+lexical diagnostic, because source may have been dropped before the AST was
+built or not tokenized. It passes that flag for both the AST and Compare AST
+semantic calls. The additive public entry point
+`ast_semantic::analyze_ast_with_environment` threads it into
+`unit_is_reliable`, while the existing `analyze_ast` delegates with `true`.
+`unit_is_reliable` also returns false when parser diagnostics exist, recovered
+function signatures exist, a top-level `Error` or any `ExpressionKind::Error`
+exists, or any function/event/state body is missing, unclosed or contains an
+`Error` statement. All three rules then emit nothing. The gate is deliberately
+unit-wide because a hidden read or call could live in any malformed or dropped
+region; a partial optimistic result is not reported.
 
 **Resource limits.** The call graph is bounded at 4,096 nodes, 8,192 unique
 edges and 16,384 checked work steps. Any overflow returns a suppressed
@@ -3643,22 +3654,26 @@ rows, and `tests/corpus.rs` filters those codes only for explicit Legacy runs.
 No new fixture, dependency or manifest row was added. Existing AST parity
 expectations gained the accompanying new warnings where a fixture now produces
 them; no SEM001–SEM023 message, span, severity, kind or ordering changed. MSRV
-remains Rust 1.75 and production code adds no `unwrap`/`expect`/panic.
+remains Rust 1.75 and production code adds no `unwrap`/`expect`/panic. Phase 7b
+adds the additive `analyze_ast_with_environment` entry point, the environment
+flag in `src/source/unit.rs::analyze_prepared`, and source-order sorting in the
+two unused-declaration rules; it does not change Legacy, display composition,
+the comparator, engine selection, exit codes or any existing frozen API.
 
 **Validation evidence (final working-tree run).**
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 923 passed, 0 failed
-  (920 before this slice plus three new Rust regressions).
-- `cargo test --release --all-targets --all-features` → exit 0, 923 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 923 passed.
+- `cargo test --all-targets --all-features` → exit 0, 944 passed, 0 failed
+  (923 before Phase 7b plus twenty-one audit regressions).
+- `cargo test --release --all-targets --all-features` → exit 0, 944 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 944 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
   → 10 tests OK.
 - `python3 scripts/test_documentation.py` → 7 tests OK.
 - `git diff --check` → exit 0.
-- Focused: `--test ast_semantic_rules` 57 passed, `--test cli` 64 passed,
+- Focused: `--test ast_semantic_rules` 71 passed, `--test cli` 69 passed,
   `--test corpus` 5 passed, `--test ast_golden` 6 passed, `--test legacy_golden`
   3 passed, `--test analysis_engine_compare` 25 passed; 0 failed in every
   target.

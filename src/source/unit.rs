@@ -4,7 +4,7 @@
 //! `PreparedSource`/`SourceMap` pair) or plain-LSL Legacy mode (neither).
 
 use crate::diagnostic::resolve::{LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic};
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::compare::compare_semantic_diagnostics;
 use crate::engine::wiring::{
     analyze_ast as analyze_ast_semantics, analyze_legacy as analyze_legacy_semantics, AstSyntax,
@@ -232,6 +232,17 @@ impl AnalysisUnit {
         }
         let text = prepared.text();
         let (tokens, lexical) = crate::lex(text);
+        // Error-severity preprocessing may have dropped source before this text
+        // was produced, and error-severity lexical diagnostics mean parts of it
+        // were not tokenized. Either makes the Phase 7 read/use and reachability
+        // rules fail closed. Informational/warning notices do not.
+        let environment_reliable = !prepared
+            .preprocess_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+            && !lexical
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error);
         let options = crate::ast::AstParseOptions::from_flags(
             prepared.switches_enabled(),
             prepared.lazy_lists_enabled(),
@@ -248,7 +259,7 @@ impl AnalysisUnit {
             }
             AnalysisEngine::Ast => {
                 let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax);
+                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax, environment_reliable);
                 let mut display = lexical;
                 display.extend(ast_syntax.into_diagnostics());
                 display.extend(ast_semantic);
@@ -258,7 +269,7 @@ impl AnalysisUnit {
                 let legacy_syntax = LegacySyntax::parse(&tokens);
                 let legacy_semantic = analyze_legacy_semantics(&tokens, &legacy_syntax);
                 let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax);
+                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax, environment_reliable);
                 comparison = Some(compare_semantic_diagnostics(
                     &legacy_semantic,
                     &ast_semantic,

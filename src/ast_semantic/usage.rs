@@ -55,15 +55,22 @@ pub(crate) fn used_symbols(uses: &[IdentifierUse<'_>], scopes: &ScopeTree) -> Ha
 /// Whether the unit is complete enough for optimistic read/use analysis.
 ///
 /// A hidden read could live in any malformed region, so the rules fail closed:
-/// when reliability cannot be established they emit nothing. This is the
-/// documented conservative boundary for SEM024/SEM025. `facts` must be the
-/// shared [`crate::ast_semantic::expressions::collect_facts`] output for `ast`.
+/// when reliability cannot be established they emit nothing. `environment_reliable`
+/// is false when the same unit produced an error-severity preprocessor or
+/// lexical diagnostic, because preprocessing may have dropped source before the
+/// AST was built. This is the documented conservative boundary for
+/// SEM024/SEM025. `facts` must be the shared
+/// [`crate::ast_semantic::expressions::collect_facts`] output for `ast`.
 pub(crate) fn unit_is_reliable(
     ast: &Ast,
     syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
     facts: &ExpressionFacts<'_>,
 ) -> bool {
-    if !syntax_diagnostics.is_empty() || !ast.recovered_functions.is_empty() {
+    if !environment_reliable
+        || !syntax_diagnostics.is_empty()
+        || !ast.recovered_functions.is_empty()
+    {
         return false;
     }
     if ast
@@ -152,7 +159,7 @@ mod tests {
 
     fn reliable(ast: &Ast) -> bool {
         let facts = unit_facts(ast);
-        unit_is_reliable(ast, &[], &facts)
+        unit_is_reliable(ast, &[], true, &facts)
     }
 
     fn error_node(ast: &Ast) -> ErrorNode {
@@ -178,7 +185,14 @@ mod tests {
             span: ast.span,
         };
         let facts = unit_facts(&ast);
-        assert!(!unit_is_reliable(&ast, &[diagnostic], &facts));
+        assert!(!unit_is_reliable(&ast, &[diagnostic], true, &facts));
+    }
+
+    #[test]
+    fn unreliable_environment_fails_closed() {
+        let ast = clean_ast();
+        let facts = unit_facts(&ast);
+        assert!(!unit_is_reliable(&ast, &[], false, &facts));
     }
 
     #[test]

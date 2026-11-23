@@ -408,6 +408,128 @@ fn compare_ignores_sem024_sem025_and_sem026() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn preprocess_include_failure_suppresses_sem024_sem025_and_sem026() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "missing-include.lsl",
+        "#include \"missing.lsl\"\ninteger unused_global;\ninteger unused_callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)unused_callee(1)); } }\n",
+    );
+    let display = source.to_str().unwrap();
+
+    let output = run_args(&["--preprocess", display]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[PRE032]"), "{stdout}");
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            !stdout.contains(code),
+            "unreliable unit emitted {code}: {stdout}"
+        );
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn preprocess_error_directive_suppresses_sem024_sem025_and_sem026() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "error-directive.lsl",
+        "#error stop\ninteger unused_global;\ninteger unused_callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)unused_callee(1)); } }\n",
+    );
+    let display = source.to_str().unwrap();
+
+    let output = run_args(&["--preprocess", display]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[PRE001]"), "{stdout}");
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            !stdout.contains(code),
+            "unreliable unit emitted {code}: {stdout}"
+        );
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn informational_preprocessor_notice_does_not_suppress_unused_analysis() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "kill-switch.lsl",
+        "//fspreprocessor off\ninteger unused_global;\ndefault { state_entry() { } }\n",
+    );
+    let display = source.to_str().unwrap();
+
+    let output = run_args(&["--dialect", "firestorm", display]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("info[PRE037]"), "{stdout}");
+    assert!(
+        stdout.contains("warning[SEM024]: variable 'unused_global' is declared but never read"),
+        "{stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn successful_preprocess_include_keeps_unused_analysis_enabled() {
+    let directory = temporary_directory();
+    let includes = directory.join("includes");
+    fs::create_dir_all(&includes).unwrap();
+    write_file(
+        &includes,
+        "usage.lsl",
+        "integer read_global() { return shared_global; }\n",
+    );
+    let source = write_file(
+        &directory,
+        "root.lsl",
+        "integer shared_global;\n#include \"usage.lsl\"\ndefault { state_entry() { llOwnerSay((string)read_global()); } }\n",
+    );
+    let display = source.to_str().unwrap();
+
+    let output = run_args(&["--preprocess", "-I", includes.to_str().unwrap(), display]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{display}: no diagnostics\n"),
+        "the included read must keep the global used"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn lexical_error_suppresses_sem024_sem025_and_sem026() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "lexical-error.lsl",
+        "integer unused_global;\ninteger unused_callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)unused_callee(1)); \u{a7} } }\n",
+    );
+    let display = source.to_str().unwrap();
+
+    let output = run_args(&[display]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[LEX000]"), "{stdout}");
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            !stdout.contains(code),
+            "unreliable unit emitted {code}: {stdout}"
+        );
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
 /// Render the exact human line for one AST-only unused-analysis finding.
 fn expected_unused_diagnostic(path: &str, source: &str, name: &str, code: &str) -> String {
     let start = source.find(name).unwrap();

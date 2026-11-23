@@ -336,7 +336,7 @@ fn push_expression_children<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::collect_facts;
+    use super::{collect_facts, UseContext};
     use crate::ast::parse_ast;
     use crate::ast_semantic::scopes::ScopeTree;
     use crate::lex;
@@ -508,5 +508,24 @@ default { state_entry() { f(g); } }
             ),
             "initializer facts must stay source ordered"
         );
+    }
+
+    #[test]
+    fn component_increment_contexts_are_read_write_despite_parser_rejection() {
+        let source = "default { state_entry() { vector v; v.x++; ++v.x; } }";
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast(&tokens);
+        assert!(!syntax.is_empty(), "fixture must record PAR011");
+        let scopes = ScopeTree::build(&ast);
+        let facts = collect_facts(&ast, &scopes);
+
+        let contexts: Vec<UseContext> = facts
+            .uses
+            .iter()
+            .filter(|usage| usage.identifier.name == "v")
+            .map(|usage| usage.context)
+            .collect();
+        assert_eq!(contexts, vec![UseContext::ReadWrite, UseContext::ReadWrite]);
     }
 }

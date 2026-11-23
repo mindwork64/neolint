@@ -55,7 +55,7 @@ Neolint recognizes decimal and hexadecimal integer literals, floating-point lite
 
 Vector variables support `.x`, `.y`, and `.z`. Rotation variables support `.x`, `.y`, `.z`, and `.s`. Component values are floats. Component access is supported on declared variables, not directly on literals or function-call results.
 
-Identifiers are currently ASCII-only. Non-ASCII characters are accepted inside comments and string contents, but not in identifiers.
+Identifiers are currently ASCII-only. Non-ASCII characters are accepted inside comments and string contents, but not in identifiers. Identifier matching is case-sensitive, exactly as in the Legacy engine: `Value` and `value` are distinct bindings.
 
 ## Firestorm extensions (opt-in)
 
@@ -175,13 +175,18 @@ Prototypes, recovered signatures, incomplete bodies and duplicate declarations
 after the first definition are never candidates. Functions reached only through
 another unreachable function remain unreachable.
 
-All three rules fail closed on malformed input: if parser diagnostics, recovered
-function signatures, error nodes, missing or unclosed function/event/state
-bodies, or other unreliable structure make the read/use set or call graph
-untrustworthy, they emit nothing. `SEM026` also suppresses the whole rule when
-its bounded graph limits (4,096 nodes, 8,192 edges, 16,384 work steps) are
-exceeded, rather than reporting a partial result. The exact messages, spans,
-defaults, and boundaries are in the [diagnostic reference](diagnostics.md).
+All three rules fail closed on malformed input: if the same unit has an
+error-severity preprocessor or lexical diagnostic, or if parser diagnostics,
+recovered function signatures, error nodes, missing or unclosed
+function/event/state bodies, or other unreliable structure make the read/use set
+or call graph untrustworthy, they emit nothing. Error-severity preprocessing can
+mean source was dropped before parsing, and an error-severity lexical diagnostic
+means part of the text was not tokenized, so neither case is safe to analyze
+optimistically. Informational and warning preprocessor notices do not suppress.
+`SEM026` also suppresses the whole rule when its bounded graph limits (4,096
+nodes, 8,192 edges, 16,384 work steps) are exceeded, rather than reporting a
+partial result. The exact messages, spans, defaults, and boundaries are in the
+[diagnostic reference](diagnostics.md).
 
 ## Important limitations
 

@@ -69,9 +69,14 @@ pub(crate) fn analyze_legacy(tokens: &[Token], syntax: &LegacySyntax) -> Vec<Dia
     crate::semantic::analyze_with_syntax_diagnostics(tokens, &syntax.0)
 }
 
-/// Run the AST semantic analyzer with its own parser findings.
-pub(crate) fn analyze_ast(ast: &Ast, syntax: &AstSyntax) -> Vec<Diagnostic> {
-    crate::ast_semantic::analyze_ast(ast, &syntax.0)
+/// Run the AST semantic analyzer with its own parser findings and an explicit
+/// environment-reliability flag.
+pub(crate) fn analyze_ast(
+    ast: &Ast,
+    syntax: &AstSyntax,
+    environment_reliable: bool,
+) -> Vec<Diagnostic> {
+    crate::ast_semantic::analyze_ast_with_environment(ast, &syntax.0, environment_reliable)
 }
 
 #[cfg(test)]
@@ -98,7 +103,7 @@ mod tests {
 
         let (ast, ast_syntax) = AstSyntax::parse(&tokens, AstParseOptions::lsl());
         let expected_ast = crate::ast_semantic::analyze_ast(&ast, &ast_syntax.0);
-        let actual_ast = analyze_ast(&ast, &ast_syntax);
+        let actual_ast = analyze_ast(&ast, &ast_syntax, true);
         assert_eq!(actual_ast, expected_ast);
 
         // The report is built from these two raw streams by the comparator.
@@ -139,8 +144,8 @@ mod tests {
 
         let (ast, _) = AstSyntax::parse(&tokens, AstParseOptions::lsl());
         let ast_empty = AstSyntax::from_diagnostics(Vec::new());
-        assert!(has_sem002(&analyze_ast(&ast, &ast_empty)));
+        assert!(has_sem002(&analyze_ast(&ast, &ast_empty, true)));
         let ast_sentinel = AstSyntax::from_diagnostics(vec![sentinel]);
-        assert!(!has_sem002(&analyze_ast(&ast, &ast_sentinel)));
+        assert!(!has_sem002(&analyze_ast(&ast, &ast_sentinel, true)));
     }
 }

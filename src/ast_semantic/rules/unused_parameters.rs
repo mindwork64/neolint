@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
-use super::super::scopes::{ScopeTree, SymbolKind};
+use super::super::scopes::{ScopeTree, Symbol, SymbolKind};
 use super::super::usage::{symbol_key, SymbolKey};
 
 pub(crate) fn check(
@@ -21,23 +21,24 @@ pub(crate) fn check(
         return Vec::new();
     }
 
-    let mut diagnostics = Vec::new();
-    for scope in scopes.scopes() {
-        for symbol in &scope.symbols {
-            if symbol.kind != SymbolKind::Parameter {
-                continue;
-            }
-            if used.contains(&symbol_key(symbol)) {
-                continue;
-            }
-            diagnostics.push(Diagnostic {
-                code: "SEM025",
-                severity: Severity::Warning,
-                kind: DiagnosticKind::Lint,
-                message: format!("parameter '{}' is never read", symbol.name),
-                span: symbol.span,
-            });
-        }
-    }
-    diagnostics
+    let mut candidates: Vec<&Symbol> = scopes
+        .scopes()
+        .iter()
+        .flat_map(|scope| scope.symbols.iter())
+        .filter(|symbol| symbol.kind == SymbolKind::Parameter)
+        .filter(|symbol| !used.contains(&symbol_key(symbol)))
+        .collect();
+    // Scope creation order is not source order once nested blocks are present.
+    candidates.sort_by_key(|symbol| symbol.span.start);
+
+    candidates
+        .into_iter()
+        .map(|symbol| Diagnostic {
+            code: "SEM025",
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            message: format!("parameter '{}' is never read", symbol.name),
+            span: symbol.span,
+        })
+        .collect()
 }
