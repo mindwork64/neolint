@@ -15,8 +15,22 @@
   "cross_pass_inconsistencies": [],
   "features": "default",
   "harness_branch": "exp-preprocessor-ast-phase-08-stabilization",
-  "harness_commit": "37731ffa0f53a8ecf04fd57ffb9f33a426d8ced7",
-  "harness_tree": "6b8b84fc2dfc476d7d174ddd579759ad1ab2a458",
+  "harness_commit": "a0fea1ea5ce73557a8e925efc34c50528fdd6a5d",
+  "harness_dirty": false,
+  "harness_source": {
+    "combined_sha256": "babcf808592bf1803849ff1e4313dca8f334f7964d128587230186808347efe3",
+    "files": {
+      "bench/bench.py": {
+        "bytes": 31639,
+        "sha256": "96cfb5da15a607880c68cff4a0956b1ef5e8bdc93d69cd8f0c6935288465a0fe"
+      },
+      "bench/workloads.py": {
+        "bytes": 7771,
+        "sha256": "f42519287a780468e9c60e45e63d7cf42af9aac8ba05b1cf2f2baeebdfc85ed2"
+      }
+    }
+  },
+  "harness_tree": "8264d70e02802de0fe57e4d49e2a662c8086eeef",
   "input_file_count": 70,
   "input_total_bytes": 8764087,
   "inputs": {

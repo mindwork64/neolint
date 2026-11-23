@@ -24,8 +24,14 @@ Results are written to `bench/results/<label>/{summary.md,meta.json,raw.jsonl,ra
 `summary.md`, `meta.json` and the compressed `raw.jsonl.gz` are committed;
 uncompressed `raw.jsonl` is regenerated on demand and ignored by git.
 
+Evidence captures must run from a **clean** worktree: a commit id cannot describe
+uncommitted harness code, so the harness refuses by default (exit 8) and
+`--allow-dirty-harness` marks the metadata for exploratory runs. Because later
+documentation commits move HEAD, `harness_source.combined_sha256` (a digest over
+`bench/bench.py` and `bench/workloads.py`) is what remains verifiable.
+
 `meta.json` separates the **harness** revision (`harness_commit`/`harness_tree`/
-`harness_branch`) from the **measured binary** revision
+`harness_branch`/`harness_dirty`/`harness_source`) from the **measured binary** revision
 (`binary_source_commit`/`binary_source_tree`) and records the binary SHA-256.
 Passing `--expect-binary-sha256` makes the harness refuse a binary that does not
 match (exit 5) and sets `binary_sha256_verified`. Passing `--verify-build` checks

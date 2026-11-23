@@ -40,6 +40,8 @@ the measured binary revision is passed explicitly and verified by SHA-256.
 
 | | Baseline | Post-fix |
 | --- | --- | --- |
+| Harness revision (clean worktree) | `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`, tree `8264d70e02802de0fe57e4d49e2a662c8086eeef` | same |
+| Harness source digest | `babcf808592bf1803849ff1e4313dca8f334f7964d128587230186808347efe3` over `bench/bench.py` + `bench/workloads.py` | same |
 | Binary source commit | `66936b0e175d51cba8d83377061229869ef64e96` | `1273c4d325428c9fa95a49c9122bfc99ae5d9e34` |
 | Binary source tree | `87d810459064f438fe61c0a632fa83642ea68971` | `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4` |
 | Binary SHA-256 | `83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8` | `227352d90b1ed1233046e6e7073726c43a354352e94c1e3ac06cc7509843babc` |
@@ -54,8 +56,18 @@ toolchain, and every build worktree reported `git status --porcelain` empty. The
 post-fix SHA-256 is byte-identical to the binary built from the primary working
 tree, which also demonstrates that the build is path-independent here.
 
+Harness provenance is now pinned the same way as the binary. Both captures ran
+from a **clean** worktree at `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`
+(`harness_dirty: false`), so `harness_commit` really does describe the code that
+ran. Because the documentation and result files were committed afterwards, HEAD
+has since moved; `harness_source.combined_sha256` — a digest of the executing
+harness files — is what stays verifiable across those later commits, and it is
+unchanged as long as `bench/` is not modified. The harness refuses to capture
+evidence from a dirty worktree by default (exit 8) and `--allow-dirty-harness`
+records the dirty state explicitly for exploratory runs.
+
 Each `bench/results/*/meta.json` records `harness_commit`, `harness_tree`,
-`harness_branch`, `binary_source_commit`, `binary_source_tree`,
+`harness_branch`, `harness_dirty`, `harness_source`, `binary_source_commit`, `binary_source_tree`,
 `binary_sha256`, `binary_sha256_expected`, `binary_sha256_verified`,
 `binary_source_build_verified`, `binary_source_rebuilt_sha256` and
 `cross_pass_consistent`. The two verification flags mean different things and are
@@ -103,7 +115,9 @@ python3 bench/bench.py --passes 2 --skip-build \
 ```
 
 To rebuild from source instead of a worktree, drop `--skip-build --binary` and
-pass `--binary-source-commit`/`--expect-binary-sha256` for the record.
+pass `--binary-source-commit`/`--expect-binary-sha256`/`--verify-build` for the
+record. Captures must run from a clean harness worktree; `--allow-dirty-harness`
+exists only for exploratory runs and marks the metadata accordingly.
 
 Every sample records exit status and SHA-256 of stdout and stderr. A row whose
 exit status or digests vary **within** a pass is a hard failure (`exit 4`), never
@@ -126,8 +140,8 @@ data is committed next to each summary:
 
 | Run | File | Bytes | SHA-256 |
 | --- | --- | --- | --- |
-| Baseline | `bench/results/baseline-66936b0/raw.jsonl.gz` | 27,487 | `2b0a2b3d40b956cbb05b153278047d721d18ebd236b8b414c4e4b3c875eb82c7` |
-| Post-fix | `bench/results/fixed-1273c4d/raw.jsonl.gz` | 27,556 | `acdaa291b4bdef866425939613edfb55d6ab2a660eee625654e1aab40b6dd25c` |
+| Baseline | `bench/results/baseline-66936b0/raw.jsonl.gz` | 28,504 | `f221dbef8e84d854ab56adc69388eaee80989f78aee6ee593479e80a138e46ea` |
+| Post-fix | `bench/results/fixed-1273c4d/raw.jsonl.gz` | 28,048 | `7e6d00e574687e4198125fcb5f36e5ab017e2d1aaba1d30c567a760c195bf8cd` |
 
 Each file holds one JSON object per sample: `pass`, `row`, `sample`, `ns`,
 `exit`, both digests, both byte counts. `gunzip -c … | head` is enough to verify.
@@ -187,43 +201,43 @@ combined samples.
 
 | Row | n | Base median | Base p95 | Head median | Head p95 | Δ median |
 | --- | --- | --- | --- | --- | --- | --- |
-| `startup` (`--version`) | 100 | 1.37 | 1.52 | 1.41 | 1.54 | +2.8 % |
-| `corpus_dir/default` | 80 | 11.84 | 12.91 | 12.18 | 13.09 | +2.9 % |
-| `corpus_dir/ast` | 80 | 11.69 | 12.24 | 11.78 | 12.65 | +0.8 % |
-| `corpus_dir/legacy` | 80 | 6.83 | 7.03 | 6.89 | 7.45 | +0.9 % |
-| `corpus_dir/compare` | 80 | 13.93 | 14.72 | 14.12 | 15.10 | +1.4 % |
-| `many_symbols/default` | 60 | 51.47 | 59.63 | 31.53 | 35.27 | **−38.7 %** |
-| `many_symbols/ast` | 60 | 51.61 | 60.06 | 33.57 | 34.97 | **−34.9 %** |
-| `many_symbols/legacy` | 60 | 9.29 | 17.26 | 11.64 | 17.07 | +25.3 % |
-| `call_graph/default` | 60 | 28.43 | 29.73 | 27.70 | 29.17 | −2.6 % |
-| `call_graph/legacy` | 60 | 14.36 | 15.15 | 9.99 | 15.51 | −30.5 % |
-| `near_limit/default` | 10 | 456.69 | 470.92 | 464.65 | 489.63 | +1.7 % |
-| `near_limit/legacy` | 10 | 214.89 | 230.12 | 223.11 | 236.72 | +3.8 % |
-| `diagnostic_flood/default` | 40 | 159.04 | 180.54 | 86.18 | 97.01 | **−45.8 %** |
-| `diagnostic_flood/legacy` | 40 | 43.38 | 51.74 | 44.50 | 52.23 | +2.6 % |
-| `preprocess/default` | 60 | 19.79 | 22.07 | 15.97 | 22.47 | −19.3 % |
-| `preprocess/legacy` | 60 | 11.94 | 17.94 | 10.14 | 17.77 | −15.1 % |
-| `malformed/default` | 60 | 6.87 | 7.17 | 4.88 | 7.23 | −29.0 % |
-| `malformed/legacy` | 60 | 6.17 | 6.49 | 6.17 | 6.68 | −0.0 % |
-| `multi_file/default` | 60 | 7.36 | 7.80 | 7.52 | 8.22 | +2.2 % |
-| `multi_file/legacy` | 60 | 4.16 | 4.58 | 4.38 | 4.63 | +5.4 % |
-| `nested_scopes/default` | 60 | 6.67 | 7.62 | 4.80 | 7.18 | −28.0 % |
-| `nested_scopes/legacy` | 60 | 4.49 | 4.98 | 2.69 | 5.00 | −40.1 % |
-| `stdin/default` | 60 | 2.32 | 4.08 | 3.03 | 4.27 | +30.1 % |
+| `startup` (`--version`) | 100 | 1.18 | 1.69 | 1.42 | 1.66 | +20.4 % |
+| `corpus_dir/default` | 80 | 8.98 | 14.24 | 9.84 | 12.76 | +9.6 % |
+| `corpus_dir/ast` | 80 | 9.29 | 12.67 | 9.81 | 12.50 | +5.6 % |
+| `corpus_dir/legacy` | 80 | 7.03 | 8.16 | 6.89 | 7.64 | −2.0 % |
+| `corpus_dir/compare` | 80 | 9.84 | 14.83 | 12.51 | 15.06 | +27.1 % |
+| `many_symbols/default` | 60 | 48.97 | 58.93 | 30.12 | 37.74 | **−38.5 %** |
+| `many_symbols/ast` | 60 | 46.32 | 58.63 | 27.76 | 34.92 | **−40.1 %** |
+| `many_symbols/legacy` | 60 | 10.28 | 18.16 | 11.84 | 17.11 | +15.2 % |
+| `call_graph/default` | 60 | 23.60 | 30.58 | 23.19 | 31.11 | −1.8 % |
+| `call_graph/legacy` | 60 | 11.09 | 16.02 | 10.24 | 15.81 | −7.6 % |
+| `near_limit/default` | 10 | 486.52 | 508.33 | 496.71 | 522.39 | +2.1 % |
+| `near_limit/legacy` | 10 | 240.18 | 256.57 | 249.00 | 259.19 | +3.7 % |
+| `diagnostic_flood/default` | 40 | 173.59 | 189.80 | 91.18 | 99.26 | **−47.5 %** |
+| `diagnostic_flood/legacy` | 40 | 49.89 | 61.44 | 46.47 | 60.19 | −6.9 % |
+| `preprocess/default` | 60 | 15.09 | 23.02 | 13.49 | 22.33 | −10.6 % |
+| `preprocess/legacy` | 60 | 11.61 | 18.60 | 10.31 | 19.18 | −11.2 % |
+| `malformed/default` | 60 | 7.14 | 7.96 | 6.72 | 7.96 | −5.8 % |
+| `malformed/legacy` | 60 | 5.13 | 7.23 | 6.29 | 7.03 | +22.7 % |
+| `multi_file/default` | 60 | 7.32 | 8.30 | 7.39 | 7.96 | +1.1 % |
+| `multi_file/legacy` | 60 | 3.86 | 4.98 | 3.00 | 4.87 | −22.2 % |
+| `nested_scopes/default` | 60 | 6.12 | 8.20 | 6.88 | 7.68 | +12.4 % |
+| `nested_scopes/legacy` | 60 | 4.77 | 5.46 | 4.28 | 5.66 | −10.3 % |
+| `stdin/default` | 60 | 2.84 | 4.51 | 3.86 | 4.18 | +35.7 % |
 
 **Reading the noise.** The Legacy rows cannot change between these two binaries,
-yet they move by up to 40 % (`nested_scopes/legacy`) and `many_symbols/legacy` by
-25 %, because each binary was measured in its own sequential session. That is the
-empirical noise envelope for sub-10 ms rows in this session. Only the two rows with
-effects far outside it — `diagnostic_flood/default` (−45.8 %) and
-`many_symbols/default` (−38.7 %) — are claimed as improvements, and both replicate
-across four independent sessions. Rows whose movement stays inside the envelope
+yet they move by up to 22–36 % (`multi_file/legacy` −22.2 %, `malformed/legacy`
++22.7 %, `startup` +20.4 %), because each binary was measured in its own sequential
+session. That is the empirical noise envelope for sub-10 ms rows in this session.
+Only the two rows with effects far outside it — `diagnostic_flood/default`
+(−47.5 %) and `many_symbols/default` (−38.5 %) — are claimed as improvements, and
+both replicate across five independent sessions. Rows whose movement stays inside the envelope
 are reported as measurements, not as gains.
 
 Peak RSS (post-fix run, median of three untimed samples per row): `--version`
-≈1.9 MB; corpus directory ≈4.2 MB; `multi_file` ≈4.0 MB; `preprocess` ≈8.3 MB;
-`call_graph` ≈11.8 MB; `many_symbols` ≈16.2 MB; `diagnostic_flood` ≈38.5 MB;
-`near_limit` (7.65 MiB input) ≈310 MB.
+≈2.4 MB; corpus directory ≈4.3 MB; `multi_file` ≈4.0 MB; `preprocess` ≈8.3 MB;
+`call_graph` ≈11.9 MB; `many_symbols` ≈16.2 MB; `diagnostic_flood` ≈38.5 MB;
+`near_limit` (7.65 MiB input) ≈310 MB (309,736 KB).
 
 The near-limit figure is worth stating explicitly: peak RSS grows roughly linearly
 with input size at about 2.5 KB per statement for this workload, so a file at the
@@ -343,6 +357,7 @@ diagnostic cap (the cap is applied after suppression).
 | Benchmark metadata mixed harness revision with binary revision | Evidence defect | Fixed: separate fields, digest check plus source-commit rebuild |
 | `--verify-build` was registered but never executed | Evidence defect | Fixed: rebuilds the commit in a throwaway worktree and compares digests (exit 6 on mismatch) |
 | Cross-pass determinism was not enforced | Evidence defect | Fixed: per-row signatures compared across passes (exit 7), unit-tested |
+| Recorded harness commit predated the harness code that ran | Evidence defect | Fixed: captures run from a clean worktree (dirty runs refused, exit 8) and record a harness source digest |
 | Include/multi-file inputs were not hashed | Evidence defect | Fixed: 70-file recursive manifest |
 | Near-limit fixture was 1.6 MiB, not near the 8 MiB limit | Evidence defect | Fixed: 8,026,842 bytes, 95.7 % of the limit |
 | `MAX_TYPE_DEPTH` unreachable through the parser | Known limitation (defensive) | Documented |
