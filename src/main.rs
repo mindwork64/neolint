@@ -6,15 +6,24 @@
 //! [`neolint::parse`] → [`neolint::analyze`] → configuration application →
 //! human/JSON rendering → exit code.
 //!
+//! The default plain-LSL Legacy path is unchanged. With `--preprocess`, units
+//! use the full preprocessor; with `--engine ast`/`--engine compare` and no
+//! preprocessing, units use identity preparation so the engine API has a source
+//! map. `compare` prints a semantic-parity report on stderr and exits with code
+//! 3 when any unit's comparison is unmatched.
+//!
 //! Exit codes are `0` when no error-severity diagnostics remain, `1` when at
-//! least one error-severity diagnostic remains, and `2` for command-line,
-//! configuration, input, or file-read errors. Warnings/info do not fail by
-//! default. Directory traversal is sorted and skips symlinks; explicit files are
-//! accepted regardless of extension; stdin (`-`) may appear only once.
+//! least one error-severity diagnostic remains, `2` for command-line,
+//! configuration, input, or file-read errors, and `3` in Compare mode when a
+//! report is unmatched (unless a failure already requires `2`). Warnings/info do
+//! not fail by default. Directory traversal is sorted and skips symlinks;
+//! explicit files are accepted regardless of extension; stdin (`-`) may appear
+//! only once.
 use neolint::config::LintConfig;
 use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{
-    lex, parse, AnalysisRun, Diagnostic, PreprocessDialect, PreprocessSettings, Severity,
+    lex, parse, AnalysisEngine, AnalysisRun, Diagnostic, DiagnosticFingerprint,
+    EngineAnalysisOptions, EngineComparisonReport, PreprocessDialect, PreprocessSettings, Severity,
 };
 use std::collections::HashSet;
 use std::env;
@@ -35,6 +44,22 @@ struct FileResult {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// How a unit-based run constructs its prepared source.
+#[derive(Clone, Copy)]
+enum UnitPreparation {
+    /// Full preprocessing with the configured dialect and include directories.
+    Preprocessed,
+    /// Byte-identical identity preparation (no preprocessing).
+    Identity,
+}
+
+/// One unit's Compare-mode report and the display name used for its root.
+struct CompareUnitReport {
+    unit_index: usize,
+    path: String,
+    report: EngineComparisonReport,
+}
+
 fn main() {
     let code = run();
     process::exit(code);
@@ -51,6 +76,7 @@ fn run() -> i32 {
     let mut preprocess_flag = false;
     let mut dialect_override = None;
     let mut include_dirs_cli = Vec::new();
+    let mut engine_override = None;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -78,6 +104,19 @@ fn run() -> i32 {
                         return 2;
                     }
                 };
+            }
+            "--engine" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: --engine requires 'legacy', 'ast' or 'compare'");
+                    return 2;
+                };
+                let Some(engine) = AnalysisEngine::parse(&value) else {
+                    eprintln!(
+                        "neolint: invalid engine '{value}' (expected legacy, ast or compare)"
+                    );
+                    return 2;
+                };
+                engine_override = Some(engine);
             }
             "-I" | "--include-dir" => {
                 let Some(value) = args.next() else {
@@ -107,6 +146,20 @@ fn run() -> i32 {
                         return 2;
                     }
                 };
+            }
+            _ if arg.starts_with("--engine=") => {
+                let value = &arg["--engine=".len()..];
+                if value.is_empty() {
+                    eprintln!("neolint: --engine requires 'legacy', 'ast' or 'compare'");
+                    return 2;
+                }
+                let Some(engine) = AnalysisEngine::parse(value) else {
+                    eprintln!(
+                        "neolint: invalid engine '{value}' (expected legacy, ast or compare)"
+                    );
+                    return 2;
+                };
+                engine_override = Some(engine);
             }
             "--format" => {
                 let Some(value) = args.next() else {
@@ -219,6 +272,9 @@ fn run() -> i32 {
     if !include_dirs_cli.is_empty() {
         config.set_include_dirs(include_dirs_cli);
     }
+    if let Some(engine) = engine_override {
+        config.set_engine(engine);
+    }
     if !config.preprocess_enabled() && !config.include_dirs().is_empty() {
         eprintln!("neolint: include directories require --preprocess or --dialect firestorm");
         return 2;
@@ -252,7 +308,25 @@ fn run() -> i32 {
     };
 
     if config.preprocess_enabled() {
-        return run_preprocessed(&paths, &config, format, show_tokens);
+        return run_units(
+            &paths,
+            &config,
+            format,
+            show_tokens,
+            UnitPreparation::Preprocessed,
+        );
+    }
+
+    // Ast/Compare without preprocessing still need a prepared source (identity
+    // preparation). Plain Legacy keeps the direct, uncapped loop below.
+    if config.engine() != AnalysisEngine::Legacy {
+        return run_units(
+            &paths,
+            &config,
+            format,
+            show_tokens,
+            UnitPreparation::Identity,
+        );
     }
 
     let mut results = Vec::new();
@@ -320,13 +394,14 @@ fn run() -> i32 {
     }
 }
 
-fn run_preprocessed(
+fn run_units(
     paths: &[String],
     config: &LintConfig,
     format: OutputFormat,
     show_tokens: bool,
+    preparation: UnitPreparation,
 ) -> i32 {
-    let options = PreprocessSettings::full()
+    let preprocess_options = PreprocessSettings::full()
         .with_dialect(config.dialect())
         .with_include_dirs(config.include_dirs().to_vec());
     let mut run = match AnalysisRun::new() {
@@ -353,9 +428,15 @@ fn run_preprocessed(
                 input_failed = true;
                 continue;
             }
-            run.add_preprocessed_text("<stdin>", &input, options.clone())
+            add_prepared_unit(
+                &mut run,
+                "<stdin>",
+                Some(&input),
+                preparation,
+                &preprocess_options,
+            )
         } else {
-            run.add_preprocessed_file(path, options.clone())
+            add_prepared_unit(&mut run, path, None, preparation, &preprocess_options)
         };
         match result {
             Ok(index) => unit_indexes.push(index),
@@ -366,25 +447,77 @@ fn run_preprocessed(
         }
     }
 
+    // AST and Compare require a prepared source. Unit construction above is
+    // engine-driven, so this defensive preflight is unreachable by design; it
+    // exists so a partially analyzed multi-unit run is impossible.
+    if config.engine().requires_prepared_source() {
+        for &index in &unit_indexes {
+            let Some(unit) = run.unit(index) else {
+                eprintln!(
+                    "neolint: cannot analyze unit {index}: unit is missing from the analysis run"
+                );
+                input_failed = true;
+                continue;
+            };
+            if unit.prepared_source().is_none() {
+                let error =
+                    neolint::EngineAnalysisError::PreparedSourceRequired { unit: unit.id() };
+                eprintln!("neolint: cannot analyze unit {index}: {error}");
+                return 2;
+            }
+        }
+    }
+
+    let engine = config.engine();
+    let options = EngineAnalysisOptions {
+        collect_tokens: show_tokens,
+    };
+    let expected_units = unit_indexes.len();
+    let mut analyzed_units = 0usize;
     let mut results = Vec::new();
+    let mut reports = Vec::new();
     for index in unit_indexes {
         let Some(unit) = run.unit(index) else {
+            eprintln!(
+                "neolint: cannot analyze unit {index}: unit is missing from the analysis run"
+            );
+            input_failed = true;
             continue;
         };
-        let prepared = match unit.prepared_source() {
-            Some(prepared) => prepared,
-            None => continue,
+        let Some(prepared) = unit.prepared_source() else {
+            let error = neolint::EngineAnalysisError::PreparedSourceRequired { unit: unit.id() };
+            eprintln!("neolint: cannot analyze unit {index}: {error}");
+            input_failed = true;
+            continue;
         };
-        let rendered = match unit.analyze() {
-            Ok(rendered) => rendered,
+        let analysis = match unit.analyze_with_engine_options(engine, &options) {
+            Ok(analysis) => analysis,
             Err(error) => {
-                eprintln!("neolint: cannot analyze unit {}: {error}", index);
+                eprintln!("neolint: cannot analyze unit {index}: {error}");
                 input_failed = true;
                 continue;
             }
         };
+        analyzed_units += 1;
+
+        if engine == AnalysisEngine::Compare {
+            match analysis.comparison() {
+                Some(report) => reports.push(CompareUnitReport {
+                    unit_index: index,
+                    path: prepared_path(unit),
+                    report: report.clone(),
+                }),
+                None => {
+                    eprintln!(
+                        "neolint: cannot analyze unit {index}: compare engine produced no report"
+                    );
+                    input_failed = true;
+                }
+            }
+        }
+
         let mut groups: Vec<(neolint::SourceId, Vec<Diagnostic>)> = Vec::new();
-        for diagnostic in rendered {
+        for diagnostic in analysis.diagnostics() {
             let source = diagnostic.source();
             if let Some((_, items)) = groups.iter_mut().find(|(id, _)| *id == source) {
                 items.push(diagnostic.diagnostic().clone());
@@ -393,11 +526,9 @@ fn run_preprocessed(
             }
         }
         let root = unit.root();
-        let prepared_tokens = if show_tokens {
-            lex(prepared.text()).0
-        } else {
-            Vec::new()
-        };
+        // The token vector comes from the single lex inside this unit's engine
+        // analysis; there is no second `lex(prepared.text())` call.
+        let unit_tokens = analysis.tokens().to_vec();
         let nodes: Vec<(neolint::SourceId, String)> = prepared
             .include_graph()
             .nodes()
@@ -417,7 +548,7 @@ fn run_preprocessed(
             results.push(FileResult {
                 path,
                 tokens: if Some(source) == root {
-                    prepared_tokens.clone()
+                    unit_tokens.clone()
                 } else {
                     Vec::new()
                 },
@@ -474,17 +605,294 @@ fn run_preprocessed(
         OutputFormat::Human => print_human(&results, show_tokens),
         OutputFormat::Json => print_json(&results),
     }
+
+    let all_matched = !input_failed
+        && analyzed_units == expected_units
+        && reports.len() == expected_units
+        && reports.iter().all(|item| item.report.is_parity());
+    if engine == AnalysisEngine::Compare {
+        print_compare_report(&reports, format, all_matched);
+    }
+
     let has_errors = results
         .iter()
         .flat_map(|result| &result.diagnostics)
         .any(|diagnostic| diagnostic.severity == Severity::Error);
     if input_failed {
         2
+    } else if engine == AnalysisEngine::Compare && !all_matched {
+        3
     } else if has_errors {
         1
     } else {
         0
     }
+}
+
+/// Add one unit using the selected preparation path.
+fn add_prepared_unit(
+    run: &mut AnalysisRun,
+    display_name: &str,
+    text: Option<&str>,
+    preparation: UnitPreparation,
+    options: &PreprocessSettings,
+) -> Result<usize, neolint::SetupError> {
+    match (preparation, text) {
+        (UnitPreparation::Preprocessed, Some(text)) => {
+            run.add_preprocessed_text(display_name, text, options.clone())
+        }
+        (UnitPreparation::Preprocessed, None) => {
+            run.add_preprocessed_file(display_name, options.clone())
+        }
+        (UnitPreparation::Identity, Some(text)) => run.add_prepared_text(display_name, text),
+        (UnitPreparation::Identity, None) => run.add_prepared_file(display_name),
+    }
+}
+
+/// Emit the Compare-mode report on stderr only.
+fn print_compare_report(reports: &[CompareUnitReport], format: OutputFormat, all_matched: bool) {
+    match format {
+        OutputFormat::Human => print_compare_human(reports),
+        OutputFormat::Json => print_compare_json(reports, all_matched),
+    }
+}
+
+/// Compact, greppable human Compare report.
+fn print_compare_human(reports: &[CompareUnitReport]) {
+    eprint!("{}", compare_report_human(reports));
+}
+
+/// Render the human Compare report, showing unknown totals as `?`.
+fn compare_report_human(reports: &[CompareUnitReport]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    for item in reports {
+        let _ = writeln!(
+            output,
+            "neolint: compare unit {} {}: matched={} complete={} truncated={} legacy={} ast={}",
+            item.unit_index,
+            item.path,
+            item.report.matched,
+            item.report.comparison_complete,
+            item.report.details_truncated,
+            item.report.legacy_count,
+            item.report.ast_count
+        );
+        for rule in &item.report.by_rule {
+            // Zero counts on both sides prove a zero delta in both the complete
+            // and incomplete paths, so those rules carry nothing to render. No
+            // unknown (`None`) total is ever coerced to a number here.
+            if rule.legacy_count == 0 && rule.ast_count == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                output,
+                "neolint: compare unit {} rule {}: legacy={} ast={} missing={} extra={}",
+                item.unit_index,
+                rule.code,
+                rule.legacy_count,
+                rule.ast_count,
+                format_compare_total(rule.missing_total),
+                format_compare_total(rule.extra_total)
+            );
+            for fingerprint in &rule.missing_from_ast {
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    compare_fingerprint_line(item.unit_index, "missing", fingerprint)
+                );
+            }
+            for fingerprint in &rule.extra_in_ast {
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    compare_fingerprint_line(item.unit_index, "extra", fingerprint)
+                );
+            }
+        }
+    }
+    output
+}
+
+/// Render one per-rule total; `None` means the comparison was not performed.
+fn format_compare_total(total: Option<usize>) -> String {
+    match total {
+        Some(value) => value.to_string(),
+        None => "?".to_owned(),
+    }
+}
+
+/// Render one exact fingerprint on a single greppable line.
+fn compare_fingerprint_line(
+    unit_index: usize,
+    direction: &str,
+    fingerprint: &DiagnosticFingerprint,
+) -> String {
+    format!(
+        "neolint: compare unit {unit_index} {direction} {} {} {} message={:?} start={} end={} line={} column={} end_line={} end_column={}",
+        fingerprint.code,
+        fingerprint.severity.as_str(),
+        fingerprint.kind.as_str(),
+        fingerprint.message,
+        fingerprint.start,
+        fingerprint.end,
+        fingerprint.line,
+        fingerprint.column,
+        fingerprint.end_line,
+        fingerprint.end_column
+    )
+}
+
+/// Single documented JSON object for the Compare report on stderr.
+fn print_compare_json(reports: &[CompareUnitReport], all_matched: bool) {
+    eprint!("{}", compare_report_json(reports, all_matched));
+}
+
+/// Render the Compare report JSON object, emitting `null` for unknown totals.
+fn compare_report_json(reports: &[CompareUnitReport], all_matched: bool) -> String {
+    let mut output = String::new();
+    output.push('{');
+    push_json_key(&mut output, "engine");
+    push_json_string(&mut output, "compare");
+    output.push(',');
+    push_json_key(&mut output, "units");
+    output.push('[');
+    for (item_index, item) in reports.iter().enumerate() {
+        if item_index > 0 {
+            output.push(',');
+        }
+        output.push('{');
+        push_json_key(&mut output, "unit");
+        output.push_str(&item.unit_index.to_string());
+        output.push(',');
+        push_json_key(&mut output, "path");
+        push_json_string(&mut output, &item.path);
+        output.push(',');
+        push_json_key(&mut output, "matched");
+        output.push_str(bool_str(item.report.matched));
+        output.push(',');
+        push_json_key(&mut output, "comparison_complete");
+        output.push_str(bool_str(item.report.comparison_complete));
+        output.push(',');
+        push_json_key(&mut output, "details_truncated");
+        output.push_str(bool_str(item.report.details_truncated));
+        output.push(',');
+        push_json_key(&mut output, "legacy_count");
+        output.push_str(&item.report.legacy_count.to_string());
+        output.push(',');
+        push_json_key(&mut output, "ast_count");
+        output.push_str(&item.report.ast_count.to_string());
+        output.push(',');
+        push_json_key(&mut output, "by_rule");
+        output.push('[');
+        for (rule_index, rule) in item.report.by_rule.iter().enumerate() {
+            if rule_index > 0 {
+                output.push(',');
+            }
+            output.push('{');
+            push_json_key(&mut output, "code");
+            push_json_string(&mut output, rule.code);
+            output.push(',');
+            push_json_key(&mut output, "legacy_count");
+            output.push_str(&rule.legacy_count.to_string());
+            output.push(',');
+            push_json_key(&mut output, "ast_count");
+            output.push_str(&rule.ast_count.to_string());
+            output.push(',');
+            push_json_key(&mut output, "missing_total");
+            push_compare_total(&mut output, rule.missing_total);
+            output.push(',');
+            push_json_key(&mut output, "extra_total");
+            push_compare_total(&mut output, rule.extra_total);
+            output.push(',');
+            push_json_key(&mut output, "missing_from_ast");
+            push_fingerprint_array(&mut output, &rule.missing_from_ast);
+            output.push(',');
+            push_json_key(&mut output, "extra_in_ast");
+            push_fingerprint_array(&mut output, &rule.extra_in_ast);
+            output.push('}');
+        }
+        output.push(']');
+        output.push('}');
+    }
+    output.push(']');
+    output.push(',');
+    push_json_key(&mut output, "matched");
+    output.push_str(bool_str(all_matched));
+    output.push('}');
+    output.push('\n');
+    output
+}
+
+/// Append one per-rule JSON total; `null` marks a total that was not computed.
+fn push_compare_total(output: &mut String, total: Option<usize>) {
+    match total {
+        Some(value) => output.push_str(&value.to_string()),
+        None => output.push_str("null"),
+    }
+}
+
+fn bool_str(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn push_json_key(output: &mut String, key: &str) {
+    output.push('"');
+    output.push_str(key);
+    output.push('"');
+    output.push(':');
+}
+
+fn push_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    output.push_str(&json_escape(value));
+    output.push('"');
+}
+
+fn push_fingerprint_array(output: &mut String, fingerprints: &[DiagnosticFingerprint]) {
+    output.push('[');
+    for (index, fingerprint) in fingerprints.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push('{');
+        push_json_key(output, "code");
+        push_json_string(output, fingerprint.code);
+        output.push(',');
+        push_json_key(output, "severity");
+        push_json_string(output, fingerprint.severity.as_str());
+        output.push(',');
+        push_json_key(output, "kind");
+        push_json_string(output, fingerprint.kind.as_str());
+        output.push(',');
+        push_json_key(output, "message");
+        push_json_string(output, &fingerprint.message);
+        output.push(',');
+        push_json_key(output, "start");
+        output.push_str(&fingerprint.start.to_string());
+        output.push(',');
+        push_json_key(output, "end");
+        output.push_str(&fingerprint.end.to_string());
+        output.push(',');
+        push_json_key(output, "line");
+        output.push_str(&fingerprint.line.to_string());
+        output.push(',');
+        push_json_key(output, "column");
+        output.push_str(&fingerprint.column.to_string());
+        output.push(',');
+        push_json_key(output, "end_line");
+        output.push_str(&fingerprint.end_line.to_string());
+        output.push(',');
+        push_json_key(output, "end_column");
+        output.push_str(&fingerprint.end_column.to_string());
+        output.push('}');
+    }
+    output.push(']');
 }
 
 fn prepared_path(unit: &neolint::AnalysisUnit) -> String {
@@ -597,7 +1005,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: legacy (default), ast, or compare\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = legacy\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -684,7 +1092,11 @@ fn json_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_input_paths, has_lsl_extension, json_escape};
+    use super::{
+        collect_input_paths, compare_report_human, compare_report_json, format_compare_total,
+        has_lsl_extension, json_escape, push_compare_total, CompareUnitReport,
+    };
+    use neolint::{EngineComparisonReport, RuleComparison};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -697,6 +1109,78 @@ mod tests {
             std::env::temp_dir().join(format!("neolint-cli-test-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn comparison_report(
+        comparison_complete: bool,
+        missing_total: Option<usize>,
+        extra_total: Option<usize>,
+    ) -> EngineComparisonReport {
+        EngineComparisonReport {
+            matched: false,
+            comparison_complete,
+            details_truncated: false,
+            legacy_count: 3,
+            ast_count: 2,
+            by_rule: vec![RuleComparison {
+                code: "SEM001",
+                legacy_count: 3,
+                ast_count: 2,
+                missing_total,
+                extra_total,
+                missing_from_ast: Vec::new(),
+                extra_in_ast: Vec::new(),
+            }],
+        }
+    }
+
+    fn unit_report(report: EngineComparisonReport) -> CompareUnitReport {
+        CompareUnitReport {
+            unit_index: 0,
+            path: "unknown.lsl".to_owned(),
+            report,
+        }
+    }
+
+    #[test]
+    fn compare_renderers_show_unknown_totals_without_panicking() {
+        assert_eq!(format_compare_total(Some(0)), "0");
+        assert_eq!(format_compare_total(Some(7)), "7");
+        assert_eq!(format_compare_total(None), "?");
+        let mut total = String::new();
+        push_compare_total(&mut total, None);
+        assert_eq!(total, "null");
+
+        let reports = [unit_report(comparison_report(false, None, None))];
+
+        let human = compare_report_human(&reports);
+        assert!(
+            human.contains("rule SEM001: legacy=3 ast=2 missing=? extra=?"),
+            "{human}"
+        );
+        assert!(human.contains("complete=false"), "{human}");
+        assert!(!human.contains("missing=0"), "{human}");
+
+        let json = compare_report_json(&reports, false);
+        assert!(json.contains("\"comparison_complete\":false"), "{json}");
+        assert!(json.contains("\"missing_total\":null"), "{json}");
+        assert!(json.contains("\"extra_total\":null"), "{json}");
+        assert!(json.contains("\"missing_from_ast\":[]"), "{json}");
+        assert!(json.contains("\"extra_in_ast\":[]"), "{json}");
+    }
+
+    #[test]
+    fn compare_renderers_keep_exact_totals_numeric() {
+        let reports = [unit_report(comparison_report(true, Some(0), Some(2)))];
+        let human = compare_report_human(&reports);
+        assert!(
+            human.contains("rule SEM001: legacy=3 ast=2 missing=0 extra=2"),
+            "{human}"
+        );
+        let json = compare_report_json(&reports, false);
+        assert!(json.contains("\"missing_total\":0"), "{json}");
+        assert!(json.contains("\"extra_total\":2"), "{json}");
+        assert!(!json.contains("null"), "{json}");
     }
 
     #[test]

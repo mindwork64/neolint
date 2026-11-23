@@ -11,6 +11,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::diagnostic::resolve::RenderedDiagnostic;
+use crate::engine::{
+    AnalysisEngine, EngineAnalysisError, EngineAnalysisOptions, RunEngineAnalysis, UnitComparison,
+};
 use crate::preprocessor::config::PreprocessSettings;
 use crate::preprocessor::identity::preprocess_identity;
 use crate::preprocessor::preprocess_with_includes;
@@ -276,6 +279,56 @@ impl AnalysisRun {
             rendered.extend(unit.analyze()?);
         }
         Ok(rendered)
+    }
+
+    /// Run an engine-aware analysis over every unit with default options.
+    ///
+    /// `Ast` and `Compare` preflight every unit before doing any work; the first
+    /// unit without a prepared source aborts the whole call.
+    pub fn analyze_with_engine(
+        &self,
+        engine: AnalysisEngine,
+    ) -> Result<RunEngineAnalysis, EngineAnalysisError> {
+        self.analyze_with_engine_options(engine, &EngineAnalysisOptions::default())
+    }
+
+    /// Run an engine-aware analysis with explicit options.
+    ///
+    /// No run-level diagnostic cap is applied: each unit keeps its own existing
+    /// cap behavior and the concatenated stream preserves dense unit order.
+    pub fn analyze_with_engine_options(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+    ) -> Result<RunEngineAnalysis, EngineAnalysisError> {
+        if engine.requires_prepared_source() {
+            for unit in &self.units {
+                if unit.prepared_source().is_none() {
+                    return Err(EngineAnalysisError::PreparedSourceRequired { unit: unit.id() });
+                }
+            }
+        }
+        let mut diagnostics = Vec::new();
+        let mut comparisons = Vec::new();
+        let mut unit_tokens = Vec::new();
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            let analysis = unit.analyze_with_engine_options(engine, options)?;
+            let (rendered, report, tokens) = analysis.into_parts();
+            if let Some(report) = report {
+                comparisons.push(UnitComparison {
+                    unit_index,
+                    unit_id: unit.id(),
+                    report,
+                });
+            }
+            diagnostics.extend(rendered);
+            unit_tokens.push(tokens);
+        }
+        Ok(RunEngineAnalysis::new(
+            diagnostics,
+            comparisons,
+            unit_tokens,
+        ))
     }
 
     fn begin_unit(&self) -> Result<(usize, AnalysisUnitId, SourceManager), SetupError> {

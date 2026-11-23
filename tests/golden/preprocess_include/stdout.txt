@@ -1,0 +1,2 @@
+root.lsl: no diagnostics
+inc/defs.lsl:2:18: error[PAR006]: expected an expression

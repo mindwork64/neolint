@@ -3,6 +3,26 @@
 Phases 6A–6F migrate all existing SEM001–SEM023 diagnostics to the AST engine.
 No SEM rule remains Legacy-only in the current matrix.
 
+## Engine selection and compare scope (Phase 6G)
+
+- `--engine` / `engine = legacy|ast|compare` selects the analyzer; `legacy`
+  remains the default.
+- Compare reports cover only the raw `SEM001`–`SEM023` semantic streams. Parser
+  and lexer parity is not claimed. Parser/lexer recovery divergence on invalid
+  input is reported rather than treated as a parity defect; the SEM002 delta
+  below is a separate builtin-call-detection difference that also occurs on
+  accepted input.
+- The Compare display stream is Legacy-only; the AST semantic stream is never
+  appended to user output. The per-rule matrix below is unchanged.
+- Known SEM002 delta surfaced by Compare: a declaration identifier that collides
+  with a builtin name (for example an event named `llSay`) yields a Legacy-only
+  `SEM002`, because Legacy token-scans the event header as a builtin call while
+  AST only inspects expression call sites. The per-rule matrix's `exact` status
+  refers to the differential corpus, and its `Known differences` cell is
+  corpus-relative too: SEM002's `none` means "no difference inside the
+  differential corpus", not "no difference in any input". Compare therefore
+  reports a genuine delta on such input.
+
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
 | SEM001 | `semantic::analyze_with_syntax_diagnostics` top-level scan | `ast_semantic::rules::duplicate_globals` | migrated in 6A | exact | none | `tests/ast_semantic_parity.rs::sem001_exact_messages_and_spans`, full corpus |

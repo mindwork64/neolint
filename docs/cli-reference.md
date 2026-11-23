@@ -20,14 +20,33 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
 | `--preprocess` | Enable the standard LSL preprocessor. |
 | `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
+| `--engine ENGINE` | Select the analysis engine: `legacy` (default), `ast`, or `compare`. |
 | `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
-| `--include-dir=DIR`, `--dialect=DIALECT` | Equals forms of the corresponding options. |
+| `--include-dir=DIR`, `--dialect=DIALECT`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
-Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, and a non-empty CLI include-directory list replaces the configured list.
+Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
 
 Without preprocessing flags, plain-LSL behavior is unchanged. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
 
 `--tokens` cannot be combined with `--format json`; that combination exits with code 2.
+
+## Engines
+
+| Engine | Behavior |
+| --- | --- |
+| `legacy` | Default. The frozen Legacy lexer/parser/semantic pipeline. Output is unchanged from previous releases. |
+| `ast` | The independent typed-AST parser and AST semantic analyzer. |
+| `compare` | Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
+
+Without `--preprocess`, `ast` and `compare` use identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map. Identity preparation is not preprocessing; macros and includes are not expanded. With `--preprocess` (or `--dialect firestorm`), every engine uses the full preprocessor and dialect.
+
+In `compare` mode, stdout keeps the existing human/JSON diagnostic schema and contains only the Legacy display stream. The AST semantic stream is not merged into user output. The comparison report always goes to stderr, one deterministic section per unit in unit order, and includes per-rule counts plus bounded exact missing/extra fingerprints. With `--format json`, stdout remains the existing diagnostics array. On a successful run stderr receives a single JSON object: `{"engine":"compare","units":[…],"matched":true|false}`. Consumers must gate on the exit status: per-unit prepare or analyze failures print `neolint: …` error lines before the report, and the report is absent only on early fatal CLI/config/input failures or when no comparison ran. Stderr is therefore not guaranteed to be pure JSON.
+
+A bounded detail list and an incomplete comparison are different states. Detail truncation (`details_truncated = true`) occurs only when a direction has more than 64 missing/extra findings; the report then shows the first 64 while totals stay exact. An incomplete comparison means an engine produced more than 100,000 `SEM001`–`SEM023` fingerprints, so the comparator performs no multiset comparison at all: per-rule `legacy_count`/`ast_count` stay exact, but `missing_total`/`extra_total` are unknown and render as `?` in human output and `null` in JSON (never `0`). Such a unit sets `comparison_complete = false`, can never be reported as matched, and exits 3 (unless an input failure already requires exit 2).
+
+```sh
+neolint --engine compare --format json script.lsl
+```
 
 ## Preprocessing and configuration
 
@@ -99,7 +118,7 @@ neolint --format json corpus/invalid/duplicate_event.lsl
 
 `start`/`end` are byte offsets, not display columns. Columns are one-based character positions as reported by the lexer.
 
-The CLI retains at most 10,000 diagnostics across all inputs. On overflow it removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity, exit code 1 unless an input error already requires 2).
+The default plain no-preprocess Legacy path is uncapped: it does not apply the 10,000-diagnostic invocation limit and never appends `PRE039`. Unit-based paths (`--preprocess` or `--dialect firestorm`, both enabling preprocessing, and identity-prepared `--engine ast`/`--engine compare`) apply the per-unit 10,000 terminal cap and then the invocation-wide 10,000 cap. On invocation overflow the CLI removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity; exit code 1 unless an input error already requires 2, or an unmatched Compare report returns 3).
 
 ## Exit codes
 
@@ -108,8 +127,9 @@ The CLI retains at most 10,000 diagnostics across all inputs. On overflow it rem
 | `0` | No error-severity diagnostics. Warnings and info diagnostics do not fail the run. |
 | `1` | At least one error-severity diagnostic remains after configuration. |
 | `2` | Command-line, input, configuration, or file-read error. |
+| `3` | Compare mode only: at least one unit's semantic comparison is unmatched. |
 
-Configured severity changes affect exit status. For example, `--severity SEM012=error` makes a warning-producing run exit 1.
+Configured severity changes affect exit status. For example, `--severity SEM012=error` makes a warning-producing run exit 1. Exit code `3` takes precedence over `1` when a Compare report is unmatched, but never over `2`: input, configuration, file-read, and preparation failures still exit 2. A matching Compare report with displayed Legacy error diagnostics exits 1, and a matched report with no errors exits 0.
 
 ## Examples
 
@@ -125,6 +145,8 @@ cat hello.lsl | neolint -
 neolint --tokens hello.lsl
 neolint --preprocess -I ./includes script.lsl
 neolint --dialect firestorm script.lsl
+neolint --engine ast script.lsl
+neolint --engine=compare --format json script.lsl
 ```
 
 See [configuration.md](configuration.md), [diagnostics.md](diagnostics.md), and [firestorm-preprocessor.md](firestorm-preprocessor.md).

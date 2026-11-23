@@ -107,19 +107,41 @@ revision of this document.
 ## 1. Current pipeline (A)
 
 ```
-CLI arguments
-  → LintConfig (config file, --disable, --severity)
+CLI arguments (--engine, --preprocess, --dialect, -I, ...)
+  → LintConfig (config file, --disable, --severity, engine selection)
   → input collection (files, directories, stdin)
+  → choose the unit preparation path:
+      no --preprocess, engine = legacy:
+          the existing direct plain loop (uncapped run-level, unchanged)
+      no --preprocess, engine = ast | compare:
+          identity preparation (byte-identical prepared source + map)
+      --preprocess (any engine):
+          full preprocessing with dialect and include directories
   → for each collected input (each input is an independent analysis unit):
-      read whole file as UTF-8 String
-      → lex(&source)            -> Vec<Token>, Vec<Diagnostic> (LEX)
-      → parse(&tokens)          -> Vec<Diagnostic> (PAR)
-      → analyze_with_syntax_diagnostics(&tokens, &syntax_diagnostics)
-                                -> Vec<Diagnostic> (SEM)
-      → config.apply(&mut diagnostics)
+      construct AnalysisUnit
+      → one lex of the plain or prepared text
+      → selected engine:
+          legacy: parse_legacy → analyze_with_syntax_diagnostics
+          ast:    parse_ast    → ast_semantic::analyze_ast
+          compare: both, display the Legacy stream, build the report
+      → config.apply(&mut diagnostics) per source group
   → human / JSON rendering (results from all inputs)
-  → exit code 0 | 1 | 2
+  → Compare report on stderr only (compare mode)
+  → exit code 0 | 1 | 2 | 3
 ```
+
+The CLI keeps three preparation/execution paths. The plain-Legacy path is the
+pre-Phase-6 CLI loop verbatim and is not capped at run level. `ast` and `compare`
+without preprocessing use identity preparation so the engine API always has a
+prepared source and source map; identity preparation copies bytes and does not
+expand macros or includes. Any engine with `--preprocess` uses the full
+preprocessor and dialect. `compare` never merges the AST stream into stdout:
+stdout keeps the Legacy display schema, and the deterministic report goes to
+stderr.
+
+A single `AnalysisUnit` engine call lexes the prepared text exactly once; the
+same token slice feeds both analyzers and (when requested) `--tokens`. The old
+second `lex(prepared.text())` call in the CLI token path is gone.
 
 The current CLI already analyzes every collected input independently: one file
 read, one token stream, one diagnostic set per input. The new architecture names
@@ -153,8 +175,9 @@ Current stage contracts, as implemented at the baseline:
   `src/diagnostic.rs`.
   - There is no source/file identity in a diagnostic. The CLI renders the file
     path from the input loop.
-- `LintConfig` in `src/config.rs` supports only `disable = ...` and
-  `severity.RULE = ...`; rule codes must match `[A-Z0-9]+`.
+- `LintConfig` in `src/config.rs` supports `disable`, `severity.RULE`,
+  `preprocess`, `dialect`, `include_dir`, and `engine = legacy|ast|compare`;
+  rule codes must match `[A-Z0-9]+` and the default engine is `legacy`.
 - Built-in metadata is vendored (`data/lsl-builtins.txt`,
   `data/lsl-deprecated.txt`) and loaded through `include_str!` + `OnceLock`;
   there is no network access.
@@ -346,12 +369,14 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
     `Diagnostic.span`, tagged with the producing unit and rendered against that
     unit's root only.
 - Rejects malformed **and foreign** coordinates with `SpanError` handling
-  (§7.3.1): unit ownership is checked before geometry or rendering, only the
-  affected finding is dropped, the run continues, and there is no panic, no
-  cross-unit file fallback, and no EOF substitution.
-- Merges diagnostics from both engines and from all units in a deterministic
-  order.
-- Applies `LintConfig` exactly once after merging.
+  (§7.3.1): unit ownership is checked before geometry or rendering, and the
+  error is fail-fast within the unit. No partial unit result is accepted, other
+  units are not merged into it, and there is no panic, no cross-unit file
+  fallback, and no EOF substitution.
+- Selects the displayed engine's stream: Legacy or AST. Compare keeps the Legacy
+  displayed stream and emits a separate deterministic report. There is no
+  cross-engine display merge.
+- Applies `LintConfig` per source group before rendering.
 - Produces `RenderedDiagnostic` values carrying the frozen `Diagnostic`, the
   original `SourceId`, and related locations.
 - Renders human and JSON output; owns the exit-code decision.
@@ -359,9 +384,16 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
 ### CLI / configuration (`src/main.rs`, `src/config.rs`)
 
 - Creates one AnalysisUnit per collected input.
-- Chooses the dialect profile and the engine per unit.
+- Chooses the dialect profile and the analysis engine (`legacy` default, `ast`,
+  or `compare`) from configuration plus `--engine` overrides.
+- Chooses the preparation path: plain Legacy (no prepared source), identity
+  preparation for `ast`/`compare` without preprocessing, or full preprocessing
+  when requested.
 - Keeps plain LSL as the default with preprocessing disabled.
-- Maps CLI/config failures to exit code 2 and lint findings to 0/1.
+- Maps CLI/config failures to exit code 2; lint findings to 0/1; an unmatched
+  Compare report to 3 (after any 2); a matching report follows the displayed
+  Legacy stream.
+- Emits the Compare report on stderr only; stdout keeps the Legacy schema.
 - Validates all new options without panicking.
 
 ---
@@ -580,14 +612,79 @@ Contract:
 - `parse_ast` must be callable in a build where the legacy semantic analyzer is
   not invoked at all, and vice versa.
 
-New preprocessing, bridge, and diagnostic entry points are **additive**:
+New preprocessing, bridge, and diagnostic entry points are **additive**. The
+older conceptual `analyze_prepared(prepared, &EngineOptions) -> RunDiagnostics`
+sketch below is superseded by the implemented Phase 6G engine API:
 
 ```rust
-// conceptual, finalized in Phase 1/3; one call per AnalysisUnit.
-// Phase 2 implements the library-level form:
-//   preprocess(manager, root, config_or_options) -> Result<PreparedSource, SpanError>
-pub fn prepare(unit: &mut AnalysisUnit, config: &PreprocessConfig) -> PreparedSource;
-pub fn analyze_prepared(prepared: &PreparedSource, options: &EngineOptions) -> RunDiagnostics;
+// Actual engine selection and analysis surface (Phase 6G).
+pub enum AnalysisEngine {
+    Legacy,
+    Ast,
+    Compare,
+}
+
+impl AnalysisEngine {
+    pub fn parse(value: &str) -> Option<Self>;
+    pub const fn as_str(self) -> &'static str;
+    pub const fn requires_prepared_source(self) -> bool;
+}
+
+pub struct EngineAnalysisOptions {
+    pub collect_tokens: bool,
+}
+
+pub enum EngineAnalysisError {
+    Span(SpanError),
+    PreparedSourceRequired { unit: AnalysisUnitId },
+}
+
+impl AnalysisUnit {
+    pub fn analyze_with_engine(
+        &self,
+        engine: AnalysisEngine,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError>;
+    pub fn analyze_with_engine_options(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError>;
+}
+
+impl AnalysisRun {
+    pub fn analyze_with_engine(
+        &self,
+        engine: AnalysisEngine,
+    ) -> Result<RunEngineAnalysis, EngineAnalysisError>;
+    pub fn analyze_with_engine_options(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+    ) -> Result<RunEngineAnalysis, EngineAnalysisError>;
+}
+
+// UnitEngineAnalysis exposes the displayed diagnostics, an optional comparison,
+// and the single-lex token vector. RunEngineAnalysis exposes dense-order
+// diagnostics, comparisons, tokens(unit_index), and all_matched().
+pub struct UnitEngineAnalysis { /* diagnostics, comparison, tokens */ }
+pub struct RunEngineAnalysis { /* diagnostics, comparisons, per-unit tokens */ }
+
+pub struct EngineComparisonReport {
+    pub matched: bool,
+    pub comparison_complete: bool,
+    pub details_truncated: bool,
+    pub legacy_count: usize,
+    pub ast_count: usize,
+    pub by_rule: Vec<RuleComparison>,
+}
+
+// RuleComparison carries exact legacy/ast counts, optional exact delta totals
+// (`None` when the SEM fingerprint budget suppressed the comparison), and
+// bounded missing/extra fingerprint samples. DiagnosticFingerprint carries
+// code, severity, kind, message, start, end, line, column, end_line, and
+// end_column.
+pub struct RuleComparison { /* counts, Option totals, bounded samples */ }
+pub struct DiagnosticFingerprint { /* full fingerprint fields */ }
 
 impl PreparedSource {
     pub fn prepared_span(&self, span: Span) -> Result<PreparedSpan, SpanError>;
@@ -668,12 +765,13 @@ unit.
 4. **Unit loop.** For each root input, in order, run the per-unit lifecycle
    below. A failure in one unit is recorded and does not abort the remaining
    units (matching today's per-file behavior).
-5. **Merging.** Concatenate unit diagnostics in input order, then apply the
-   deterministic ordering policy (§11).
-6. **Configuration.** Apply disabled rules and severity overrides once to the
-   merged set.
-7. **Rendering.** Human output or JSON; exit code 0/1. Input/config failures
-   return 2 as today.
+5. **Merging.** Collect unit results in input/unit order. The displayed Legacy
+   stream is not globally sorted; Compare reports are collected in the same
+   dense unit order.
+6. **Configuration.** Apply disabled rules and severity overrides per source
+   group before rendering; no global re-sort is performed.
+7. **Rendering.** Human output or JSON; exit code 0/1, or 3 for an unmatched
+   Compare report. Input/config failures return 2 as today.
 8. **Teardown.** Drop all units; no per-analysis mutable state survives.
    The process-wide synchronized `RunId` allocator and built-in metadata cache
    remain for the lifetime of the process; neither contributes to user output.
@@ -708,12 +806,17 @@ unit.
    `PreparedSource` text in prepared mode. Legacy findings retain original
    coordinates; prepared-path lexer/engine findings use prepared coordinates.
    An empty input yields only `Eof` at byte offset 0 in either path.
-5. **Engine selection.**
-   - `legacy` (default in Phases 1–5): `parse_legacy` →
-     `analyze_with_syntax_diagnostics`; in the plain-LSL path the unit tags each
-     returned `Diagnostic` as a `LegacyDiagnostic`.
-   - `ast` (Phase 4+): `parse_ast` → AST semantic analyzer.
-   - `compare` (development/CI only, Phase 6): both, then differential report.
+5. **Engine selection (implemented in Phase 6G).**
+   - `legacy` (default): `parse_legacy` → `analyze_with_syntax_diagnostics`; in
+     the plain-LSL path the unit tags each returned `Diagnostic` as a
+     `LegacyDiagnostic`.
+   - `ast`: `parse_ast` → AST semantic analyzer; the displayed stream is the AST
+     lexical/parser/semantic stream.
+   - `compare`: runs both raw semantic streams, displays the Legacy stream only,
+     and attaches an `EngineComparisonReport`. The AST semantic stream is never
+     appended to the displayed Legacy stream.
+   - The prepared text is lexed exactly once per unit; both analyzers and the
+     `--tokens` output consume that single token slice.
 6. **Input assembly.** Collect:
    - preprocessor findings as `UnifiedDiagnosticInput::Preprocess`;
    - lexer/parser/semantic findings as
@@ -733,12 +836,16 @@ unit.
    `PreparedSource::eof_span()` and resolved through `resolve_point`; it uses the
    same unit's map EOF anchor (§7.3). Legacy EOF diagnostics bypass this path
    and preserve their original `Diagnostic.span` unchanged.
-   A `SpanError` follows §7.3.1: internal diagnostic, drop the affected finding,
-   continue; never panic and never substitute the anchor.
-8. **Unit merge.** Apply the engine-specific deduplication policy and sort by
-   `(unit index, source load order inside the unit, start offset, code)`.
-   `RunId` is excluded from ordering. Legacy-only single-file output keeps its
-   current order.
+   A `SpanError` is fail-fast within the unit (constraint E): the engine returns
+   `EngineAnalysisError::Span`, the CLI reports `neolint: cannot analyze unit N`
+   and exits 2. It never panics, never substitutes the anchor, and never accepts
+   a partially analyzed unit.
+8. **Unit merge.** The displayed Legacy stream is **not** globally sorted; it
+   preserves the existing per-unit, per-source, pass order. Only the Compare
+   report is deterministically ordered: dense unit index, `SEM001`..=`SEM023`
+   rule order, then the fixed fingerprint order. `RunId` is excluded from
+   ordering. There is no cross-engine deduplication merge step: Compare displays
+   the Legacy stream only.
 
 An empty source file is a valid unit in either path. The lexer emits only
 `Eof` and the legacy parser reports `PAR013`. In plain-LSL Legacy mode the
@@ -832,14 +939,17 @@ EOF anchor from one unit is rejected by another unit's map with
 
 ### 6.5 Merging results from several units
 
-- Unit results are concatenated in the deterministic input order produced by
+- Unit results are collected in the deterministic input order produced by
   directory collection (sorted paths, de-duplicated display names).
 - Each rendered diagnostic keeps its unit's resolved file and location.
-- Configuration filtering and severity overrides are applied once to the merged
-  list.
-- Exit code: `2` if any input/config failure occurred, otherwise `1` if any
-  remaining error-severity diagnostic exists, otherwise `0`. This matches
-  today's behavior.
+- Configuration filtering and severity overrides are applied per source group to
+  the displayed stream. The Compare parity report is separate: it is computed
+  from raw pre-configuration streams and is emitted on stderr in dense unit order.
+- Exit code: `2` if any input/config failure occurred; otherwise `3` if a Compare
+  report is unmatched; otherwise `1` if any remaining displayed error-severity
+  diagnostic exists; otherwise `0`.
+- There is no global merge, sort, or cross-engine deduplication step; the
+  displayed stream keeps the existing per-unit, per-source, pass order.
 - Diagnostics from one unit can never be attributed to another unit's file; the
   unit's `SourceMap` is the only resolver for its diagnostics.
 
@@ -1540,8 +1650,9 @@ Categories:
   `ForeignPreparedSource` before geometry or file lookup. Matching local file
   indexes or matching `start`/`end` are irrelevant; no fallback file is used.
 - **These malformed/foreign cases are internal or API-misuse errors.** The
-  unified layer records one internal-invariant diagnostic (code and family fixed
-  in Phase 1 and documented), drops only the affected finding, and continues.
+  unified layer propagates the error fail-fast within the unit: no partial unit
+  result is accepted, the CLI reports `neolint: cannot analyze unit N`, and the
+  process exits 2. Other units are not analyzed as part of a partial result.
 - **User preprocessor errors are diagnostics, not `SpanError`s.** An unknown
   directive, bad `#if` expression, missing include, or recursive macro keeps a
   valid `SourceSpan` of its own unit and becomes a `PreprocessDiagnostic`. It is
@@ -1686,8 +1797,9 @@ Rules:
   locations are added as an optional `related` array in Phase 3 with a
   documented schema note; existing fields never change meaning.
 - An `Err` from bridging, foreign-identity checking, or resolution follows
-  §7.3.1: internal diagnostic, affected finding dropped, run continues, never a
-  panic or EOF fallback.
+  §7.3.1: fail-fast within the unit (`EngineAnalysisError::Span`); the CLI
+  reports `neolint: cannot analyze unit N` and exits 2. There is no partial
+  result, panic, or EOF fallback.
 
 ### 7.6.1 Worked examples: where each primary location comes from
 
@@ -1759,13 +1871,13 @@ lookup) and for future AST nodes (span lookup).
 | Source Manager | Include missing/unreadable/invalid UTF-8/not a file | `PreprocessDiagnostic` with a direct original `SourceSpan` at the include site; analysis continues | 1 |
 | Preprocessor | Unknown directive, malformed macro, unterminated conditional, bad `#if` expression, path rejection | `PreprocessDiagnostic`, best-effort recovery; the construct is skipped | 1 |
 | Preprocessor | Include cycle, expansion depth/size limit, diagnostic limit | `PreprocessDiagnostic` once, expansion stopped at the limit | 1 |
-| Span bridge / map | Inverted, out-of-bounds, non-UTF-8, foreign unit/source/run, unknown `SourceId`/`OriginId`, non-point, map hole, origin cycle, broken segments | `SpanError`; internal-invariant diagnostic; only the affected finding is dropped; no panic, no EOF fallback | 1 |
-| Legacy conversion | Tagged unit differs from the target unit, or the unit is not a plain-LSL root | `ForeignAnalysisUnit` / `NotLegacyUnit`; finding dropped; no map, no fallback file | 1 |
+| Span bridge / map | Inverted, out-of-bounds, non-UTF-8, foreign unit/source/run, unknown `SourceId`/`OriginId`, non-point, map hole, origin cycle, broken segments | `SpanError` propagated as `EngineAnalysisError::Span`; fail-fast within the unit; no panic, no EOF fallback, no partial unit result | 2 |
+| Legacy conversion | Tagged unit differs from the target unit, or the unit is not a plain-LSL root | `ForeignAnalysisUnit` / `NotLegacyUnit`; fail-fast within the unit; no map, no fallback file | 2 |
 | Lexer | Unterminated string/comment, unsupported character | `LEX` diagnostic with prepared `Span`, tokens recovered | 1 |
 | Parser | Syntax error | `PAR` diagnostic with prepared `Span`, bounded recovery | 1 |
 | Semantic | Rule violation | `SEM` diagnostic with prepared `Span` | 1 |
-| Any stage | Internal invariant violation | `SpanError` plus §7.3.1 handling (drop the affected finding, emit an internal diagnostic); never a fallback location, `panic!`, `unwrap`, or unchecked slicing on user input | 1 |
-| Both engines | `compare` mode disagreement | Development/CI failure only; never a user-facing panic | n/a |
+| Any stage | Internal invariant violation | `SpanError`; fail-fast within the unit; the CLI reports `neolint: cannot analyze unit N`; never a fallback location, `panic!`, `unwrap`, or unchecked slicing on user input | 2 |
+| Both engines | `compare` mode disagreement | Reported on stderr as an unmatched unit; never a user-facing panic | 3 |
 
 Rules:
 
@@ -1781,9 +1893,11 @@ Rules:
     empty prepared buffer;
   - **malformed, foreign, or legacy-mismatched input** — `SpanError`
     (`ForeignAnalysisUnit`, `ForeignPreparedSource`, `NotLegacyUnit` included),
-    internal diagnostic, affected finding dropped, run continues. Same behavior
-    in debug and release: no assertions and no panic on this path. A foreign
-    origin span/id is never dropped silently and never resolved to a local file;
+    fail-fast within the unit: the engine returns the error, the CLI reports
+    `neolint: cannot analyze unit N`, and the process exits 2. A partially
+    analyzed unit is never accepted or printed. Same behavior in debug and
+    release: no assertions and no panic on this path. A foreign origin span/id is
+    never silently dropped and never resolved to a local file;
   - **user preprocessor errors** — `PreprocessDiagnostic` with a valid original
     `SourceSpan` of its own unit; they never take the `SpanError` path.
 - Every new diagnostic code must be added to `docs/diagnostics.md`. The
@@ -2028,11 +2142,33 @@ are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
 | AST recursion depth | 256 recursive constructs (explicit AST001 guard) | AST parser |
 | Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
+| Compare SEM fingerprints per engine per unit | 100,000 (`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`) | Engine comparator |
+| Compare detail samples | 64 per rule per direction (`MAX_COMPARE_DETAILS_PER_RULE`) | Engine comparator |
 
 Requirements:
 
-- Exceeding a limit produces a single, specific `PRE`/`AST` diagnostic and stops
-  the affected expansion; the rest of the unit continues.
+- Exceeding a preprocessor or AST limit produces a single, specific `PRE`/`AST`
+  diagnostic and stops the affected expansion; the rest of the unit continues.
+  The compare fingerprint budget is different: it emits no diagnostic at all.
+  It marks the comparison incomplete (`comparison_complete = false`), and the
+  Compare CLI then exits 3 instead of claiming parity, unless an earlier input
+  or configuration failure already forces exit 2.
+- The 100,000-fingerprint compare budget is checked by a cheap `[usize; 23]`
+  counting pass **before** any fingerprint is materialised. It counts only
+  `SEM001`..=`SEM023`, so a long stream of `LEX`/`PAR`/`PRE` findings never
+  trips it. Exceeding the budget performs no comparison at all: no fingerprint
+  collection, no sorting, and no multiset delta vectors. The report then sets
+  `comparison_complete = false` and forces `matched = false`; per-rule
+  `legacy_count`/`ast_count` remain exact from the counting pass, but
+  `missing_total`/`extra_total` are `None` because the delta was not computed.
+  An unknown total is never reported as `0`. `details_truncated` is `false` on
+  this path because no sample lists were produced or shortened.
+- Within the budget, per-rule counts and missing/extra totals stay exact
+  (`Some(n)`). Totals are accumulated during a single merge that keeps at most
+  64 detail samples per rule per direction, so memory is O(64) for samples, not
+  O(delta). Exceeding that 64-sample cap (more than 64 missing/extra
+  fingerprints in one rule/direction) sets `details_truncated = true`; that is a
+  display bound, not an incomplete comparison, and the totals remain exact.
 - Limits are checked before allocation where possible.
 - `AnalysisUnitId` and `RunId` assignment uses checked arithmetic. Exceeding
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
@@ -2154,21 +2290,34 @@ Requirements:
    names and documentation must not claim Firestorm parity.
 6. **Integration tests** via the public API and the binary
    (`env!("CARGO_BIN_EXE_neolint")`), in the existing `tests/` style, using
-   temporary directories. Unified diagnostics tests must feed all three
-   `UnifiedDiagnosticInput` variants through one merge and assert: identical
-   legacy output for the `Legacy` path, direct resolution for `Preprocess`, and
-   bridge+resolve for `Prepared`, including mixed ordering and deduplication.
-7. **Golden corpus**: existing `corpus/{small,medium,large,invalid}` plus a new
-   preprocessor corpus. Plain-LSL golden results must not change.
-8. **Differential Legacy↔AST harness** (Phase 4+): compare normalized
-   diagnostics as a multiset of `(code, severity, source, start, end)`, plus a
-   per-code report. The harness calls the public `parse_legacy`/`parse_ast` and
-   both semantic entry points independently; neither engine is a wrapper around
-   the other. Order is compared only through the documented deterministic
-   policy.
+   temporary directories. Integration coverage asserts unchanged plain-Legacy
+   output, identity-prepared `ast`/`compare` without preprocessing, full
+   preprocessing for every engine, and stderr Compare report separation and
+   unit order. There is no cross-engine deduplication merge step: Compare
+   displays only the Legacy stream.
+7. **Golden corpus and pre-change CLI oracle**: existing
+   `corpus/{small,medium,large,invalid}` plus a new preprocessor corpus.
+   Plain-LSL golden results must not change. `tests/legacy_golden.rs` holds six
+   byte-exact stdout/stderr fixtures captured from the unmodified base
+   `4dd01ca16539e6944a6714f133e9d2636adb6a95`; both the default invocation and
+   `--engine legacy` must reproduce them. That pre-change golden baseline is the
+   compatibility oracle for CLI wiring. Compare detail truncation (the bounded
+   64-sample display) is a distinct state from an incomplete comparison (the
+   100,000-fingerprint budget); tests must assert both independently.
+8. **Differential Legacy↔AST harness** (Phase 4+): compare exact 10-field
+   fingerprints as a multiset of `(code, severity, kind, message, start, end,
+   line, column, end_line, end_column)`, plus a per-code report. The harness
+   calls the public `parse_legacy`/`parse_ast` and both semantic entry points
+   independently; neither engine is a wrapper around the other. Order is
+   compared only through the documented deterministic policy.
 9. **Fallback/fuzz-style tests without dependencies**: deterministic generators
    over token/directive alphabets, bounded by iteration counts, run in normal
    `cargo test`.
+10. **Allocation-counted work-bound proof**: `tests/compare_budget_enforcement.rs`
+    uses a test-only counting `GlobalAlloc` to show that the over-budget
+    comparator performs a constant number of allocation calls and constant byte
+    volume, proving the SEM fingerprint budget is enforced before
+    materialisation.
 
 ### Requirements
 
@@ -2206,9 +2355,11 @@ implementations, not stages of the same code.
    parser owns recovery), record: legacy owner, AST owner, parity status,
    known differences, and the test that proves parity. The matrix lives next to
    the AST semantic code and is updated in the same commit as behavior changes.
-3. **Shadow comparison.** In `compare` mode, run both engines on the same
-   prepared tokens, resolve both results, and compare normalized multisets.
-   Differences are reported as a development artifact, never as user findings.
+3. **Shadow comparison (implemented as Compare mode).** Both engines run from
+   the same single-lex prepared token slice, and their raw semantic streams are
+   compared as exact multisets. The report is emitted on stderr only; the
+   displayed stream is the Legacy stream. Differences are a development artifact,
+   not merged into user findings, and an unmatched report exits 3.
 4. **Parser parity criteria.** Before an AST parser change may replace legacy
    parsing for a construct, all of the following must hold on the full corpus
    (`small`, `medium`, `large`, `invalid`) and the grammar inventory tests:
@@ -2225,18 +2376,22 @@ implementations, not stages of the same code.
 5. **Parity thresholds for rules.** A rule may move to the AST engine only when:
    - its corpus and unit-test results match legacy exactly, or
    - every difference is documented as an intentional fix and covered by a test.
-6. **Ordering policy.** Unified output is sorted deterministically, so rule
-   migration does not reshuffle user output. Legacy-only mode keeps the current
-   pass order to avoid breaking existing golden tests.
-7. **No duplicate findings.** When both engines run for a user-visible mode, the
-   merge layer must deduplicate by `(code, primary span)`. Duplicate detection is
-   part of the Phase 6 acceptance criteria.
-8. **Feature gating.** AST engine selection is a CLI/config option in the
-   experimental branch. Default stays legacy until Phase 6 stabilization.
-9. **Rollback.** The legacy parser and semantic analyzer remain compiled,
-   public, and selectable through the end of Phase 6; removal requires a
-   separate decision and a major-version boundary. Legacy differential testing
-   must remain possible until that decision.
+6. **Ordering policy.** The displayed Legacy stream is not globally sorted; it
+   keeps the existing per-unit, per-source, pass order. Only the Compare report
+   is deterministically ordered. Rule migration therefore does not reshuffle
+   user output, and Legacy-only mode keeps the current pass order.
+7. **No duplicate findings.** Compare has no cross-engine deduplication merge
+   step because it displays the Legacy stream only; the AST semantic stream is
+   never appended to stdout. Legacy and AST modes each display exactly one
+   engine's stream.
+8. **Feature gating (status: implemented).** Engine selection is available
+   through `--engine` and the `engine` configuration key in the experimental
+   branch. The default remains `legacy` until a separate Phase 6 stabilization
+   decision; `ast` and `compare` are opt-in.
+9. **Rollback (status).** The legacy parser and semantic analyzer remain
+   compiled, public, and selectable (`--engine legacy` or `engine = legacy`);
+   removal requires a separate decision and a major-version boundary. Legacy
+   differential testing remains possible.
 10. **Documentation.** Every behavioral difference introduced by AST rules is
     added to `docs/diagnostics.md` with an example and a boundary note.
 
@@ -3132,11 +3287,105 @@ cross-rule coexistence. No intentional diagnostic deltas exist in this slice.
 **Boundary.** All existing SEM rules are AST-migrated; engine selection and
 CLI/pipeline integration remain intentionally out of scope.
 
+#### Phase 6G implementation record
+
+**Status:** implemented and wired on the experimental branch. Slice 1
+(`4f13716bbd49696ab68984cee86943e7c15f3e74`) added the engine API; this slice
+wires configuration, the CLI, output, and documentation on top of integration
+base `4dd01ca16539e6944a6714f133e9d2636adb6a95`. The default engine remains
+`legacy`.
+
+**Engine selection.** `LintConfig` accepts `engine = legacy|ast|compare`, with
+`legacy` as the default and line-numbered errors for invalid/empty values. The
+CLI accepts `--engine VALUE` and `--engine=VALUE`, rejects missing/empty/unknown
+values with exit 2, and applies the CLI value after configuration load. No
+`--ast`/`--compare` aliases exist.
+
+**Preparation and dispatch.** Three paths are preserved: the plain no-preprocess
+Legacy direct loop is unchanged and remains uncapped at run level; `ast` and
+`compare` without preprocessing use byte-identical identity preparation; any
+engine with preprocessing uses the full preprocessor and dialect. The single
+unit-based runner keeps unit order, stdin handling, include-graph grouping,
+per-source `config.apply`, and the invocation-wide `PRE039` cap. AST/Compare
+preflight every unit before analysis and fail fast with exit 2 if a prepared
+source is missing. Engine analysis errors map to
+`neolint: cannot analyze unit N` and exit 2.
+
+**Tokens and compare output.** Each prepared unit is lexed once; the same token
+slice feeds both analyzers and `--tokens`, so the second
+`lex(prepared.text())` call is gone. Compare displays the Legacy stream only on
+stdout, preserving the existing human/JSON schema. A deterministic report is
+written to stderr: compact human lines or one JSON object
+`{"engine":"compare","units":[…],"matched":…}`. Per-rule `legacy_count` and
+`ast_count` are exact. A cheap `[usize; 23]` counting pass checks the
+100,000 SEM-fingerprint per-engine budget before materialising anything:
+exceeding it performs no collection, sorting, or delta, sets
+`comparison_complete = false` and `matched = false`, and reports per-rule
+`missing_total`/`extra_total` as unknown (`None`, rendered `?` in human output
+and `null` in JSON) rather than zero. Within budget, delta totals are exact
+(`Some(n)`) and a single merge keeps at most 64 detail samples per rule per
+direction; `details_truncated` is derived from those totals and stays
+independent of `comparison_complete`. Exit code 3 signals an unmatched Compare
+report after any exit-2 failure; a matched report follows the displayed Legacy
+stream (0/1). The run-level `all_matched()` signal requires both `matched` and
+`comparison_complete` on every unit, so an inconsistent incomplete report
+cannot select a successful exit.
+
+**Tests and compatibility.** `tests/legacy_golden.rs` runs the same six
+pre-change fixtures captured from base `4dd01ca…` both by default and with
+`--engine legacy`. `tests/cli.rs` covers both flag forms, config selection and
+CLI override, invalid/missing/empty values, identity preparation without
+preprocessing, preprocessing/includes/Firestorm/stdin, stderr report separation,
+JSON stdout compatibility, exit 0/1/2/3 precedence, multi-file and directory
+report order, and single-lex token parity. Slice 2b adds config-before-report,
+AST/Compare invocation-cap, help, legacy-override, prepared-token, and
+identity-byte coverage, plus incomplete-vs-truncated, every-code and absolute-limit
+engine tests. Slice 2c adds the shared `is_parity()` predicate and pins its four
+combinations. Slice 2d makes the SEM fingerprint budget an actual work bound:
+the SEM-scoped counting precheck, over-budget unknown totals with empty detail
+samples, the exactly-at-budget boundary, and `?`/`null` rendering are pinned by
+comparator, engine-integration, and CLI-renderer tests. The exit-3 fixture is deliberately corrupted input
+(`while (i < n( {` plus an unterminated non-returning function and an event
+named `llSay`); its only divergence is the same event-header `SEM002` delta,
+while its other findings (for example `SEM011` for the non-returning function)
+agree across engines. The same delta occurs on fully accepted input
+(`default { llSay() { } }`): Legacy token-scans the event header as a builtin
+call while AST only inspects expression call sites. It is therefore a Legacy/AST
+divergence in builtin-call detection, not a parser-recovery artifact and not a
+parity defect introduced here. The differential corpus does not contain that
+collision, so the rule matrix's `exact` and `Known differences` cells remain
+corpus-relative; Compare reports the genuine delta.
+
+**Validation evidence (final working-tree run).**
+
+- `cargo fmt --all -- --check` → exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
+- `cargo test --all-targets --all-features` → exit 0, 803 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 803 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 803 passed.
+- `cargo test --test compare_budget_enforcement -- --nocapture` → exit 0;
+  N+1 and 2N+1 comparator calls each allocate 1 time / 2576 bytes.
+- `cargo test --test legacy_golden` → exit 0, 2 passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
+- `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
+  → 9 tests OK.
+- `python3 scripts/test_documentation.py` → 6 tests OK.
+- `git diff --check` → exit 0.
+
+**Boundary.** Phase 6G added `src/engine/{mod,compare,wiring}.rs` and made
+additive changes to `src/source/unit.rs`, `src/pipeline.rs`, and `src/lib.rs`;
+it also wired `src/config.rs`, `src/main.rs`, docs, and tests. It deliberately did
+not change `src/parser.rs`, `src/semantic.rs`, `src/lexer.rs`,
+`src/diagnostic/**`, `src/preprocessor/**`, `src/ast/**`, or any AST rule module;
+no SEM001–SEM023 logic, message, span, severity or kind changed. Parser/lexer
+parity is still not claimed; Compare covers SEM001–SEM023 only.
+
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
 - **Functionality:** scope/type/flow analysis over the AST; rule ownership
-  matrix; differential Legacy↔AST harness; unified output with deduplication;
-  new conservative rules with tests and docs; performance validation.
+  matrix; differential Legacy↔AST harness; engine selection with a Legacy-only
+  displayed stream in compare (no dedup merge); new conservative rules with tests
+  and docs; performance validation.
 - **Modules:** `src/ast_semantic/{mod.rs,scopes.rs,types.rs,flow.rs,rules/…}`,
   unified diagnostics layer.
 - **Dependencies:** Phases 4–5.

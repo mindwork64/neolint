@@ -1,0 +1,9 @@
+firestorm.lsl:5:24: error[PAR007]: expected ';' after expression
+firestorm.lsl:6:18: error[PAR007]: expected ';' after expression
+firestorm.lsl:6:19: error[PAR007]: expected ';' after expression
+firestorm.lsl:6:19: error[PAR006]: expected an expression
+firestorm.lsl:9:13: error[PAR006]: expected an expression
+firestorm.lsl:9:20: error[PAR006]: expected an expression
+firestorm.lsl:6:13: warning[SEM012]: variable 'case' is not declared in the current script; verify that it is provided by the scripting environment
+firestorm.lsl:8:17: warning[SEM012]: variable 'break' is not declared in the current script; verify that it is provided by the scripting environment
+firestorm.lsl:10:17: warning[SEM012]: variable 'break' is not declared in the current script; verify that it is provided by the scripting environment

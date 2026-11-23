@@ -19,6 +19,7 @@ pub mod ast_semantic;
 pub mod builtins;
 pub mod config;
 pub mod diagnostic;
+pub mod engine;
 pub mod lexer;
 pub mod parser;
 pub mod pipeline;
@@ -32,6 +33,12 @@ pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
+pub use engine::{
+    compare_semantic_diagnostics, AnalysisEngine, DiagnosticFingerprint, EngineAnalysisError,
+    EngineAnalysisOptions, EngineComparisonReport, RuleComparison, RunEngineAnalysis,
+    UnitComparison, UnitEngineAnalysis, MAX_COMPARE_DETAILS_PER_RULE,
+    MAX_COMPARE_FINGERPRINTS_PER_ENGINE, SEM_CODES,
+};
 pub use lexer::{lex, Token, TokenKind};
 pub use parser::{parse, parse_legacy};
 pub use pipeline::{allocate_run_id, AnalysisRun, RunIdAllocationError, SetupError};

@@ -1,10 +1,12 @@
 //! Dependency-free rule configuration for the CLI.
 //!
 //! Configuration is a small line-oriented `key = value` format. It supports
-//! disabling rule codes and overriding their severity; command-line overrides
-//! are applied afterward by the binary. Parsing and validation return human
-//! readable errors so the CLI can exit with code 2 without panicking.
+//! disabling rule codes, overriding their severity, preprocessing settings, and
+//! analysis-engine selection; command-line overrides are applied afterward by
+//! the binary. Parsing and validation return human readable errors so the CLI
+//! can exit with code 2 without panicking.
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::engine::AnalysisEngine;
 use crate::preprocessor::PreprocessDialect;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,6 +20,7 @@ pub struct LintConfig {
     preprocess: bool,
     dialect: PreprocessDialect,
     include_dirs: Vec<PathBuf>,
+    engine: AnalysisEngine,
 }
 
 impl LintConfig {
@@ -30,12 +33,14 @@ impl LintConfig {
     /// Parse the line-oriented configuration format.
     ///
     /// Blank lines and comments are ignored. Supported settings are
-    /// `disable = RULE[, RULE...]` and `severity.RULE = error|warning|info`.
+    /// `disable = RULE[, RULE...]`, `severity.RULE = error|warning|info`,
+    /// `preprocess = true|false`, `dialect = lsl|firestorm`,
+    /// `include_dir = PATH`, and `engine = legacy|ast|compare`.
     ///
     /// # Errors
     ///
     /// Returns a line-numbered error for malformed settings, invalid rule
-    /// codes, or invalid severity names.
+    /// codes, invalid severity names, or invalid engine selectors.
     pub fn parse(source: &str) -> Result<Self, String> {
         let mut config = Self::default();
 
@@ -114,6 +119,15 @@ impl LintConfig {
                 continue;
             }
 
+            if key == "engine" {
+                config.engine = AnalysisEngine::parse(value).ok_or_else(|| {
+                    format!(
+                        "line {line_number}: invalid engine value '{value}' (expected legacy, ast or compare)"
+                    )
+                })?;
+                continue;
+            }
+
             return Err(format!("line {line_number}: unknown setting '{key}'"));
         }
 
@@ -160,6 +174,11 @@ impl LintConfig {
         &self.include_dirs
     }
 
+    /// Configured analysis engine, defaulting to [`AnalysisEngine::Legacy`].
+    pub fn engine(&self) -> AnalysisEngine {
+        self.engine
+    }
+
     /// Enable or disable preprocessing (CLI override).
     pub fn set_preprocess(&mut self, enabled: bool) {
         self.preprocess = enabled;
@@ -176,6 +195,11 @@ impl LintConfig {
     /// Replace the include-directory list (CLI override).
     pub fn set_include_dirs(&mut self, dirs: Vec<PathBuf>) {
         self.include_dirs = dirs;
+    }
+
+    /// Override the analysis engine (CLI override).
+    pub fn set_engine(&mut self, engine: AnalysisEngine) {
+        self.engine = engine;
     }
 
     /// Apply disabled-rule filtering and severity overrides in place.
@@ -320,5 +344,60 @@ mod preprocess_config_tests {
         assert!(LintConfig::parse("preprocess = maybe").is_err());
         assert!(LintConfig::parse("dialect = lua").is_err());
         assert!(LintConfig::parse("include_dir =").is_err());
+    }
+}
+
+#[cfg(test)]
+mod engine_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_engine_is_legacy() {
+        assert_eq!(LintConfig::default().engine(), AnalysisEngine::Legacy);
+        assert_eq!(
+            LintConfig::parse("# no engine setting\n").unwrap().engine(),
+            AnalysisEngine::Legacy
+        );
+    }
+
+    #[test]
+    fn parses_each_engine_selector() {
+        for (value, expected) in [
+            ("legacy", AnalysisEngine::Legacy),
+            ("ast", AnalysisEngine::Ast),
+            ("compare", AnalysisEngine::Compare),
+        ] {
+            let config = LintConfig::parse(&format!("engine = {value}\n")).unwrap();
+            assert_eq!(config.engine(), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_and_empty_engine_values_with_line_numbers() {
+        let invalid = LintConfig::parse("disable = SEM001\nengine = faster\n").unwrap_err();
+        assert_eq!(
+            invalid,
+            "line 2: invalid engine value 'faster' (expected legacy, ast or compare)"
+        );
+
+        let empty = LintConfig::parse("engine =\n").unwrap_err();
+        assert_eq!(
+            empty,
+            "line 1: invalid engine value '' (expected legacy, ast or compare)"
+        );
+    }
+
+    #[test]
+    fn old_config_without_engine_still_parses_as_legacy() {
+        let config = LintConfig::parse("disable = SEM001\nseverity.SEM004 = warning\n").unwrap();
+        assert_eq!(config.engine(), AnalysisEngine::Legacy);
+    }
+
+    #[test]
+    fn set_engine_overrides_the_configured_value() {
+        let mut config = LintConfig::parse("engine = ast\n").unwrap();
+        assert_eq!(config.engine(), AnalysisEngine::Ast);
+        config.set_engine(AnalysisEngine::Compare);
+        assert_eq!(config.engine(), AnalysisEngine::Compare);
     }
 }
