@@ -45,7 +45,8 @@ the measured binary revision is passed explicitly and verified by SHA-256.
 | Binary SHA-256 | `83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8` | `227352d90b1ed1233046e6e7073726c43a354352e94c1e3ac06cc7509843babc` |
 | Binary bytes | 1,659,648 | 1,675,040 |
 | Build worktree | `target/wt-base`, clean, `HEAD = 66936b0` | `target/wt-fixed`, clean, `HEAD = 1273c4d` |
-| Verification | `--expect-binary-sha256` matched; `binary_source_verified: true` | same |
+| Digest check | `--expect-binary-sha256` matched (`binary_sha256_verified: true`) | same |
+| Source rebuild | `--verify-build` rebuilt the commit in a throwaway worktree and reproduced the digest (`binary_source_build_verified: true`) | same |
 
 Both binaries were rebuilt from fresh `git worktree` checkouts of the exact
 commits above with `cargo build --release --bin neolint` on the recorded
@@ -55,10 +56,24 @@ tree, which also demonstrates that the build is path-independent here.
 
 Each `bench/results/*/meta.json` records `harness_commit`, `harness_tree`,
 `harness_branch`, `binary_source_commit`, `binary_source_tree`,
-`binary_source_verified`, `binary_sha256` and `binary_sha256_expected`. The
-harness refuses to measure when the expected digest does not match
-(`--expect-binary-sha256`); the earlier run that recorded a misleading
-`commit`/`branch` pair was discarded and is not referenced anywhere.
+`binary_sha256`, `binary_sha256_expected`, `binary_sha256_verified`,
+`binary_source_build_verified`, `binary_source_rebuilt_sha256` and
+`cross_pass_consistent`. The two verification flags mean different things and are
+not interchangeable:
+
+- `binary_sha256_verified` — the measured binary matches the digest the caller
+  passed with `--expect-binary-sha256`. It says nothing about which source commit
+  produced the binary.
+- `binary_source_build_verified` — `--verify-build` checked out
+  `binary_source_commit` into a throwaway worktree, confirmed the tree was clean,
+  rebuilt `cargo build --release --bin neolint`, and compared the rebuilt digest
+  with the measured one. This is the flag that proves the source-commit/build
+  relationship, and it is the one reported in the table above.
+
+The harness refuses to measure when the expected digest does not match (exit 5)
+and fails the run when the rebuild does not reproduce the digest (exit 6). The
+earlier run that recorded a misleading `commit`/`branch` pair was discarded and is
+not referenced anywhere.
 
 ## 3. Method and reproduction
 
@@ -77,22 +92,26 @@ python3 bench/bench.py --passes 2 --skip-build \
   --binary target/wt-base/target/release/neolint \
   --binary-source-commit 66936b0e175d51cba8d83377061229869ef64e96 \
   --expect-binary-sha256 83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8 \
-  --out bench/results/baseline-66936b0
+  --verify-build --out bench/results/baseline-66936b0
 
 # Post-fix (two independent passes)
 python3 bench/bench.py --passes 2 --skip-build \
   --binary target/wt-fixed/target/release/neolint \
   --binary-source-commit 1273c4d325428c9fa95a49c9122bfc99ae5d9e34 \
   --expect-binary-sha256 227352d90b1ed1233046e6e7073726c43a354352e94c1e3ac06cc7509843babc \
-  --out bench/results/fixed-1273c4d
+  --verify-build --out bench/results/fixed-1273c4d
 ```
 
 To rebuild from source instead of a worktree, drop `--skip-build --binary` and
 pass `--binary-source-commit`/`--expect-binary-sha256` for the record.
 
 Every sample records exit status and SHA-256 of stdout and stderr. A row whose
-exit status or digests vary is a hard failure (`exit 4`), never averaged. Both
-committed runs report stable digests and a single exit code per row.
+exit status or digests vary **within** a pass is a hard failure (`exit 4`), never
+averaged. After all passes, each row's signature (exit codes plus both digests) is
+also compared **across** passes: a row that is stable in pass 1 with one output and
+stable in pass 2 with a different output fails the run (`exit 7`) and is listed in
+`meta.json` under `cross_pass_inconsistencies`. Both committed runs report
+`cross_pass_consistent: true` and a single exit code per row.
 
 Peak RSS is the kernel's `VmHWM` for the child, polled untimed from
 `/proc/<pid>/status` in three separate runs per row. `ru_maxrss` from `os.wait4`
@@ -107,8 +126,8 @@ data is committed next to each summary:
 
 | Run | File | Bytes | SHA-256 |
 | --- | --- | --- | --- |
-| Baseline | `bench/results/baseline-66936b0/raw.jsonl.gz` | 27,995 | `40adcb5891868a836824439972cd4fa355bf2c570c8fc20f3455ccb0ab7570b6` |
-| Post-fix | `bench/results/fixed-1273c4d/raw.jsonl.gz` | 28,274 | `43d7dd1bf5af26b0a99f1f8fac64597dae09e24ad727b32657e9de1de37229f9` |
+| Baseline | `bench/results/baseline-66936b0/raw.jsonl.gz` | 27,487 | `2b0a2b3d40b956cbb05b153278047d721d18ebd236b8b414c4e4b3c875eb82c7` |
+| Post-fix | `bench/results/fixed-1273c4d/raw.jsonl.gz` | 27,556 | `acdaa291b4bdef866425939613edfb55d6ab2a660eee625654e1aab40b6dd25c` |
 
 Each file holds one JSON object per sample: `pass`, `row`, `sample`, `ns`,
 `exit`, both digests, both byte counts. `gunzip -c … | head` is enough to verify.
@@ -147,14 +166,14 @@ multi-file units, and the eight generated single-file workloads.
 | `call_graph.lsl` | 66,431 | `6555db41e45c1e80…` | 800 reachable + 700 unreachable functions, 400-wide fan-out |
 | `nested_scopes.lsl` | 36,949 | `d2b6eb3060d9b9b8…` | nesting depth 40, 5 locals per level |
 | `preprocess_root.lsl` | 16,148 | `6809da09c436623e…` | 400 generated helpers over 8 includes |
-| `near_limit.lsl` | **8,026,842** | `84e03b23704f131c1f20e57fff75790f88de37b7c33d7f6c69015cfbdc3a3c76` | 120,000 statements, 91 % of the 8 MiB root limit |
+| `near_limit.lsl` | **8,026,842** | `84e03b23704f131c1f20e57fff75790f88de37b7c33d7f6c69015cfbdc3a3c76` | 120,000 statements, 95.7 % of the 8 MiB root limit |
 | `malformed.lsl` | 14,932 | `73c2886339f2205c…` | 500 malformed initializers |
 | `diagnostic_flood.lsl` | 448,932 | `1d478c97c7d80b43…` | 10,000 undeclared references at the cap |
 | `stdin.lsl` | 114 | `4a237b239d17422a…` | stdin preparation path |
 
 **Near-limit fixture.** The previous 25,000-statement fixture was only ~1.6 MiB,
 which did not exercise the documented 8 MiB root-source limit. It is now 120,000
-statements: 8,026,842 bytes, 91 % of `MAX_ROOT_SOURCE_BYTES` (8,388,608) and
+statements: 8,026,842 bytes, 95.7 % of `MAX_ROOT_SOURCE_BYTES` (8,388,608) and
 therefore under the limit, syntactically valid, and diagnostic-free. Because each
 invocation now costs ~0.5 s, that row uses **5** samples per pass instead of 30–50
 (two passes, both binaries, 10 samples per binary; the reduction is recorded as
@@ -168,43 +187,50 @@ combined samples.
 
 | Row | n | Base median | Base p95 | Head median | Head p95 | Δ median |
 | --- | --- | --- | --- | --- | --- | --- |
-| `startup` (`--version`) | 100 | 1.04 | 1.76 | 1.16 | 1.62 | +11.6 % |
-| `corpus_dir/default` | 80 | 11.75 | 13.18 | 9.79 | 13.22 | −16.7 % |
-| `corpus_dir/ast` | 80 | 10.04 | 12.71 | 8.92 | 13.20 | −11.1 % |
-| `corpus_dir/legacy` | 80 | 6.92 | 7.64 | 7.03 | 8.06 | +1.7 % |
-| `corpus_dir/compare` | 80 | 13.46 | 14.78 | 9.83 | 15.32 | −27.0 % |
-| `many_symbols/default` | 60 | 47.34 | 61.91 | 28.69 | 35.85 | **−39.4 %** |
-| `many_symbols/ast` | 60 | 46.98 | 57.02 | 29.59 | 35.38 | **−37.0 %** |
-| `many_symbols/legacy` | 60 | 11.53 | 17.70 | 10.47 | 17.74 | −9.2 % |
-| `call_graph/default` | 60 | 21.82 | 29.65 | 21.44 | 29.62 | −1.7 % |
-| `call_graph/legacy` | 60 | 12.08 | 16.02 | 10.49 | 15.77 | −13.2 % |
-| `near_limit/default` | 10 | 483.22 | 502.98 | 477.76 | 505.60 | −1.1 % |
-| `near_limit/legacy` | 10 | 234.76 | 257.42 | 234.70 | 243.23 | −0.0 % |
-| `diagnostic_flood/default` | 40 | 167.84 | 183.39 | 83.20 | 99.67 | **−50.4 %** |
-| `diagnostic_flood/legacy` | 40 | 50.62 | 55.18 | 49.74 | 58.97 | −1.7 % |
-| `preprocess/default` | 60 | 19.27 | 22.56 | 13.11 | 21.61 | −32.0 % |
-| `preprocess/legacy` | 60 | 10.61 | 18.59 | 10.89 | 17.73 | +2.6 % |
-| `malformed/default` | 60 | 7.21 | 8.38 | 5.57 | 7.67 | −22.8 % |
-| `malformed/legacy` | 60 | 6.33 | 7.44 | 5.08 | 6.95 | −19.7 % |
-| `multi_file/default` | 60 | 6.50 | 8.25 | 7.42 | 8.08 | +14.1 % |
-| `multi_file/legacy` | 60 | 4.37 | 5.41 | 4.34 | 5.09 | −0.7 % |
-| `nested_scopes/default` | 60 | 7.42 | 8.16 | 6.11 | 7.78 | −17.7 % |
-| `nested_scopes/legacy` | 60 | 4.73 | 5.44 | 3.50 | 5.31 | −26.0 % |
-| `stdin/default` | 60 | 3.76 | 4.32 | 2.98 | 4.70 | −20.7 % |
+| `startup` (`--version`) | 100 | 1.37 | 1.52 | 1.41 | 1.54 | +2.8 % |
+| `corpus_dir/default` | 80 | 11.84 | 12.91 | 12.18 | 13.09 | +2.9 % |
+| `corpus_dir/ast` | 80 | 11.69 | 12.24 | 11.78 | 12.65 | +0.8 % |
+| `corpus_dir/legacy` | 80 | 6.83 | 7.03 | 6.89 | 7.45 | +0.9 % |
+| `corpus_dir/compare` | 80 | 13.93 | 14.72 | 14.12 | 15.10 | +1.4 % |
+| `many_symbols/default` | 60 | 51.47 | 59.63 | 31.53 | 35.27 | **−38.7 %** |
+| `many_symbols/ast` | 60 | 51.61 | 60.06 | 33.57 | 34.97 | **−34.9 %** |
+| `many_symbols/legacy` | 60 | 9.29 | 17.26 | 11.64 | 17.07 | +25.3 % |
+| `call_graph/default` | 60 | 28.43 | 29.73 | 27.70 | 29.17 | −2.6 % |
+| `call_graph/legacy` | 60 | 14.36 | 15.15 | 9.99 | 15.51 | −30.5 % |
+| `near_limit/default` | 10 | 456.69 | 470.92 | 464.65 | 489.63 | +1.7 % |
+| `near_limit/legacy` | 10 | 214.89 | 230.12 | 223.11 | 236.72 | +3.8 % |
+| `diagnostic_flood/default` | 40 | 159.04 | 180.54 | 86.18 | 97.01 | **−45.8 %** |
+| `diagnostic_flood/legacy` | 40 | 43.38 | 51.74 | 44.50 | 52.23 | +2.6 % |
+| `preprocess/default` | 60 | 19.79 | 22.07 | 15.97 | 22.47 | −19.3 % |
+| `preprocess/legacy` | 60 | 11.94 | 17.94 | 10.14 | 17.77 | −15.1 % |
+| `malformed/default` | 60 | 6.87 | 7.17 | 4.88 | 7.23 | −29.0 % |
+| `malformed/legacy` | 60 | 6.17 | 6.49 | 6.17 | 6.68 | −0.0 % |
+| `multi_file/default` | 60 | 7.36 | 7.80 | 7.52 | 8.22 | +2.2 % |
+| `multi_file/legacy` | 60 | 4.16 | 4.58 | 4.38 | 4.63 | +5.4 % |
+| `nested_scopes/default` | 60 | 6.67 | 7.62 | 4.80 | 7.18 | −28.0 % |
+| `nested_scopes/legacy` | 60 | 4.49 | 4.98 | 2.69 | 5.00 | −40.1 % |
+| `stdin/default` | 60 | 2.32 | 4.08 | 3.03 | 4.27 | +30.1 % |
 
 **Reading the noise.** The Legacy rows cannot change between these two binaries,
-yet they move by up to 26 % (`nested_scopes/legacy`) and `malformed/legacy` by
-19.7 %, because each binary was measured in its own sequential session. That is
-the empirical noise envelope for sub-10 ms rows. Only the two rows with effects
-far outside it — `diagnostic_flood/default` (−50.4 %) and `many_symbols/default`
-(−39.4 %) — are claimed as improvements, and both replicate across three
-independent sessions. Rows whose movement stays inside the envelope are reported
-as measurements, not as gains.
+yet they move by up to 40 % (`nested_scopes/legacy`) and `many_symbols/legacy` by
+25 %, because each binary was measured in its own sequential session. That is the
+empirical noise envelope for sub-10 ms rows in this session. Only the two rows with
+effects far outside it — `diagnostic_flood/default` (−45.8 %) and
+`many_symbols/default` (−38.7 %) — are claimed as improvements, and both replicate
+across four independent sessions. Rows whose movement stays inside the envelope
+are reported as measurements, not as gains.
 
 Peak RSS (post-fix run, median of three untimed samples per row): `--version`
-≈2.3 MB; corpus directory ≈4.2 MB; `multi_file` ≈7 MB; `preprocess` ≈8 MB;
-`call_graph` ≈12 MB; `many_symbols` ≈16 MB; `diagnostic_flood` ≈39 MB;
-`near_limit` ≈67 MB. Corpus-scale runs stay in the low single-digit megabytes.
+≈1.9 MB; corpus directory ≈4.2 MB; `multi_file` ≈4.0 MB; `preprocess` ≈8.3 MB;
+`call_graph` ≈11.8 MB; `many_symbols` ≈16.2 MB; `diagnostic_flood` ≈38.5 MB;
+`near_limit` (7.65 MiB input) ≈310 MB.
+
+The near-limit figure is worth stating explicitly: peak RSS grows roughly linearly
+with input size at about 2.5 KB per statement for this workload, so a file at the
+8 MiB root limit needs roughly 300 MB of address space to analyze. That is a
+capacity observation, not a violated limit — nothing in the contract bounds RSS —
+but it belongs in the qualification record for anyone planning to analyze
+maximum-size inputs.
 
 Two-pass variation (same binary, pass 1 vs pass 2): rows below 5 ms varied by
 20–60 %, rows between 5 and 20 ms by roughly 5–20 %, and the expensive rows
@@ -314,9 +340,11 @@ diagnostic cap (the cap is applied after suppression).
 | No boundary test for included-file size, exact origin-chain depth, invocation unit capacity | Test-coverage gap | N/N+1 tests added |
 | Per-diagnostic whole-buffer validation in rendering | Measured bottleneck | Fixed (−30…−50 % on large floods) |
 | Linear scope symbol scan | Measured bottleneck | Fixed (16–61 % end-to-end at scale) |
-| Benchmark metadata mixed harness revision with binary revision | Evidence defect | Fixed: separate fields, verified SHA-256 |
+| Benchmark metadata mixed harness revision with binary revision | Evidence defect | Fixed: separate fields, digest check plus source-commit rebuild |
+| `--verify-build` was registered but never executed | Evidence defect | Fixed: rebuilds the commit in a throwaway worktree and compares digests (exit 6 on mismatch) |
+| Cross-pass determinism was not enforced | Evidence defect | Fixed: per-row signatures compared across passes (exit 7), unit-tested |
 | Include/multi-file inputs were not hashed | Evidence defect | Fixed: 70-file recursive manifest |
-| Near-limit fixture was 1.6 MiB, not near the 8 MiB limit | Evidence defect | Fixed: 8,026,842 bytes, 91 % of the limit |
+| Near-limit fixture was 1.6 MiB, not near the 8 MiB limit | Evidence defect | Fixed: 8,026,842 bytes, 95.7 % of the limit |
 | `MAX_TYPE_DEPTH` unreachable through the parser | Known limitation (defensive) | Documented |
 | Duplicated CFG constant sets in AST and Legacy engines | Known limitation | Documented, follow-up #110 |
 | PRE diagnostics use `DiagnosticKind::Syntax` | Known limitation / policy question | Follow-up #108 |
@@ -334,7 +362,8 @@ this phase; `release.yml` is unchanged.
 
 - Single host, single OS/architecture; no ARM, macOS or Windows measurement.
 - Peak RSS is only available on Linux via `/proc`; other hosts report
-  `unavailable`.
+  `unavailable`. Peak RSS is not a contract limit: the near-limit fixture needs
+  ≈310 MB, growing roughly linearly at ~2.5 KB per statement.
 - Sequential rather than interleaved A/B sessions bound the noise at roughly
   ±26 % for sub-10 ms rows, measured with the Legacy negative control. Only
   effects well outside that envelope are claimed.

@@ -10,10 +10,11 @@ adding a crate, a benchmark framework or a timing assertion to CI.
 # Build once, then measure two independent passes
 python3 bench/bench.py --passes 2
 
-# Measure a binary built from a specific commit and verify its digest
+# Measure a binary from a specific commit, verify its digest, and prove the
+# source-commit/build relationship by rebuilding that commit in a worktree
 python3 bench/bench.py --passes 2 --skip-build \
   --binary target/wt-base/target/release/neolint \
-  --binary-source-commit <commit> --expect-binary-sha256 <sha256>
+  --binary-source-commit <commit> --expect-binary-sha256 <sha256> --verify-build
 
 # Fast smoke check of the harness itself (never a timing threshold)
 python3 bench/bench.py --quick --self-test --skip-build
@@ -26,8 +27,17 @@ uncompressed `raw.jsonl` is regenerated on demand and ignored by git.
 `meta.json` separates the **harness** revision (`harness_commit`/`harness_tree`/
 `harness_branch`) from the **measured binary** revision
 (`binary_source_commit`/`binary_source_tree`) and records the binary SHA-256.
-Passing `--expect-binary-sha256` makes the harness refuse to measure a binary that
-does not match, and sets `binary_source_verified`. Every input file is hashed
+Passing `--expect-binary-sha256` makes the harness refuse a binary that does not
+match (exit 5) and sets `binary_sha256_verified`. Passing `--verify-build` checks
+out `binary_source_commit` into a throwaway worktree, confirms it is clean,
+rebuilds it, compares digests (exit 6 on mismatch) and sets
+`binary_source_build_verified` plus `binary_source_rebuilt_sha256`; only that flag
+proves the binary came from the recorded commit.
+
+After the last pass the harness compares each row's exit codes and stdout/stderr
+digests **across** passes. A row that is stable within a pass but differs between
+passes fails the run (exit 7) and appears in `meta.json` under
+`cross_pass_inconsistencies`. Every input file is hashed
 recursively under `inputs` with repository-relative keys and byte sizes.
 
 ## What is measured
@@ -57,7 +67,7 @@ corpus-manifest changes):
 | `call_graph` | 800 reachable + 700 unreachable functions, 400-wide fan-out | call-graph construction and reachability |
 | `nested_scopes` | depth 40, 5 locals per level | scope chain walk |
 | `preprocess` | 400 generated helpers over 8 includes | macro/include expansion |
-| `near_limit` | 120,000 statements (7.65 MiB, 91 % of the 8 MiB root limit) | large valid input near a documented limit |
+| `near_limit` | 120,000 statements (7.65 MiB, 95.7 % of the 8 MiB root limit) | large valid input near a documented limit |
 | `malformed` | 500 malformed initializers | recovery path |
 | `diagnostic_flood` | 10,000 undeclared references | rendered-diagnostic cap |
 | `multi_file` | 24 units in one directory | multi-unit aggregation |

@@ -343,6 +343,34 @@ def hash_inputs(paths) -> dict:
     return dict(sorted(entries.items()))
 
 
+def signature(entry: dict) -> tuple:
+    """Identity of a row's observable behaviour within one pass."""
+    return (tuple(entry["exit"]), entry["stdout_sha256"], entry["stderr_sha256"])
+
+
+def cross_pass_inconsistencies(summaries) -> list:
+    """Rows whose exit status or output digests differ between passes.
+
+    Within a pass the harness already rejects unstable samples. This check
+    compares the per-pass signatures with each other, so a row that is stable in
+    pass 1 with one output and stable in pass 2 with a different output cannot
+    pass silently.
+    """
+    by_row = {}
+    for entry in summaries:
+        by_row.setdefault(entry["row"], {})[entry["pass"]] = signature(entry)
+    problems = []
+    for row, per_pass in sorted(by_row.items()):
+        if len(per_pass) < 2:
+            continue
+        signatures = {value for value in per_pass.values()}
+        if len(signatures) > 1:
+            problems.append(
+                {"row": row, "passes": {str(pass_number): value for pass_number, value in per_pass.items()}}
+            )
+    return problems
+
+
 def git_show(commit: str, format_string: str) -> str | None:
     result = subprocess.run(
         ["git", "show", "-s", f"--format={format_string}", commit],
@@ -352,6 +380,59 @@ def git_show(commit: str, format_string: str) -> str | None:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def verify_build(commit: str, expected_sha256: str, scratch: pathlib.Path) -> dict:
+    """Rebuild `commit` in a throwaway worktree and compare the binary digest.
+
+    This is what proves the measured binary really corresponds to the recorded
+    source commit: the harness itself checks out the commit, builds it and hashes
+    the result. It needs git and cargo on the host and is therefore opt-in.
+    """
+    worktree = scratch / f"verify-{commit[:12]}"
+    if worktree.exists():
+        shutil.rmtree(worktree)
+    result = {"attempted": True, "commit": commit, "rebuilt_sha256": None, "matched": False, "error": None}
+    added = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), commit],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+    )
+    if added.returncode != 0:
+        result["error"] = added.stderr.strip()[-400:]
+        return result
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+        )
+        if status.stdout.strip():
+            result["error"] = "verification worktree is not clean"
+            return result
+        build = subprocess.run(
+            ["cargo", "build", "--release", "--bin", "neolint"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+        )
+        if build.returncode != 0:
+            result["error"] = build.stderr.strip()[-400:]
+            return result
+        rebuilt = worktree / "target" / "release" / "neolint"
+        result["rebuilt_sha256"] = sha256_file(rebuilt)
+        result["matched"] = result["rebuilt_sha256"] == expected_sha256
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["git", "worktree", "prune"], cwd=str(REPO), capture_output=True, text=True)
+    return result
 
 
 def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict) -> dict:
@@ -373,7 +454,9 @@ def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict) -
         "harness_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "binary_source_commit": binary_provenance.get("commit"),
         "binary_source_tree": binary_provenance.get("tree"),
-        "binary_source_verified": binary_provenance.get("verified", False),
+        "binary_sha256_verified": binary_provenance.get("sha256_verified", False),
+        "binary_source_build_verified": binary_provenance["build_verification"]["matched"],
+        "binary_source_rebuilt_sha256": binary_provenance["build_verification"]["rebuilt_sha256"],
         "binary_sha256_expected": binary_provenance.get("expected_sha256"),
         "rustc": rustc.stdout.strip() if rustc.returncode == 0 else "unavailable",
         "cargo": cargo.stdout.strip() if cargo.returncode == 0 else "unavailable",
@@ -409,11 +492,15 @@ def write_summary(path, meta, summaries, variance):
         f"- harness revision: `{meta['harness_commit']}` (tree `{meta['harness_tree']}`), "
         f"branch `{meta['harness_branch']}`"
     )
-    verification = (
-        "verified against the expected SHA-256"
-        if meta["binary_source_verified"]
-        else "not verified against an expected SHA-256"
-    )
+    if meta["binary_source_build_verified"]:
+        verification = (
+            "digest matches the expected value; a fresh build of the same commit "
+            "reproduced the same digest"
+        )
+    elif meta["binary_sha256_verified"]:
+        verification = "digest matches the expected value; source-commit rebuild not requested"
+    else:
+        verification = "digest not checked against an expected value"
     lines.append(
         f"- measured binary: built from `{meta['binary_source_commit']}` "
         f"(tree `{meta['binary_source_tree']}`), sha256 `{meta['binary_sha256']}`, {verification}"
@@ -521,8 +608,28 @@ def main(argv=None):
         "tree": source_tree,
         "sha256": binary_sha,
         "expected_sha256": args.expect_binary_sha256,
-        "verified": bool(args.expect_binary_sha256) and binary_sha == args.expect_binary_sha256,
+        # This flag only means "the measured binary matches the digest the caller
+        # passed on the command line". It says nothing about which source commit
+        # produced it; that is what --verify-build proves.
+        "sha256_verified": bool(args.expect_binary_sha256) and binary_sha == args.expect_binary_sha256,
+        "build_verification": {"attempted": False, "matched": False, "rebuilt_sha256": None, "error": None},
     }
+    scratch_dir = REPO / "target" / "bench-scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    if args.verify_build:
+        provenance["build_verification"] = verify_build(source_commit, binary_sha, scratch_dir)
+        if not provenance["build_verification"]["matched"]:
+            print(
+                "binary source verification failed: "
+                f"{provenance['build_verification']}",
+                file=sys.stderr,
+            )
+            return 6
+        print(
+            "binary source verified: freshly built "
+            f"{source_commit[:12]} reproduces {binary_sha[:16]}",
+            flush=True,
+        )
 
     fixtures = build_fixtures(fixtures_root())
     rows = build_rows(fixtures)
@@ -569,7 +676,10 @@ def main(argv=None):
                 flush=True,
             )
 
+    inconsistencies = cross_pass_inconsistencies(summaries)
     meta = metadata(fixtures, rows, binary, provenance)
+    meta["cross_pass_consistent"] = not inconsistencies
+    meta["cross_pass_inconsistencies"] = inconsistencies
     variance = {}
     for pass_number in (1, 2):
         for entry in summaries:
@@ -598,6 +708,13 @@ def main(argv=None):
     except ValueError:
         shown = out_dir
     print(f"\nwrote {shown}")
+    if inconsistencies:
+        print(
+            f"CROSS-PASS MISMATCH in {len(inconsistencies)} row(s): "
+            f"{[entry['row'] for entry in inconsistencies]}",
+            file=sys.stderr,
+        )
+        return 7
     if unstable:
         print(f"UNSTABLE DIGESTS in {len(unstable)} row(s): {[row['row'] for row in unstable]}", file=sys.stderr)
         return 4
