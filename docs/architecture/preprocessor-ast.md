@@ -937,14 +937,17 @@ EOF anchor from one unit is rejected by another unit's map with
 
 ### 6.5 Merging results from several units
 
-- Unit results are concatenated in the deterministic input order produced by
+- Unit results are collected in the deterministic input order produced by
   directory collection (sorted paths, de-duplicated display names).
 - Each rendered diagnostic keeps its unit's resolved file and location.
-- Configuration filtering and severity overrides are applied once to the merged
-  list.
-- Exit code: `2` if any input/config failure occurred, otherwise `1` if any
-  remaining error-severity diagnostic exists, otherwise `0`. This matches
-  today's behavior.
+- Configuration filtering and severity overrides are applied per source group to
+  the displayed stream. The Compare parity report is separate: it is computed
+  from raw pre-configuration streams and is emitted on stderr in dense unit order.
+- Exit code: `2` if any input/config failure occurred; otherwise `3` if a Compare
+  report is unmatched; otherwise `1` if any remaining displayed error-severity
+  diagnostic exists; otherwise `0`.
+- There is no global merge, sort, or cross-engine deduplication step; the
+  displayed stream keeps the existing per-unit, per-source, pass order.
 - Diagnostics from one unit can never be attributed to another unit's file; the
   unit's `SourceMap` is the only resolver for its diagnostics.
 
@@ -2147,8 +2150,9 @@ Requirements:
 - Compare totals stay exact under both compare limits. Exceeding the
   100,000-fingerprint per-engine budget sets `comparison_complete = false` and
   forces `matched = false`, while per-rule counts and missing/extra totals remain
-  exact. Reaching the 64-sample detail cap sets `details_truncated = true`; that
-  is a display bound, not an incomplete comparison.
+  exact. Exceeding the 64-sample detail cap (more than 64 missing/extra
+  fingerprints in one rule/direction) sets `details_truncated = true`; that is a
+  display bound, not an incomplete comparison.
 - Limits are checked before allocation where possible.
 - `AnalysisUnitId` and `RunId` assignment uses checked arithmetic. Exceeding
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
@@ -2284,12 +2288,12 @@ Requirements:
    compatibility oracle for CLI wiring. Compare detail truncation (the bounded
    64-sample display) is a distinct state from an incomplete comparison (the
    100,000-fingerprint budget); tests must assert both independently.
-8. **Differential Legacy↔AST harness** (Phase 4+): compare normalized
-   diagnostics as a multiset of `(code, severity, source, start, end)`, plus a
-   per-code report. The harness calls the public `parse_legacy`/`parse_ast` and
-   both semantic entry points independently; neither engine is a wrapper around
-   the other. Order is compared only through the documented deterministic
-   policy.
+8. **Differential Legacy↔AST harness** (Phase 4+): compare exact 10-field
+   fingerprints as a multiset of `(code, severity, kind, message, start, end,
+   line, column, end_line, end_column)`, plus a per-code report. The harness
+   calls the public `parse_legacy`/`parse_ast` and both semantic entry points
+   independently; neither engine is a wrapper around the other. Order is
+   compared only through the documented deterministic policy.
 9. **Fallback/fuzz-style tests without dependencies**: deterministic generators
    over token/directive alphabets, bounded by iteration counts, run in normal
    `cargo test`.
@@ -3295,7 +3299,9 @@ written to stderr: compact human lines or one JSON object
 missing/extra fingerprints are bounded at 64 per rule per direction, and the
 100,000-fingerprint budget marks the comparison incomplete. Exit code 3 signals
 an unmatched Compare report after any exit-2 failure; a matched report follows
-the displayed Legacy stream (0/1).
+the displayed Legacy stream (0/1). The run-level `all_matched()` signal requires
+both `matched` and `comparison_complete` on every unit, so an inconsistent
+incomplete report cannot select a successful exit.
 
 **Tests and compatibility.** `tests/legacy_golden.rs` runs the same six
 pre-change fixtures captured from base `4dd01ca…` both by default and with
@@ -3303,18 +3309,26 @@ pre-change fixtures captured from base `4dd01ca…` both by default and with
 CLI override, invalid/missing/empty values, identity preparation without
 preprocessing, preprocessing/includes/Firestorm/stdin, stderr report separation,
 JSON stdout compatibility, exit 0/1/2/3 precedence, multi-file and directory
-report order, and single-lex token parity. The exit-3 fixture is deliberately
+report order, and single-lex token parity. Slice 2b adds config-before-report,
+AST/Compare invocation-cap, help, legacy-override, prepared-token, and
+identity-byte coverage, plus incomplete-vs-truncated, every-code and absolute-limit
+engine tests. One exit-3 fixture is deliberately
 corrupted input (`while (i < n( {` plus an unterminated non-returning function
-and an event named `llSay`); the SEM002 divergence is recovery behavior on
-invalid input, not a parity defect.
+and an event named `llSay`); that SEM002 divergence is recovery behavior on
+invalid input, not a parity defect. Divergence also occurs on accepted input: a
+declaration identifier that collides with a builtin name (for example
+`default { llSay() { } }`) yields a Legacy-only SEM002, because Legacy scans the
+event header as a builtin call while AST only inspects expression call sites.
+The differential corpus does not contain that collision, so the rule matrix's
+`exact` status remains corpus-relative; Compare reports the genuine delta.
 
 **Validation evidence (final working-tree run).**
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 777 passed, 0 failed.
-- `cargo test --release --all-targets --all-features` → exit 0, 777 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 777 passed.
+- `cargo test --all-targets --all-features` → exit 0, 788 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 788 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 788 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
   → 9 tests OK.

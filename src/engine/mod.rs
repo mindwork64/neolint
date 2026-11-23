@@ -225,13 +225,15 @@ impl RunEngineAnalysis {
     /// Returns `true` when the engine produced no comparison reports
     /// ([`AnalysisEngine::Legacy`] or [`AnalysisEngine::Ast`]), including an
     /// empty run. For [`AnalysisEngine::Compare`], returns `true` only when
-    /// every unit's [`EngineComparisonReport::matched`] is `true`. An incomplete
-    /// report (`comparison_complete == false`) is never matched, so it makes
-    /// this return `false`. This is the parity signal for exit-code decisions.
+    /// every unit's [`EngineComparisonReport::matched`] and
+    /// [`EngineComparisonReport::comparison_complete`] are both `true`. An
+    /// incomplete report (`comparison_complete == false`) is never matched even
+    /// if an inconsistent report sets `matched`, so it makes this return
+    /// `false`. This is the parity signal for exit-code decisions.
     pub fn all_matched(&self) -> bool {
         self.comparisons
             .iter()
-            .all(|comparison| comparison.report.matched)
+            .all(|comparison| comparison.report.matched && comparison.report.comparison_complete)
     }
 }
 
@@ -318,5 +320,19 @@ mod tests {
             vec![Vec::new(), Vec::new()],
         )
         .all_matched());
+    }
+
+    #[test]
+    fn all_matched_rejects_an_incomplete_inconsistent_report() {
+        let mut report = report(true);
+        report.comparison_complete = false;
+        let inconsistent = UnitComparison {
+            unit_index: 0,
+            unit_id: AnalysisUnitId::new(crate::source::file::RunId::new(0), 0),
+            report,
+        };
+        assert!(
+            !RunEngineAnalysis::new(Vec::new(), vec![inconsistent], vec![Vec::new()]).all_matched()
+        );
     }
 }

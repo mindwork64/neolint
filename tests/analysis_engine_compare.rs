@@ -133,6 +133,16 @@ fn corpus_compare_reports_full_parity() {
         );
         assert_codes_in_order(report);
     }
+
+    let total_legacy: usize = analysis
+        .comparisons()
+        .iter()
+        .map(|comparison| comparison.report.legacy_count)
+        .sum();
+    assert!(
+        total_legacy > 0,
+        "corpus discovery produced no compared Legacy findings"
+    );
 }
 
 #[test]
@@ -675,4 +685,66 @@ fn include_originated_report_fingerprints_use_prepared_coordinates() {
     assert!(displayed_span.end <= included.text().len());
 
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn incomplete_but_not_truncated_is_reported_separately() {
+    let huge = vec![diagnostic("SEM001"); MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+    let report = compare_semantic_diagnostics(&huge, &huge);
+    assert!(!report.comparison_complete);
+    assert!(!report.details_truncated);
+    assert!(!report.matched);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
+    assert_eq!(report.ast_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
+    assert_eq!(rule(&report, "SEM001").missing_total, 0);
+    assert_eq!(rule(&report, "SEM001").extra_total, 0);
+}
+
+#[test]
+fn missing_detail_sample_is_bounded_at_exactly_sixty_four() {
+    let at_limit: Vec<_> = (0..MAX_COMPARE_DETAILS_PER_RULE)
+        .map(|start| Diagnostic {
+            span: span(start, start + 1),
+            ..diagnostic("SEM001")
+        })
+        .collect();
+    let report = compare_semantic_diagnostics(&at_limit, &[]);
+    let sem001 = rule(&report, "SEM001");
+    assert_eq!(sem001.missing_from_ast.len(), 64);
+    assert_eq!(sem001.missing_total, 64);
+    assert!(!report.details_truncated);
+    assert!(!report.matched);
+
+    let over_limit: Vec<_> = (0..MAX_COMPARE_DETAILS_PER_RULE + 1)
+        .map(|start| Diagnostic {
+            span: span(start, start + 1),
+            ..diagnostic("SEM001")
+        })
+        .collect();
+    let report = compare_semantic_diagnostics(&over_limit, &[]);
+    assert!(report.details_truncated);
+    assert_eq!(rule(&report, "SEM001").missing_from_ast.len(), 64);
+    assert_eq!(
+        rule(&report, "SEM001").missing_total,
+        MAX_COMPARE_DETAILS_PER_RULE + 1
+    );
+}
+
+#[test]
+fn every_migrated_code_is_collected() {
+    for code in SEM_CODES {
+        let report = compare_semantic_diagnostics(&[diagnostic(code)], &[]);
+        assert_eq!(report.legacy_count, 1, "{code}");
+        assert_eq!(report.ast_count, 0, "{code}");
+        let rule = rule(&report, code);
+        assert_eq!(rule.legacy_count, 1, "{code}");
+        assert_eq!(rule.missing_total, 1, "{code}");
+        assert_eq!(rule.missing_from_ast.len(), 1, "{code}");
+    }
+}
+
+#[test]
+fn absolute_budget_and_detail_limits_are_pinned() {
+    assert_eq!(MAX_COMPARE_FINGERPRINTS_PER_ENGINE, 100_000);
+    assert_eq!(MAX_COMPARE_DETAILS_PER_RULE, 64);
 }

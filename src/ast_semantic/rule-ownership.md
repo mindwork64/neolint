@@ -12,6 +12,12 @@ No SEM rule remains Legacy-only in the current matrix.
   reported rather than treated as a parity defect.
 - The Compare display stream is Legacy-only; the AST semantic stream is never
   appended to user output. The per-rule matrix below is unchanged.
+- Known SEM002 delta surfaced by Compare: a declaration identifier that collides
+  with a builtin name (for example an event named `llSay`) yields a Legacy-only
+  `SEM002`, because Legacy token-scans the event header as a builtin call while
+  AST only inspects expression call sites. The per-rule matrix's `exact` status
+  refers to the differential corpus; Compare therefore reports a genuine delta
+  on such input.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |

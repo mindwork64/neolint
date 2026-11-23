@@ -6,7 +6,7 @@
 use neolint::preprocessor::PreprocessSettings;
 use neolint::{
     lex, parser::parse_legacy, AnalysisEngine, AnalysisRun, AstParseOptions, DiagnosticKind,
-    EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity, SpanError,
+    EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity, Span, SpanError,
 };
 
 fn assert_legacy_equal(left: &[RenderedDiagnostic], right: &[RenderedDiagnostic]) {
@@ -590,4 +590,57 @@ fn run_stream_has_no_cap_and_flat_dense_order() {
     assert_eq!(unit_indexes.first(), Some(&0));
     assert_eq!(unit_indexes.last(), Some(&1));
     assert!(unit_indexes.contains(&0) && unit_indexes.contains(&1));
+}
+
+fn assert_identity_preparation(unit: &neolint::AnalysisUnit, source: &str, display: &str) {
+    let prepared = unit.prepared_source().expect("identity-prepared unit");
+    assert_eq!(prepared.text(), source);
+    assert_eq!(prepared.prepared_len(), source.len());
+
+    // The public API does not expose the origin arena. Resolving the complete
+    // prepared buffer to the complete root, with no related locations and one
+    // include-graph node, pins the single identity (Direct) mapping.
+    let root = unit.root().expect("root source");
+    let map = prepared.map();
+    let prepared_span = prepared
+        .prepared_span(Span {
+            start: 0,
+            end: source.len(),
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 1,
+        })
+        .expect("full prepared span");
+    let resolved = map.resolve_span(prepared_span).expect("full resolution");
+    assert_eq!(
+        resolved.primary(),
+        map.source_span(root, 0, source.len())
+            .expect("full root span")
+    );
+    assert!(resolved.related().is_empty());
+    let nodes = prepared.include_graph().nodes();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].display_name(), display);
+}
+
+#[test]
+fn identity_preparation_preserves_root_bytes_through_pipeline() {
+    let source = "integer g;\ndefault { state_entry() { llSay(0); } }\n";
+    let mut run = AnalysisRun::new().unwrap();
+
+    let text_index = run.add_prepared_text("text.lsl", source).unwrap();
+    assert_identity_preparation(run.unit(text_index).unwrap(), source, "text.lsl");
+
+    let directory = std::env::temp_dir().join(format!(
+        "neolint-identity-preparation-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("file.lsl");
+    std::fs::write(&path, source).unwrap();
+    let display = path.to_string_lossy().into_owned();
+    let file_index = run.add_prepared_file(&path).unwrap();
+    assert_identity_preparation(run.unit(file_index).unwrap(), source, &display);
+    std::fs::remove_dir_all(directory).unwrap();
 }

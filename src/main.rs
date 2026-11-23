@@ -453,6 +453,10 @@ fn run_units(
     if config.engine().requires_prepared_source() {
         for &index in &unit_indexes {
             let Some(unit) = run.unit(index) else {
+                eprintln!(
+                    "neolint: cannot analyze unit {index}: unit is missing from the analysis run"
+                );
+                input_failed = true;
                 continue;
             };
             if unit.prepared_source().is_none() {
@@ -474,6 +478,10 @@ fn run_units(
     let mut reports = Vec::new();
     for index in unit_indexes {
         let Some(unit) = run.unit(index) else {
+            eprintln!(
+                "neolint: cannot analyze unit {index}: unit is missing from the analysis run"
+            );
+            input_failed = true;
             continue;
         };
         let Some(prepared) = unit.prepared_source() else {
@@ -601,7 +609,9 @@ fn run_units(
     let all_matched = !input_failed
         && analyzed_units == expected_units
         && reports.len() == expected_units
-        && reports.iter().all(|item| item.report.matched);
+        && reports
+            .iter()
+            .all(|item| item.report.matched && item.report.comparison_complete);
     if engine == AnalysisEngine::Compare {
         print_compare_report(&reports, format, all_matched);
     }

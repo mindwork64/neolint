@@ -40,9 +40,9 @@ Without preprocessing flags, plain-LSL behavior is unchanged. Include directorie
 
 Without `--preprocess`, `ast` and `compare` use identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map. Identity preparation is not preprocessing; macros and includes are not expanded. With `--preprocess` (or `--dialect firestorm`), every engine uses the full preprocessor and dialect.
 
-In `compare` mode, stdout keeps the existing human/JSON diagnostic schema and contains only the Legacy display stream. The AST semantic stream is not merged into user output. The comparison report always goes to stderr, one deterministic section per unit in unit order, and includes per-rule counts plus bounded exact missing/extra fingerprints. With `--format json`, stdout remains the existing diagnostics array and stderr receives a single JSON object: `{"engine":"compare","units":[…],"matched":true|false}`.
+In `compare` mode, stdout keeps the existing human/JSON diagnostic schema and contains only the Legacy display stream. The AST semantic stream is not merged into user output. The comparison report always goes to stderr, one deterministic section per unit in unit order, and includes per-rule counts plus bounded exact missing/extra fingerprints. With `--format json`, stdout remains the existing diagnostics array. On a successful run stderr receives a single JSON object: `{"engine":"compare","units":[…],"matched":true|false}`. Consumers must gate on the exit status: on a per-unit prepare or analyze failure, `neolint: …` error lines may appear before the report or without it, so stderr is not guaranteed to be pure JSON.
 
-A bounded detail list and an incomplete comparison are different states. Detail truncation means the report shows at most 64 fingerprints per rule per direction while totals stay exact (`details_truncated = true`). An incomplete comparison means the 100,000-fingerprint per-engine budget was exceeded; totals and deltas remain exact, but `comparison_complete = false` and the unit can never be reported as matched.
+A bounded detail list and an incomplete comparison are different states. Detail truncation (`details_truncated = true`) occurs only when a direction has more than 64 missing/extra findings; the report then shows the first 64 while totals stay exact. An incomplete comparison means the 100,000-fingerprint per-engine budget was exceeded; totals and deltas remain exact, but `comparison_complete = false` and the unit can never be reported as matched.
 
 ```sh
 neolint --engine compare --format json script.lsl
@@ -118,7 +118,7 @@ neolint --format json corpus/invalid/duplicate_event.lsl
 
 `start`/`end` are byte offsets, not display columns. Columns are one-based character positions as reported by the lexer.
 
-The CLI retains at most 10,000 diagnostics across all inputs. On overflow it removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity, exit code 1 unless an input error already requires 2).
+The default plain no-preprocess Legacy path is uncapped: it does not apply the 10,000-diagnostic invocation limit and never appends `PRE039`. Unit-based paths (`--preprocess`, and identity-prepared `--engine ast`/`--engine compare`) apply the per-unit 10,000 terminal cap and then the invocation-wide 10,000 cap. On invocation overflow the CLI removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity; exit code 1 unless an input error already requires 2, or an unmatched Compare report returns 3).
 
 ## Exit codes
 
