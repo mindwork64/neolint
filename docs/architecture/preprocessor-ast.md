@@ -3722,7 +3722,8 @@ over exit-status parity for a suppressed diagnostic.
 - [x] Phase 6G — engine selection, bounded Compare, CLI wiring.
 - [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
 - [x] **Phase 7 (this Issue)** — implementation record complete on the experimental branch: SEM024–SEM026 are implemented, documented, and regression-tested.
-- [ ] **After Phase 7** — review the full AST-first stabilization evidence, performance claims and remaining limitations; create separately scoped follow-up Issues for any gaps. Phase 7 is not permission to remove Legacy or change stable `main`.
+- [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md); gaps are tracked as Issues #108–#111. Phase 8 is not permission to remove Legacy or change stable `main`.
+- [ ] Separate decision on stable `main` / v1.0.0 migration — requires its own Issue and explicit authorization.
 
 ---
 
