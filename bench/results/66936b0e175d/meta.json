@@ -1,0 +1,422 @@
+{
+  "binary": "target/release/neolint",
+  "binary_bytes": 1659648,
+  "binary_sha256": "83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8",
+  "branch": "exp-preprocessor-ast-phase-08-stabilization",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "commit": "66936b0e175d51cba8d83377061229869ef64e96",
+  "cpu_count": 12,
+  "cpu_model": "AMD Ryzen 5 2600X Six-Core Processor",
+  "features": "default",
+  "fixture_hashes": {
+    "call_graph.lsl": "6555db41e45c1e80be584789ef50baf677a894f8379170b8e4baa97239295e63",
+    "corpus": "fa30c5218307c813a3a939a761ca791c859b19ba79f842d7497aa1d573fe14f5",
+    "diagnostic_flood.lsl": "1d478c97c7d80b432e34cd9e5eaa1eb8de1f62bdd27456c50152b49f17a27f2b",
+    "malformed.lsl": "73c2886339f2205cb0b9f89570ecb321cb55e67b0834b56de4a67e5e4e32f82a",
+    "many_symbols.lsl": "32416bcae0e28174555c3f2cedbecfbabb9777d43c90443004864d3cb56e3d42",
+    "near_limit.lsl": "9fa85b182b19fcd1a87c01d3df8f72a9f0e27129e73a290c371ec12eb64493b6",
+    "nested_scopes.lsl": "d2b6eb3060d9b9b834ddda18a7deb6103e03065b51336209cb82ddc12f5b3cab",
+    "preprocess_root.lsl": "6809da09c436623e090d71f84335eb94dc814a12bd687c8510aa2abb83f0a7c8",
+    "stdin.lsl": "4a237b239d17422a4f7ad1d6cce8bdda903a941be8a6fd64405337f50a88cdb5"
+  },
+  "issue": "https://github.com/mindwork64/neolint/issues/107",
+  "kernel": "7.0.0-43-generic",
+  "machine": "x86_64",
+  "os": "Linux-7.0.0-43-generic-x86_64-with-glibc2.39",
+  "profile": "release",
+  "python": "3.12.3",
+  "rows": [
+    {
+      "argv": [
+        "--version"
+      ],
+      "note": "binary/startup baseline",
+      "row": "startup",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/compare",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/default",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/ast",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/legacy",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/compare",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/call_graph.lsl"
+      ],
+      "note": "",
+      "row": "call_graph/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/call_graph.lsl"
+      ],
+      "note": "",
+      "row": "call_graph/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/nested_scopes.lsl"
+      ],
+      "note": "",
+      "row": "nested_scopes/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/nested_scopes.lsl"
+      ],
+      "note": "",
+      "row": "nested_scopes/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/malformed.lsl"
+      ],
+      "note": "",
+      "row": "malformed/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/malformed.lsl"
+      ],
+      "note": "",
+      "row": "malformed/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/multi"
+      ],
+      "note": "",
+      "row": "multi_file/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/multi"
+      ],
+      "note": "",
+      "row": "multi_file/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/near_limit.lsl"
+      ],
+      "note": "reduced samples: multi-megabyte parse",
+      "row": "near_limit/default",
+      "samples": 8
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/near_limit.lsl"
+      ],
+      "note": "reduced samples: multi-megabyte parse",
+      "row": "near_limit/legacy",
+      "samples": 8
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/diagnostic_flood.lsl"
+      ],
+      "note": "reduced samples: rendered-diagnostic cap",
+      "row": "diagnostic_flood/default",
+      "samples": 20
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/diagnostic_flood.lsl"
+      ],
+      "note": "reduced samples: rendered-diagnostic cap",
+      "row": "diagnostic_flood/legacy",
+      "samples": 20
+    },
+    {
+      "argv": [
+        "--preprocess",
+        "-I",
+        "/home/eloraam/apps/neolint/target/bench-fixtures/include",
+        "target/bench-fixtures/preprocess_root.lsl"
+      ],
+      "note": "",
+      "row": "preprocess/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "--preprocess",
+        "-I",
+        "/home/eloraam/apps/neolint/target/bench-fixtures/include",
+        "target/bench-fixtures/preprocess_root.lsl"
+      ],
+      "note": "",
+      "row": "preprocess/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/legacy",
+      "samples": 30
+    }
+  ],
+  "rss_available": true,
+  "rss_method": "proc_vmhwm_poll",
+  "rss_samples_per_row": 3,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "tree": "87d810459064f438fe61c0a632fa83642ea68971",
+  "warmup_iterations": 3
+}
