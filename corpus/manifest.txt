@@ -6,26 +6,26 @@ small_lists_strings|small|small/lists_strings.lsl|original|project-authored|vali
 small_control_flow|small|small/control_flow.lsl|original|project-authored|valid|none|0|none|If/else chains, while, do-while and jump labels
 small_functions_scope|small|small/functions_scope.lsl|original|project-authored|valid|none|0|none|User functions, returns and nested shadowing
 small_casts_assignments|small|small/casts_assignments.lsl|original|project-authored|valid|none|0|none|Casts, compound assignment and component writes
-small_timer_dialog|small|small/timer_dialog.lsl|original|project-authored|valid|none|0|none|Timer, dialog, listen and inventory-adjacent events
+small_timer_dialog|small|small/timer_dialog.lsl|original|project-authored|valid|SEM025:4:warning|0|none|Timer, dialog, listen and inventory-adjacent events
 small_hex_bitwise|small|small/hex_and_bitwise.lsl|original|project-authored|valid|none|0|none|Hex literals, bitwise arithmetic and wrapping values
 small_extension_boundary|small|small/extension_boundary.lsl|original|project-authored|valid|none|0|none|Unknown extension call and event body are not speculative errors
-medium_inventory_manager|medium|medium/inventory_manager.lsl|original|project-authored|valid|SEM024:1:warning|0|none|Inventory listing, dialog and state changes
+medium_inventory_manager|medium|medium/inventory_manager.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:5:warning,SEM026:1:warning|0|none|Inventory listing, dialog and state changes
 medium_sensor_scan|medium|medium/sensor_scan.lsl|original|project-authored|valid|none|0|none|Sensor scans, list conversion, distance and timer logic
-medium_object_mover|medium|medium/object_mover.lsl|original|project-authored|valid|none|0|none|Movement helpers, vector math and multiple states
+medium_object_mover|medium|medium/object_mover.lsl|original|project-authored|valid|SEM025:3:warning|0|none|Movement helpers, vector math and multiple states
 medium_scope_shadowing|medium|medium/scope_shadowing.lsl|original|project-authored|valid|none|0|none|Nested scopes, shadowing, loops and a forward label
-medium_dialog_menu|medium|medium/dialog_menu.lsl|original|project-authored|valid|SEM024:1:warning|0|none|Dialog menu, listen dispatch and timer updates
+medium_dialog_menu|medium|medium/dialog_menu.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:4:warning|0|none|Dialog menu, listen dispatch and timer updates
 medium_extension_safe|medium|medium/extension_safe.lsl|original|project-authored|valid|none|0|none|Unknown extension members remain conservative
-large_teleporter|large|large/teleporter.lsl|original|project-authored|valid|SEM024:2:warning|0|none|Multi-state teleporter with dialogs, lists and movement
-large_rental_controller|large|large/rental_controller.lsl|original|project-authored|valid|SEM024:1:warning|0|none|Rental workflow with tenants, inventory, timing and states
-large_combat_hud|large|large/combat_hud.lsl|original|project-authored|valid|SEM024:1:warning|0|none|HUD with computed targeting, timers, damage and state changes
-invalid_calls_assignments|invalid|invalid/calls_and_assignments.lsl|original|project-authored|valid|SEM016:1:error,SEM004:3:error,SEM008:1:error,SEM024:1:warning|1|none|Known call, assignment and return type errors
+large_teleporter|large|large/teleporter.lsl|original|project-authored|valid|SEM024:2:warning,SEM025:5:warning|0|none|Multi-state teleporter with dialogs, lists and movement
+large_rental_controller|large|large/rental_controller.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:4:warning,SEM026:1:warning|0|none|Rental workflow with tenants, inventory, timing and states
+large_combat_hud|large|large/combat_hud.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:5:warning|0|none|HUD with computed targeting, timers, damage and state changes
+invalid_calls_assignments|invalid|invalid/calls_and_assignments.lsl|original|project-authored|valid|SEM016:1:error,SEM004:3:error,SEM008:1:error,SEM024:1:warning,SEM026:1:warning|1|none|Known call, assignment and return type errors
 invalid_components|invalid|invalid/components.lsl|original|project-authored|invalid|PAR012:1:error,SEM018:1:error,SEM019:2:error|1|none|Invalid component read, write and literal component access
-invalid_control_flow|invalid|invalid/control_flow.lsl|original|project-authored|valid|SEM011:2:error|1|none|Value-returning functions with reachable fallthrough
-invalid_scope_jumps|invalid|invalid/scope_and_jumps.lsl|original|project-authored|valid|SEM007:1:error,SEM009:1:error,SEM010:2:error,SEM024:1:warning|1|none|Duplicate local, duplicate label and missing jump targets
+invalid_control_flow|invalid|invalid/control_flow.lsl|original|project-authored|valid|SEM011:2:error,SEM026:3:warning|1|none|Value-returning functions with reachable fallthrough
+invalid_scope_jumps|invalid|invalid/scope_and_jumps.lsl|original|project-authored|valid|SEM007:1:error,SEM009:1:error,SEM010:2:error,SEM024:1:warning,SEM026:1:warning|1|none|Duplicate local, duplicate label and missing jump targets
 invalid_syntax_unclosed|invalid|invalid/syntax_unclosed.lsl|original|project-authored|invalid|PAR007:1:error|1|none|Unclosed default state
 invalid_duplicate_globals|invalid|invalid/duplicate_globals.lsl|original|project-authored|valid|SEM001:1:error,SEM024:2:warning|1|none|Duplicate top-level declaration
 invalid_malformed_condition|invalid|invalid/malformed_condition.lsl|original|project-authored|invalid|PAR006:1:error|1|none|Empty for condition is rejected
 invalid_duplicate_event|invalid|invalid/duplicate_event.lsl|original|project-authored|valid|SEM020:1:error|1|none|Duplicate canonical event handler in one state
 invalid_duplicate_state|invalid|invalid/duplicate_state.lsl|original|project-authored|valid|SEM021:1:error|1|none|Duplicate named state declaration
 invalid_undefined_state|invalid|invalid/undefined_state.lsl|original|project-authored|valid|SEM022:1:error|1|none|Undefined state-change target in an event handler
-invalid_state_namespace|invalid|invalid/state_namespace.lsl|original|project-authored|valid|SEM021:2:error,SEM024:1:warning|1|none|State names collide with a global variable and a user function
+invalid_state_namespace|invalid|invalid/state_namespace.lsl|original|project-authored|valid|SEM021:2:error,SEM024:1:warning,SEM026:1:warning|1|none|State names collide with a global variable and a user function

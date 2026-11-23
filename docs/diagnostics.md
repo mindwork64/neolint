@@ -118,7 +118,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023` and `SEM024`, which are **lint**. `SEM012`, `SEM013`, `SEM023` and `SEM024` default to **warning**; the rest default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026` default to **warning**; the rest default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -146,6 +146,8 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023` and `SEM0
 | `SEM022` | Undefined state-change target in a known event handler. | error | Function state changes and unknown extension event bodies are not checked. |
 | `SEM023` | Standalone comparison result is discarded. | warning / lint | Only comparison expression statements are checked; calls, assignments, increment/decrement, used comparisons and ambiguous/syntax-error cases are skipped. |
 | `SEM024` | Variable is declared but never read. | warning / lint | Syntactic read/use analysis, not runtime liveness. Plain assignment targets and call callees are not reads; compound assignments, increments/decrements and component reads are. Malformed or incomplete units produce no SEM024. |
+| `SEM025` | Parameter is declared but never read. | warning / lint | Syntactic read/use analysis over user-function and canonical event parameters. Unknown extension-event parameters and malformed/recovered parameters are excluded. Malformed or incomplete units produce no SEM025. |
+| `SEM026` | User function is never called from an event handler or global initializer. | warning / lint | Reachability over matched direct identifier calls only; built-in callees, indirect calls and calls without a closing parenthesis create no edges. Prototypes, recovered signatures and duplicate declarations after the first definition are never nodes. Budget overflow suppresses the whole rule. |
 
 ## Illustrative minimal examples
 
@@ -206,6 +208,18 @@ default { state_entry() { integer RStat; RStat == FALSE; } }
 ```lsl
 // SEM024: local variable is never read
 default { state_entry() { integer unused; } }
+```
+
+```lsl
+// SEM025: parameter is never read
+integer unusedParameter(integer value) { return 1; }
+default { state_entry() { llOwnerSay((string)unusedParameter(1)); } }
+```
+
+```lsl
+// SEM026: function is never called from any event or global initializer
+unusedFunction() { }
+default { state_entry() { } }
 ```
 
 ```lsl
@@ -292,6 +306,8 @@ default { state_entry() { integer value; float result = value.x; } }
 - Some complex or malformed control-flow cases are not analyzed.
 - SEM023 intentionally skips comparisons containing calls or side effects and statements with syntax errors.
 - SEM024 is a syntactic read/use analysis, not runtime liveness: a read counts even when reachable only from a function that later call-graph analysis may prove is never invoked. SEM024 fails closed and emits nothing when syntax errors, recovered function signatures, error nodes, missing bodies or unclosed function/event/state bodies make reads unreliable.
+- SEM025 uses the same syntactic read/use model and the same fail-closed gate. Because the scope model registers parameters only for user functions and canonical events, unknown extension-event parameters are excluded structurally rather than by a second policy.
+- SEM026 is reachability, not dead-code elimination: roots are matched direct identifier calls in event bodies and global initializers, and edges are matched direct identifier calls in user-function bodies. Built-in callees, indirect calls and calls without a real closing parenthesis never create edges; first-definition duplicate handling follows SEM001. The graph is bounded and any node/edge/work overflow emits no SEM026 rather than reporting a partial result.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

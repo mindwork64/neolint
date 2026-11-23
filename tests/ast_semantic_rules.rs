@@ -280,3 +280,430 @@ fn plain_parse_ast_path_remains_available() {
     assert!(syntax.is_empty());
     assert_eq!(sem024(&analyze_ast(&ast, &syntax)).len(), 1);
 }
+
+fn sem025(diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "SEM025")
+        .cloned()
+        .collect()
+}
+
+fn sem026(diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "SEM026")
+        .cloned()
+        .collect()
+}
+
+fn expected_unused_parameter(source: &str, start: usize, name: &str) -> Diagnostic {
+    Diagnostic {
+        code: "SEM025",
+        severity: Severity::Warning,
+        kind: DiagnosticKind::Lint,
+        message: format!("parameter '{name}' is never read"),
+        span: span(source, start, name.len()),
+    }
+}
+
+fn expected_unreachable_function(source: &str, start: usize, name: &str) -> Diagnostic {
+    Diagnostic {
+        code: "SEM026",
+        severity: Severity::Warning,
+        kind: DiagnosticKind::Lint,
+        message: format!("function '{name}' is never called"),
+        span: span(source, start, name.len()),
+    }
+}
+
+#[test]
+fn unused_function_parameter_reports_exact_diagnostic() {
+    let source = "integer callee(integer unused) { return 1; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let start = source.find("unused").unwrap();
+    assert_eq!(
+        sem025(&semantic(source)),
+        vec![expected_unused_parameter(source, start, "unused")]
+    );
+}
+
+#[test]
+fn used_function_parameter_produces_no_finding() {
+    let source = "integer callee(integer value) { return value; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    assert!(sem025(&semantic(source)).is_empty());
+}
+
+#[test]
+fn unused_canonical_event_parameter_reports_exact_diagnostic() {
+    let source = "default { touch_start(integer unused) { } }\n";
+    let start = source.find("unused").unwrap();
+    assert_eq!(
+        sem025(&semantic(source)),
+        vec![expected_unused_parameter(source, start, "unused")]
+    );
+}
+
+#[test]
+fn used_canonical_event_parameter_produces_no_finding() {
+    let source = "default { touch_start(integer count) { llOwnerSay((string)count); } }\n";
+    assert!(sem025(&semantic(source)).is_empty());
+}
+
+#[test]
+fn parameter_assigned_but_never_read_is_still_reported() {
+    let source = "integer callee(integer value) { value = 1; return 1; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let start = source.find("value").unwrap();
+    assert_eq!(
+        sem025(&semantic(source)),
+        vec![expected_unused_parameter(source, start, "value")]
+    );
+}
+
+#[test]
+fn parameter_read_only_inside_a_nested_block_or_expression_counts() {
+    let source = "integer callee(integer value) { { llOwnerSay((string)llAbs(value)); } return 1; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    assert!(sem025(&semantic(source)).is_empty());
+}
+
+#[test]
+fn local_shadowing_reads_do_not_mark_the_parameter_used() {
+    let source = "integer callee(integer value) { integer result = 1; { integer value; result = value; } return result; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let parameter_start = source.find("value").unwrap();
+    assert_eq!(
+        sem025(&semantic(source)),
+        vec![expected_unused_parameter(source, parameter_start, "value")]
+    );
+}
+
+#[test]
+fn parameter_reads_do_not_mark_a_later_shadowing_local_used() {
+    let source = "integer callee(integer value) { integer result = value; integer value; return result; }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let local_start = source.match_indices("value").nth(2).unwrap().0;
+    assert!(sem025(&semantic(source)).is_empty());
+    assert_eq!(
+        sem024(&semantic(source)),
+        vec![expected_unused(source, local_start, "value")]
+    );
+}
+
+#[test]
+fn parameter_read_only_in_loop_clauses_counts() {
+    let source = "integer scan(integer limit) { integer index; for (index = 0; index < limit; index++) { } return index; }\ndefault { state_entry() { llOwnerSay((string)scan(2)); } }\n";
+    assert!(sem025(&semantic(source)).is_empty());
+}
+
+#[test]
+fn parameter_read_only_in_switch_expressions_counts() {
+    let source = "integer choose(integer selector) { switch (selector) { case 1: break; } return 1; }\ndefault { state_entry() { llOwnerSay((string)choose(1)); } }\n";
+    let options = AstParseOptions::lsl().with_switches_enabled(true);
+    assert!(sem025(&semantic_valid_with(source, options)).is_empty());
+}
+
+#[test]
+fn parameter_read_only_in_lazy_list_expressions_counts() {
+    let source = "integer pick(list values, integer index) { return (integer)values[index]; }\ndefault { state_entry() { llOwnerSay((string)pick([1], 0)); } }\n";
+    let options = AstParseOptions::lsl().with_lazy_lists_enabled(true);
+    assert!(sem025(&semantic_valid_with(source, options)).is_empty());
+}
+
+#[test]
+fn malformed_parameter_produces_no_sem025() {
+    let source = "integer broken(integer ) { return 1; }\ndefault { state_entry() { } }\n";
+    let (_, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(
+        !syntax.is_empty(),
+        "malformed fixture must be a syntax error"
+    );
+    assert!(sem025(&semantic_with_syntax_error(source)).is_empty());
+}
+
+#[test]
+fn unknown_extension_event_parameters_produce_no_sem025() {
+    let source = "default { custom_extension_event(integer unused) { } }\n";
+    assert!(sem025(&semantic(source)).is_empty());
+}
+
+#[test]
+fn separate_analysis_units_do_not_share_parameter_state() {
+    let unused_source = "integer first(integer unused) { return 1; }\ndefault { state_entry() { llOwnerSay((string)first(1)); } }\n";
+    let used_source = "integer second(integer value) { return value; }\ndefault { state_entry() { llOwnerSay((string)second(1)); } }\n";
+    let start = unused_source.find("unused").unwrap();
+    assert_eq!(
+        sem025(&semantic(unused_source)),
+        vec![expected_unused_parameter(unused_source, start, "unused")]
+    );
+    assert!(sem025(&semantic(used_source)).is_empty());
+    // Re-analysing the first unit after the second one is unaffected.
+    assert_eq!(
+        sem025(&semantic(unused_source)),
+        vec![expected_unused_parameter(unused_source, start, "unused")]
+    );
+}
+
+#[test]
+fn function_never_referenced_reports_exact_diagnostic() {
+    let source = "unused_helper() { }\ndefault { state_entry() { } }\n";
+    let start = source.find("unused_helper").unwrap();
+    assert_eq!(
+        sem026(&semantic(source)),
+        vec![expected_unreachable_function(
+            source,
+            start,
+            "unused_helper"
+        )]
+    );
+}
+
+#[test]
+fn function_called_directly_from_an_event_is_reachable() {
+    let source = "helper() { }\ndefault { state_entry() { helper(); } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn transitive_call_chain_from_an_event_is_reachable() {
+    let source = "leaf() { }\nmiddle() { leaf(); }\ntop() { middle(); }\ndefault { state_entry() { top(); } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn function_called_only_from_an_unreachable_function_is_reported() {
+    let source = "leaf() { }\nparent() { leaf(); }\ndefault { state_entry() { } }\n";
+    let leaf_start = source.find("leaf").unwrap();
+    let parent_start = source.find("parent").unwrap();
+    assert_eq!(
+        sem026(&semantic(source)),
+        vec![
+            expected_unreachable_function(source, leaf_start, "leaf"),
+            expected_unreachable_function(source, parent_start, "parent"),
+        ]
+    );
+}
+
+#[test]
+fn self_recursion_is_unreachable_without_an_entry_path() {
+    let source = "looper() { looper(); }\ndefault { state_entry() { } }\n";
+    let start = source.find("looper").unwrap();
+    let second = source.match_indices("looper").nth(1).unwrap().0;
+    assert_eq!(
+        sem026(&semantic(source)),
+        vec![expected_unreachable_function(source, start, "looper")]
+    );
+    assert!(second > start);
+}
+
+#[test]
+fn self_recursion_with_an_entry_path_is_reachable() {
+    let source = "looper() { looper(); }\ndefault { state_entry() { looper(); } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn mutually_recursive_cycle_without_roots_reports_both_functions() {
+    let source = "alpha() { beta(); }\nbeta() { alpha(); }\ndefault { state_entry() { } }\n";
+    let alpha_start = source.find("alpha").unwrap();
+    let beta_start = source.match_indices("beta").nth(1).unwrap().0;
+    assert_eq!(
+        sem026(&semantic(source)),
+        vec![
+            expected_unreachable_function(source, alpha_start, "alpha"),
+            expected_unreachable_function(source, beta_start, "beta"),
+        ]
+    );
+}
+
+#[test]
+fn calls_from_events_in_multiple_states_are_roots() {
+    let source = "helper() { }\ndefault { state_entry() { } }\nstate active { state_entry() { helper(); } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn extension_event_handler_calls_are_roots() {
+    let source = "helper() { }\ndefault { custom_extension_event() { helper(); } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn calls_from_a_global_initializer_are_roots() {
+    let source =
+        "integer helper() { return 1; }\ninteger g = helper();\ndefault { state_entry() { } }\n";
+    assert!(sem026(&semantic(source)).is_empty());
+}
+
+#[test]
+fn calls_in_every_expression_bearing_context_create_edges() {
+    let nested = "integer helper() { return 1; }\ndefault { state_entry() { llOwnerSay((string)(helper() + 1)); } }\n";
+    assert!(sem026(&semantic(nested)).is_empty(), "{nested}");
+
+    let loop_clauses =
+        "integer helper() { return 1; }\ndefault { state_entry() { for (helper(); helper(); helper()) { } } }\n";
+    assert!(sem026(&semantic(loop_clauses)).is_empty(), "{loop_clauses}");
+
+    let switch_arms = "integer helper() { return 1; }\ndefault { state_entry() { switch (helper()) { case helper(): helper(); break; } } }\n";
+    let options = AstParseOptions::lsl().with_switches_enabled(true);
+    assert!(
+        sem026(&semantic_valid_with(switch_arms, options)).is_empty(),
+        "{switch_arms}"
+    );
+
+    let lazy_expressions = "integer helper() { return 1; }\ndefault { state_entry() { list values; (integer)values[helper()]; } }\n";
+    let options = AstParseOptions::lsl().with_lazy_lists_enabled(true);
+    assert!(
+        sem026(&semantic_valid_with(lazy_expressions, options)).is_empty(),
+        "{lazy_expressions}"
+    );
+}
+
+#[test]
+fn prototype_without_a_body_is_never_reported() {
+    let source = "integer broken() default { state_entry() { } }\n";
+    let (ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(
+        !syntax.is_empty(),
+        "prototype fixture must be a syntax error"
+    );
+    assert!(ast.items.iter().any(
+        |item| matches!(item, neolint::ast::TopLevel::Function(function) if function.body.is_none())
+    ));
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn duplicate_function_declarations_report_only_the_first_definition() {
+    let source = "duplicate() { }\nduplicate() { }\ndefault { state_entry() { } }\n";
+    let first_start = source.find("duplicate").unwrap();
+    let diagnostics = semantic(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM001"),
+        "duplicate declarations must still be covered by SEM001"
+    );
+    assert_eq!(
+        sem026(&diagnostics),
+        vec![expected_unreachable_function(
+            source,
+            first_start,
+            "duplicate"
+        )]
+    );
+}
+
+#[test]
+fn recovered_function_signature_is_never_reported() {
+    let source = "integer broken(, ) { return 1; }\ndefault { state_entry() { } }\n";
+    let (ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(
+        !syntax.is_empty(),
+        "recovered fixture must be a syntax error"
+    );
+    assert!(
+        !ast.recovered_functions.is_empty(),
+        "fixture must produce a recovered function signature"
+    );
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn call_without_a_matched_close_parenthesis_does_not_create_an_edge() {
+    let source = "helper() { }\ndefault { state_entry() { helper(); } }\n";
+    let (mut ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let mut mutated = 0usize;
+    for item in &mut ast.items {
+        let neolint::ast::TopLevel::State(state) = item else {
+            continue;
+        };
+        for event in &mut state.events {
+            let Some(body) = &mut event.body else {
+                continue;
+            };
+            for statement in &mut body.statements {
+                let neolint::ast::StatementKind::Expression(expression) = &mut statement.kind
+                else {
+                    continue;
+                };
+                let neolint::ast::ExpressionKind::Call(call) = &mut expression.expression.kind
+                else {
+                    continue;
+                };
+                call.matched_close = false;
+                mutated += 1;
+            }
+        }
+    }
+    assert_eq!(mutated, 1);
+    let start = source.find("helper").unwrap();
+    assert_eq!(
+        sem026(&analyze_ast(&ast, &syntax)),
+        vec![expected_unreachable_function(source, start, "helper")]
+    );
+}
+
+#[test]
+fn incomplete_function_body_produces_no_sem026() {
+    let source = "helper() { }\ndefault { state_entry() { } }\n";
+    let (mut ast, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let function = ast
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            neolint::ast::TopLevel::Function(function) => Some(function),
+            _ => None,
+        })
+        .expect("function declaration");
+    function.body.as_mut().expect("function body").closed = false;
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn parser_diagnostics_suppress_sem024_sem025_and_sem026() {
+    let source = "integer unused_global;\nunused_function(integer unused_parameter) { }\ndefault { state_entry() { integer broken = ; } }\n";
+    let (_, syntax) = parse(source, AstParseOptions::lsl());
+    assert!(
+        !syntax.is_empty(),
+        "malformed fixture must be a syntax error"
+    );
+    let diagnostics = semantic_with_syntax_error(source);
+    assert!(sem024(&diagnostics).is_empty());
+    assert!(sem025(&diagnostics).is_empty());
+    assert!(sem026(&diagnostics).is_empty());
+}
+
+#[test]
+fn call_graph_budget_overflow_suppresses_sem026() {
+    let mut source = String::new();
+    for index in 0..4_100 {
+        source.push_str(&format!("function_{index}() {{ }}\n"));
+    }
+    source.push_str("default { state_entry() { } }\n");
+    let (ast, syntax) = parse(&source, AstParseOptions::lsl());
+    assert!(syntax.is_empty(), "{syntax:?}");
+    assert!(sem026(&analyze_ast(&ast, &syntax)).is_empty());
+}
+
+#[test]
+fn sem025_and_sem026_are_deterministic_and_ordered_by_declaration() {
+    let source = "integer callee(integer unused) { return 1; }\nalpha() { }\nbeta() { }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n";
+    let parameter_start = source.find("unused").unwrap();
+    let alpha_start = source.find("alpha").unwrap();
+    let beta_start = source.find("beta").unwrap();
+    let first = semantic(source);
+    let second = semantic(source);
+    assert_eq!(first, second);
+    let selected: Vec<Diagnostic> = first
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, "SEM025" | "SEM026"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        selected,
+        vec![
+            expected_unused_parameter(source, parameter_start, "unused"),
+            expected_unreachable_function(source, alpha_start, "alpha"),
+            expected_unreachable_function(source, beta_start, "beta"),
+        ]
+    );
+}

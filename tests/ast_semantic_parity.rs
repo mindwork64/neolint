@@ -215,6 +215,16 @@ fn unused_variable(source: &str, start: usize, name: &str) -> Diagnostic {
     }
 }
 
+fn unreachable_function(source: &str, start: usize, name: &str) -> Diagnostic {
+    Diagnostic {
+        code: "SEM026",
+        severity: neolint::Severity::Warning,
+        kind: neolint::DiagnosticKind::Lint,
+        message: format!("function '{name}' is never called"),
+        span: span(source, start, name.len()),
+    }
+}
+
 fn migrated(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
     diagnostics
         .iter()
@@ -367,15 +377,19 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
 
     let source = "integer idle() { return 1; } default { } state idle { }";
     let start = source.rfind("idle").unwrap();
+    let function_start = source.find("idle").unwrap();
     assert_eq!(
         semantic(source),
-        vec![expected(
-            "SEM021",
-            "state 'idle' conflicts with a function declared at 1:9".to_owned(),
-            source,
-            start,
-            "idle".len()
-        )]
+        vec![
+            expected(
+                "SEM021",
+                "state 'idle' conflicts with a function declared at 1:9".to_owned(),
+                source,
+                start,
+                "idle".len()
+            ),
+            unreachable_function(source, function_start, "idle"),
+        ]
     );
 
     let source = "default { } state llOwnerSay { }";

@@ -543,6 +543,51 @@ fn near_miss_codes_are_not_compared_or_budgeted() {
 }
 
 #[test]
+fn ast_only_lint_codes_are_ignored_by_the_comparator() {
+    assert_eq!(SEM_CODES.len(), 23);
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(
+            !SEM_CODES.contains(&code),
+            "{code} must stay outside the compared Legacy rule set"
+        );
+    }
+
+    let ast = [
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM024")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            message: "parameter 'value' is never read".to_owned(),
+            ..diagnostic("SEM025")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            message: "function 'helper' is never called".to_owned(),
+            ..diagnostic("SEM026")
+        },
+    ];
+
+    let report = compare_semantic_diagnostics(&[], &ast);
+    assert!(report.matched, "{report:?}");
+    assert!(report.comparison_complete);
+    assert!(report.is_parity());
+    assert_eq!(report.legacy_count, 0);
+    assert_eq!(report.ast_count, 0);
+    assert_codes_in_order(&report);
+    assert!(report.by_rule.iter().all(|rule| {
+        rule.legacy_count == 0
+            && rule.ast_count == 0
+            && rule.missing_total == Some(0)
+            && rule.extra_total == Some(0)
+    }));
+}
+
+#[test]
 fn extra_detail_samples_are_bounded_and_sorted() {
     let ast: Vec<_> = (0..65)
         .map(|start| Diagnostic {

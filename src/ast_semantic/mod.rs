@@ -6,6 +6,7 @@
 
 pub mod scopes;
 
+pub(crate) mod callgraph;
 pub(crate) mod calls;
 pub(crate) mod expressions;
 pub(crate) mod flow;
@@ -86,5 +87,9 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
     let used = usage::used_symbols(&expressions.uses, &scopes);
     let reliable = usage::unit_is_reliable(ast, syntax_diagnostics, &expressions);
     diagnostics.extend(rules::unused_variables::check(&scopes, &used, reliable));
+    diagnostics.extend(rules::unused_parameters::check(&scopes, &used, reliable));
+    diagnostics.extend(rules::unreachable_functions::check(
+        ast, &calls, &functions, reliable,
+    ));
     diagnostics
 }

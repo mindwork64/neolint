@@ -245,6 +245,170 @@ fn sem024_appears_in_json_output_with_the_existing_schema() {
 }
 
 #[test]
+fn sem025_and_sem026_ast_engines_emit_warnings_but_legacy_does_not() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused-analysis.lsl",
+        "integer callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); } }\n",
+    );
+    let source = source.to_str().unwrap();
+
+    let default_output = run_args(&[source]);
+    let explicit_ast = run_args(&["--engine", "ast", source]);
+    for output in [&default_output, &explicit_ast] {
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("warning[SEM024]"), "{stdout}");
+        assert!(stdout.contains("warning[SEM025]"), "{stdout}");
+        assert!(stdout.contains("warning[SEM026]"), "{stdout}");
+        assert!(
+            stdout.contains("parameter 'unused_parameter' is never read"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("function 'unused_function' is never called"),
+            "{stdout}"
+        );
+    }
+    assert_eq!(default_output.stdout, explicit_ast.stdout);
+    assert_eq!(default_output.stderr, explicit_ast.stderr);
+    assert_eq!(default_output.status.code(), explicit_ast.status.code());
+
+    let legacy = run_args(&["--engine", "legacy", source]);
+    assert_eq!(legacy.status.code(), Some(0));
+    let legacy_stdout = String::from_utf8(legacy.stdout).unwrap();
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(!legacy_stdout.contains(code), "{legacy_stdout}");
+    }
+    assert_eq!(
+        legacy_stdout,
+        format!("{source}: no diagnostics\n"),
+        "legacy output must remain unchanged"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem025_and_sem026_can_be_disabled_by_cli_and_config() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused-analysis.lsl",
+        "integer callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n",
+    );
+    let config = write_file(&directory, "disable.conf", "disable = SEM025, SEM026\n");
+    let source = source.to_str().unwrap();
+
+    let disabled_parameter = run_args(&["--disable", "SEM025", source]);
+    assert_eq!(disabled_parameter.status.code(), Some(0));
+    let stdout = String::from_utf8(disabled_parameter.stdout).unwrap();
+    assert!(!stdout.contains("SEM025"), "{stdout}");
+    assert!(stdout.contains("warning[SEM026]"), "{stdout}");
+
+    let disabled_function = run_args(&["--disable", "SEM026", source]);
+    assert_eq!(disabled_function.status.code(), Some(0));
+    let stdout = String::from_utf8(disabled_function.stdout).unwrap();
+    assert!(!stdout.contains("SEM026"), "{stdout}");
+    assert!(stdout.contains("warning[SEM025]"), "{stdout}");
+
+    let configured = run_args(&["--config", config.to_str().unwrap(), source]);
+    assert_eq!(configured.status.code(), Some(0));
+    let stdout = String::from_utf8(configured.stdout).unwrap();
+    assert!(!stdout.contains("SEM025"), "{stdout}");
+    assert!(!stdout.contains("SEM026"), "{stdout}");
+    assert!(stdout.contains("no diagnostics"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem026_can_be_escalated_to_an_error() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused-function.lsl",
+        "unused_function() { }\ndefault { state_entry() { } }\n",
+    );
+
+    let output = run_args(&["--severity", "SEM026=error", source.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[SEM026]"), "{stdout}");
+    assert!(
+        stdout.contains("function 'unused_function' is never called"),
+        "{stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem025_and_sem026_appear_in_json_output_with_the_existing_schema() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused-analysis.lsl",
+        "integer callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { llOwnerSay((string)callee(1)); } }\n",
+    );
+
+    let output = run_args(&["--format", "json", source.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with('['), "{stdout}");
+    assert!(stdout.trim_end().ends_with(']'), "{stdout}");
+    for field in [
+        "\"code\":\"SEM025\"",
+        "\"code\":\"SEM026\"",
+        "\"severity\":\"warning\"",
+        "\"kind\":\"lint\"",
+        "\"message\":\"parameter 'unused_parameter' is never read\"",
+        "\"message\":\"function 'unused_function' is never called\"",
+        "\"line\":1",
+        "\"line\":2",
+        "\"file\":",
+        "\"column\":",
+        "\"start\":",
+        "\"end\":",
+    ] {
+        assert!(stdout.contains(field), "missing {field}: {stdout}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_ignores_sem024_sem025_and_sem026() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused-analysis.lsl",
+        "integer callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); } }\n",
+    );
+    let source = source.to_str().unwrap();
+
+    let output = run_args(&["--engine", "compare", source]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for code in ["SEM024", "SEM025", "SEM026"] {
+        assert!(!stdout.contains(code), "{stdout}");
+    }
+    assert_eq!(
+        stdout,
+        format!("{source}: no diagnostics\n"),
+        "compare displays only the Legacy stream"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("matched=true"), "{stderr}");
+    assert!(stderr.contains("complete=true"), "{stderr}");
+    assert!(!stderr.contains("SEM025"), "{stderr}");
+    assert!(!stderr.contains("SEM026"), "{stderr}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn unresolved_variable_warning_can_be_escalated_or_disabled() {
     let directory = temporary_directory();
     let source = directory.join("unresolved.lsl");
