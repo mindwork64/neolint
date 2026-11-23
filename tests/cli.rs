@@ -1617,6 +1617,10 @@ fn cli_engine_override_to_legacy_restores_legacy_output() {
 
 #[test]
 fn stdin_source_label_follows_engine_selection() {
+    let directory = temporary_directory();
+    let legacy_config = write_file(&directory, "legacy.conf", "engine = legacy\n");
+    let ast_config = write_file(&directory, "ast.conf", "engine = ast\n");
+
     let default_human = run_args_with_stdin(&["-"], ERROR_SOURCE.as_bytes());
     assert_eq!(default_human.status.code(), Some(1));
     let stdout = String::from_utf8(default_human.stdout).unwrap();
@@ -1628,6 +1632,24 @@ fn stdin_source_label_follows_engine_selection() {
     let stdout = String::from_utf8(legacy_human.stdout).unwrap();
     assert!(stdout.contains("-:1:"), "{stdout}");
     assert!(!stdout.contains("<stdin>"), "{stdout}");
+
+    let configured_legacy = run_args_with_stdin(
+        &["--config", legacy_config.to_str().unwrap(), "-"],
+        ERROR_SOURCE.as_bytes(),
+    );
+    assert_eq!(configured_legacy.status.code(), Some(1));
+    let stdout = String::from_utf8(configured_legacy.stdout).unwrap();
+    assert!(stdout.contains("-:1:"), "{stdout}");
+    assert!(!stdout.contains("<stdin>"), "{stdout}");
+
+    let configured_ast = run_args_with_stdin(
+        &["--config", ast_config.to_str().unwrap(), "-"],
+        ERROR_SOURCE.as_bytes(),
+    );
+    assert_eq!(configured_ast.status.code(), Some(1));
+    let stdout = String::from_utf8(configured_ast.stdout).unwrap();
+    assert!(stdout.contains("<stdin>:1:"), "{stdout}");
+    assert!(!stdout.contains("-:1:"), "{stdout}");
 
     let default_json = run_args_with_stdin(&["--format", "json", "-"], ERROR_SOURCE.as_bytes());
     assert_eq!(default_json.status.code(), Some(1));
@@ -1642,6 +1664,37 @@ fn stdin_source_label_follows_engine_selection() {
     let stdout = String::from_utf8(legacy_json.stdout).unwrap();
     assert!(stdout.contains("\"file\":\"-\""), "{stdout}");
     assert!(!stdout.contains("\"file\":\"<stdin>\""), "{stdout}");
+
+    let configured_legacy_json = run_args_with_stdin(
+        &[
+            "--config",
+            legacy_config.to_str().unwrap(),
+            "--format",
+            "json",
+            "-",
+        ],
+        ERROR_SOURCE.as_bytes(),
+    );
+    assert_eq!(configured_legacy_json.status.code(), Some(1));
+    let stdout = String::from_utf8(configured_legacy_json.stdout).unwrap();
+    assert!(stdout.contains("\"file\":\"-\""), "{stdout}");
+    assert!(!stdout.contains("\"file\":\"<stdin>\""), "{stdout}");
+
+    let configured_ast_json = run_args_with_stdin(
+        &[
+            "--config",
+            ast_config.to_str().unwrap(),
+            "--format",
+            "json",
+            "-",
+        ],
+        ERROR_SOURCE.as_bytes(),
+    );
+    assert_eq!(configured_ast_json.status.code(), Some(1));
+    let stdout = String::from_utf8(configured_ast_json.stdout).unwrap();
+    assert!(stdout.contains("\"file\":\"<stdin>\""), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -1732,7 +1785,7 @@ fn default_ast_directory_and_multi_unit_order_is_deterministic() {
         .find(&format!("{}:", tree.join("a.lsl").display()))
         .unwrap();
     let m = stdout
-        .find(&format!("{}:", tree.join("nested/m.lsl").display()))
+        .find(&format!("{}:", tree.join("nested").join("m.lsl").display()))
         .unwrap();
     let z = stdout
         .find(&format!("{}:", tree.join("z.lsl").display()))
@@ -1803,6 +1856,16 @@ fn default_ast_ordering_is_deterministic_for_divergent_corpus_input() {
     assert_eq!(first.stdout, second.stdout);
     assert_eq!(first.stderr, second.stderr);
     assert_eq!(first.stdout, explicit_ast.stdout);
+    assert!(
+        first.stderr.is_empty(),
+        "default AST corpus run wrote stderr: {:?}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_ne!(
+        first.status.code(),
+        Some(3),
+        "Compare must never become the default on corpus input"
+    );
 
     let stdout = String::from_utf8(first.stdout).unwrap();
     let first_line = stdout.lines().next().unwrap();

@@ -2,8 +2,11 @@
 //!
 //! Pipeline:
 //! argument parsing → configuration loading/validation → input collection
-//! (files, directories, stdin) → source reading → [`neolint::lex`] →
-//! [`neolint::parse`] → [`neolint::analyze`] → configuration application →
+//! (files, directories, stdin) → source reading → engine selection → per-unit
+//! preparation (identity or full preprocessing, or the direct Legacy path) →
+//! [`neolint::lex`] → the selected engine ([`neolint::parse_legacy`] with
+//! [`neolint::semantic::analyze_with_syntax_diagnostics`], [`neolint::parse_ast`]
+//! with AST semantic analysis, or Compare) → configuration application →
 //! human/JSON rendering → exit code.
 //!
 //! The default analysis engine is AST. With no preprocessing, units use

@@ -110,10 +110,11 @@ definition, previous definition, outer invocation, conditional opening, or EOF.
 `PRE016` remains intentionally unused; malformed invocation classes are covered by
 `PRE014` and `PRE015`.
 
-`PRE039` is emitted only by unit-based invocations: full preprocessing
-(`--preprocess` or `--dialect firestorm`) and identity-prepared
-`--engine ast`/`--engine compare`. The default plain no-preprocess Legacy path is
-uncapped and never emits `PRE039`.
+`PRE039` is emitted only by unit-based invocations: the default no-preprocess AST
+path (identity preparation), explicit `--engine ast`/`--engine compare`, and
+full preprocessing (`--preprocess` or `--dialect firestorm`) for every engine.
+Only explicit `--engine legacy` without preprocessing uses the uncapped direct
+plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 

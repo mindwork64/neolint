@@ -146,6 +146,19 @@ fn default_ast_enabled_flood_is_capped_with_terminal_pre039() {
     assert_eq!(json_code_count(&stdout, "SEM012"), limit - 1);
     assert_eq!(json_code_count(&stdout, "PRE039"), 1);
     assert_eq!(json_last_code(&stdout), Some("PRE039"));
+
+    // The human renderer must apply the same cap: exactly `limit` diagnostic
+    // lines and a terminal PRE039, not an extra line or a truncated tail.
+    let human = run_with_stdin(&["-"], source.as_bytes());
+    assert_eq!(human.status.code(), Some(1));
+    let human_stdout = String::from_utf8(human.stdout).unwrap();
+    assert_eq!(human_stdout.lines().count(), limit);
+    assert_eq!(human_stdout.matches("[PRE039]").count(), 1);
+    let last_line = human_stdout.lines().last().unwrap();
+    assert!(
+        last_line.contains("error[PRE039]"),
+        "human cap tail is not PRE039: {last_line}"
+    );
 }
 
 #[test]
@@ -168,15 +181,32 @@ fn default_ast_disabled_flood_does_not_trigger_pre039() {
 fn explicit_legacy_direct_flood_remains_uncapped() {
     let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
     let source = unresolved_variable_flood(limit + 2);
-    let output = run_with_stdin(
-        &["--engine", "legacy", "--format", "json", "-"],
-        source.as_bytes(),
-    );
+    let directory = temporary_directory();
+    let config = write_file(&directory, "legacy.conf", "engine = legacy\n");
+    let config_path = config.to_str().unwrap();
 
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(json_code_count(&stdout, "SEM012"), limit + 2);
-    assert_eq!(json_code_count(&stdout, "PRE039"), 0);
+    for (selection, args) in [
+        (
+            "--engine legacy",
+            vec!["--engine", "legacy", "--format", "json", "-"],
+        ),
+        (
+            "--engine=legacy",
+            vec!["--engine=legacy", "--format", "json", "-"],
+        ),
+        (
+            "config engine = legacy",
+            vec!["--config", config_path, "--format", "json", "-"],
+        ),
+    ] {
+        let output = run_with_stdin(&args, source.as_bytes());
+        assert_eq!(output.status.code(), Some(0), "{selection}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(json_code_count(&stdout, "SEM012"), limit + 2, "{selection}");
+        assert_eq!(json_code_count(&stdout, "PRE039"), 0, "{selection}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

@@ -275,6 +275,34 @@ fn frozen_analyze_signatures_and_error_conversion_are_stable() {
 }
 
 #[test]
+fn frozen_run_analyze_equals_concatenated_unit_analyses() {
+    let mut run = AnalysisRun::new().unwrap();
+    let plain = run
+        .add_legacy_text(
+            "plain.lsl",
+            "integer g;\ninteger g;\ndefault { state_entry() { llSay(0); } }",
+        )
+        .unwrap();
+    let prepared = run
+        .add_prepared_text(
+            "prepared.lsl",
+            "default { state_entry() { integer x = ; llSay(0); } }",
+        )
+        .unwrap();
+
+    let mut expected = Vec::new();
+    for index in [plain, prepared] {
+        expected.extend(run.unit(index).unwrap().analyze().unwrap());
+    }
+    let run_level = run.analyze().unwrap();
+    assert!(!run_level.is_empty());
+    assert_legacy_equal(&run_level, &expected);
+
+    let legacy_engine = run.analyze_with_engine(AnalysisEngine::Legacy).unwrap();
+    assert_legacy_equal(&run_level, legacy_engine.diagnostics());
+}
+
+#[test]
 fn empty_and_malformed_inputs_do_not_panic_in_any_engine() {
     let malformed = "default { state_entry() { integer x = ; llSay(0); } }";
     for source in ["", malformed] {

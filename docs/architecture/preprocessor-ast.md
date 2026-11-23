@@ -1,14 +1,16 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5 and 6A–6F implemented on the experimental branch**;
-this document remains the normative contract for the remaining Phase 6 slices.
+Status: **Phases 1–5, 6A–6G implemented; Phase 6H makes AST the default on the
+experimental branch**; this document remains the normative contract for the
+remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
-implemented. All existing SEM001–SEM023 diagnostics now have independent AST
-implementations with differential parity; engine selection/integration remains
-future work.
+implemented. All existing SEM001–SEM023 diagnostics have independent AST
+implementations with differential parity. Phase 6G added engine selection and
+Compare; Phase 6H selects AST by default on the experimental integration branch
+only (see the Phase 6H implementation record).
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -30,6 +32,10 @@ updated first (or the conflict must be recorded as an explicit open question).
 3. Keep both engines on the **same prepared token stream** so their results are
    directly comparable.
 4. Preserve exact legacy behavior in the default (plain LSL) mode.
+   **Superseded on 2026-11-23 by the Phase 6H decision.** AST is now the default
+   engine on the experimental integration branch, so exact historical behavior
+   is preserved only when Legacy is selected explicitly. See fixed decision 23
+   below and the Phase 6H implementation record in §15.
 5. Make every diagnostic traceable to real user code through a source map.
 6. Keep the project dependency-free, offline, deterministic, and panic-free on
    malformed input, with MSRV 1.75.
@@ -101,6 +107,16 @@ revision of this document.
 22. **Run identity is part of unit identity.** `AnalysisUnitId` includes a
     process-local `RunId`, so coordinates cannot be exchanged between
     independently active invocations even when unit index and offsets match.
+23. **Phase 6H decision (2026-11-23): AST is the default engine on the
+    experimental integration branch.** This supersedes Goal 4 for that branch
+    only. Without an explicit `--engine`/`engine` setting, config files and the
+    library default select `AnalysisEngine::Ast`; explicit `--engine legacy` or
+    `engine = legacy` retains the historical direct Legacy path and its
+    uncapped, `-`-labelled stdin behavior. The public frozen entry points
+    (`AnalysisUnit::analyze`, `AnalysisRun::analyze`) and all frozen types keep
+    their Legacy behavior and signatures. Stable `main` and the published
+    v1.0.0 release are unchanged. See the Phase 6H implementation record in
+    §15 for the compatibility envelope and validation evidence.
 
 ---
 
@@ -110,10 +126,11 @@ revision of this document.
 CLI arguments (--engine, --preprocess, --dialect, -I, ...)
   → LintConfig (config file, --disable, --severity, engine selection)
   → input collection (files, directories, stdin)
-  → choose the unit preparation path:
-      no --preprocess, engine = legacy:
+  → choose the unit preparation path (engine defaults to ast on the
+    experimental Phase 6H branch):
+      no --preprocess, engine = legacy (explicit only):
           the existing direct plain loop (uncapped run-level, unchanged)
-      no --preprocess, engine = ast | compare:
+      no --preprocess, engine = ast | compare (ast is the default):
           identity preparation (byte-identical prepared source + map)
       --preprocess (any engine):
           full preprocessing with dialect and include directories
@@ -130,14 +147,16 @@ CLI arguments (--engine, --preprocess, --dialect, -I, ...)
   → exit code 0 | 1 | 2 | 3
 ```
 
-The CLI keeps three preparation/execution paths. The plain-Legacy path is the
-pre-Phase-6 CLI loop verbatim and is not capped at run level. `ast` and `compare`
-without preprocessing use identity preparation so the engine API always has a
-prepared source and source map; identity preparation copies bytes and does not
-expand macros or includes. Any engine with `--preprocess` uses the full
-preprocessor and dialect. `compare` never merges the AST stream into stdout:
-stdout keeps the Legacy display schema, and the deterministic report goes to
-stderr.
+The CLI keeps three preparation/execution paths. AST is the default engine on
+the experimental Phase 6H branch, so a no-preprocess default run uses identity
+preparation and the unit-based cap. The plain-Legacy path is entered only when
+Legacy is selected explicitly; it is the pre-Phase-6 CLI loop verbatim and is not
+capped at run level. Explicit `ast` and `compare` without preprocessing use
+identity preparation so the engine API always has a prepared source and source
+map; identity preparation copies bytes and does not expand macros or includes.
+Any engine with `--preprocess` uses the full preprocessor and dialect. `compare`
+never merges the AST stream into stdout: stdout keeps the Legacy display schema,
+and the deterministic report goes to stderr.
 
 A single `AnalysisUnit` engine call lexes the prepared text exactly once; the
 same token slice feeds both analyzers and (when requested) `--tokens`. The old
@@ -148,7 +167,7 @@ read, one token stream, one diagnostic set per input. The new architecture names
 that unit of work **AnalysisUnit** (§6) and keeps it independent, even though
 one CLI invocation may contain many such units.
 
-Current stage contracts, as implemented at the baseline:
+Current stage contracts, as currently implemented:
 
 - `lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>)` in `src/lexer.rs`.
   - The token stream always ends with `TokenKind::Eof`.
@@ -177,7 +196,8 @@ Current stage contracts, as implemented at the baseline:
     path from the input loop.
 - `LintConfig` in `src/config.rs` supports `disable`, `severity.RULE`,
   `preprocess`, `dialect`, `include_dir`, and `engine = legacy|ast|compare`;
-  rule codes must match `[A-Z0-9]+` and the default engine is `legacy`.
+  rule codes must match `[A-Z0-9]+`. On the experimental Phase 6H branch the
+  default engine is `ast`; explicit `legacy` restores the historical pipeline.
 - Built-in metadata is vendored (`data/lsl-builtins.txt`,
   `data/lsl-deprecated.txt`) and loaded through `include_str!` + `OnceLock`;
   there is no network access.
@@ -384,11 +404,13 @@ prepared `Span` and are explicitly bridged and resolved through the unit's
 ### CLI / configuration (`src/main.rs`, `src/config.rs`)
 
 - Creates one AnalysisUnit per collected input.
-- Chooses the dialect profile and the analysis engine (`legacy` default, `ast`,
-  or `compare`) from configuration plus `--engine` overrides.
-- Chooses the preparation path: plain Legacy (no prepared source), identity
-  preparation for `ast`/`compare` without preprocessing, or full preprocessing
-  when requested.
+- Chooses the dialect profile and the analysis engine (`ast` by default on the
+  experimental Phase 6H branch, explicit `legacy`, or `compare`) from
+  configuration plus `--engine` overrides.
+- Chooses the preparation path: identity preparation for the default/explicit
+  `ast` and for `compare` without preprocessing, plain Legacy (no prepared
+  source) only when Legacy is selected explicitly, or full preprocessing when
+  requested.
 - Keeps plain LSL as the default with preprocessing disabled.
 - Maps CLI/config failures to exit code 2; lint findings to 0/1; an unmatched
   Compare report to 3 (after any 2); a matching report follows the displayed
@@ -788,9 +810,11 @@ unit.
    producing a unit-owned `SourceId`. Unreadable/invalid root is an input error
    for this unit (exit 2 contribution) and the unit ends.
 3. **Preparation.** Select the coordinate path:
-   - plain-LSL Legacy mode (preprocessing disabled): keep the loaded root as-is;
-     create no `PreparedSource` and no `SourceMap`;
-   - identity/prepared mode: copy the root text byte-for-byte into one
+   - plain-LSL Legacy mode (preprocessing disabled, explicit `--engine legacy`
+     only): keep the loaded root as-is; create no `PreparedSource` and no
+     `SourceMap`;
+   - identity/prepared mode (the default no-preprocess AST path and explicit
+     `ast`/`compare`): copy the root text byte-for-byte into one
      `PreparedSource`, build the identity map and EOF anchor;
    - full Phase 2 mode: scan directives, expand macros, and build the full map;
    - later Firestorm mode: add include resolution and the remaining extensions
@@ -806,15 +830,16 @@ unit.
    `PreparedSource` text in prepared mode. Legacy findings retain original
    coordinates; prepared-path lexer/engine findings use prepared coordinates.
    An empty input yields only `Eof` at byte offset 0 in either path.
-5. **Engine selection (implemented in Phase 6G).**
-   - `legacy` (default): `parse_legacy` → `analyze_with_syntax_diagnostics`; in
-     the plain-LSL path the unit tags each returned `Diagnostic` as a
-     `LegacyDiagnostic`.
-   - `ast`: `parse_ast` → AST semantic analyzer; the displayed stream is the AST
-     lexical/parser/semantic stream.
-   - `compare`: runs both raw semantic streams, displays the Legacy stream only,
-     and attaches an `EngineComparisonReport`. The AST semantic stream is never
-     appended to the displayed Legacy stream.
+5. **Engine selection (implemented in Phase 6G; AST default in Phase 6H).**
+   - `ast` (the default on the experimental Phase 6H branch): `parse_ast` → AST
+     semantic analyzer; the displayed stream is the AST lexical/parser/semantic
+     stream.
+   - `legacy` (explicit rollback): `parse_legacy` →
+     `analyze_with_syntax_diagnostics`; in the plain-LSL path the unit tags each
+     returned `Diagnostic` as a `LegacyDiagnostic`.
+   - `compare` (explicit only): runs both raw semantic streams, displays the
+     Legacy stream only, and attaches an `EngineComparisonReport`. The AST
+     semantic stream is never appended to the displayed Legacy stream.
    - The prepared text is lexed exactly once per unit; both analyzers and the
      `--tokens` output consume that single token slice.
 6. **Input assembly.** Collect:
@@ -1912,24 +1937,33 @@ Rules:
 
 ## 9. Backward compatibility (I)
 
-1. **Default mode is unchanged.** Without an explicit preprocessor flag, the
-   pipeline is `lex → parse → analyze` with the same input text. No identity
-   preprocessing runs implicitly in a way that could alter bytes.
+1. **Explicit Legacy mode is unchanged.** With `--engine legacy` or
+   `engine = legacy` and no preprocessing flag, the pipeline is
+   `lex → parse → analyze` with the same input text. No identity preprocessing
+   runs in a way that could alter bytes. On the experimental Phase 6H branch the
+   default engine is AST, so a no-option run instead uses identity preparation
+   and the AST engine; the byte-identical guarantee in this item applies to the
+   explicitly selected Legacy path.
 2. **Public API is frozen.** `lex`, `parse`, `analyze`,
    `analyze_with_syntax_diagnostics`, `Diagnostic`, `Span`, `Token`, and
    `TokenKind` keep their signatures and field meanings for the transition
    period. New functionality is additive. `parse_legacy` and `parse_ast` are
    added as independent entry points; `parse` stays behaviorally identical to
    `parse_legacy`.
-3. **Diagnostics are unchanged in plain LSL.** Same codes, severities, kinds,
-   messages, spans, order, human output, JSON output, and exit codes. The
-   existing 350 tests and the corpus manifest are the gate.
-   In this mode `Diagnostic.span` is an original-coordinate `Span` and travels
-   through `UnifiedDiagnosticInput::Legacy` untouched.
+3. **Explicit Legacy diagnostics are unchanged in plain LSL.** Same codes,
+   severities, kinds, messages, spans, order, human output, JSON output, and exit
+   codes. The legacy golden suite and the corpus manifest are the gate. In this
+   mode `Diagnostic.span` is an original-coordinate `Span` and travels
+   through `UnifiedDiagnosticInput::Legacy` untouched. The default AST stream is
+   deterministic and differential-tested but has the documented, accepted
+   differences in the Phase 6H record (§15), including diagnostic order.
 4. **`--tokens` output** continues to print the tokens of the prepared stream
    (which equals the input text in legacy mode).
 5. **Configuration** gains new keys only in an additive way. Unknown keys remain
-   an error (exit 2). Existing config files keep working unchanged.
+   an error (exit 2). Existing config files keep parsing unchanged; on the
+   experimental Phase 6H branch a file without an `engine` setting now selects
+   AST, which is a behavioral default change despite unchanged Rust signatures
+   (see §15, Phase 6H).
 6. **JSON** retains existing fields and meanings. Any extension is additive and
    documented; no field is renamed or repurposed.
 7. **Firestorm is opt-in.** Both the preprocessor and the extension syntax have
@@ -2290,18 +2324,21 @@ Requirements:
    names and documentation must not claim Firestorm parity.
 6. **Integration tests** via the public API and the binary
    (`env!("CARGO_BIN_EXE_neolint")`), in the existing `tests/` style, using
-   temporary directories. Integration coverage asserts unchanged plain-Legacy
-   output, identity-prepared `ast`/`compare` without preprocessing, full
-   preprocessing for every engine, and stderr Compare report separation and
-   unit order. There is no cross-engine deduplication merge step: Compare
-   displays only the Legacy stream.
+   temporary directories. Integration coverage asserts explicit-Legacy output,
+   default and explicit `ast`/`compare` without preprocessing, identity
+   preparation, full preprocessing for every engine, and stderr Compare report
+   separation and unit order. There is no cross-engine deduplication merge step:
+   Compare displays only the Legacy stream.
 7. **Golden corpus and pre-change CLI oracle**: existing
    `corpus/{small,medium,large,invalid}` plus a new preprocessor corpus.
-   Plain-LSL golden results must not change. `tests/legacy_golden.rs` holds six
-   byte-exact stdout/stderr fixtures captured from the unmodified base
-   `4dd01ca16539e6944a6714f133e9d2636adb6a95`; both the default invocation and
-   `--engine legacy` must reproduce them. That pre-change golden baseline is the
-   compatibility oracle for CLI wiring. Compare detail truncation (the bounded
+   Explicit-Legacy golden results must not change. `tests/legacy_golden.rs`
+   holds six byte-exact stdout/stderr fixtures captured from the unmodified base
+   `4dd01ca16539e6944a6714f133e9d2636adb6a95`; `--engine legacy` must reproduce
+   them. `tests/ast_golden.rs` holds the corresponding AST-default baseline
+   captured from the unmodified base `ab49154dee10e6e52629bf95c869bf9b33798764`
+   in Slice 0 `fd4a509`; the default invocation and explicit `--engine ast` must
+   reproduce it, with on-disk digest guards. These pre-change baselines are the
+   compatibility oracles for CLI wiring. Compare detail truncation (the bounded
    64-sample display) is a distinct state from an incomplete comparison (the
    100,000-fingerprint budget); tests must assert both independently.
 8. **Differential Legacy↔AST harness** (Phase 4+): compare exact 10-field
@@ -3401,6 +3438,114 @@ parity is still not claimed; Compare covers SEM001–SEM023 only.
   tests, new-rule positive/negative tests, regression corpus.
 - **Done when:** the AST engine is the default in the experimental branch, the
   parity matrix is complete, and the migration report is accepted.
+
+#### Phase 6H implementation record
+
+**Status:** implemented on the experimental integration branch only. Slice 0
+(`fd4a509`) captured the AST-default CLI goldens from the unmodified base
+`ab49154dee10e6e52629bf95c869bf9b33798764`; `2c0e9f5` fixed
+suppression-before-cap ordering; Slice 1 (`3d33b0c`) made AST the default;
+Slice 2 (this change) removes stale Legacy-default documentation and hardens the
+cutover tests. Stable `main` and the published v1.0.0 release are untouched.
+
+**What changed.** `AnalysisEngine::default()` and `LintConfig::default()` now
+select `AnalysisEngine::Ast`, a config file without an `engine` setting selects
+AST, and a CLI invocation without `--engine` is byte-for-byte equivalent to
+`--engine ast` for the same inputs, configuration, and output format (pinned by
+`tests/ast_golden.rs` and `tests/cli.rs`). `--engine ast`/`--engine=ast` remain
+accepted. `--engine legacy`, `--engine=legacy`, and `engine = legacy` select the
+unchanged direct Legacy pipeline. `AnalysisEngine::Legacy` stays public and
+compiled, `parse()` remains the frozen Legacy alias, and Compare remains
+explicit and never becomes the default.
+
+**Why the previous decision is superseded.** Goal 4 in §0 ("Preserve exact
+legacy behavior in the default (plain LSL) mode") and the §14 policy line that
+kept `legacy` as the default until a separate stabilization decision are
+superseded by this dated Phase 6H decision. This record is that separate
+decision. Fixed decision 4 (the legacy API is preserved) continues to apply;
+only the default-engine policy changed. The historical Phase 6A–6G records are
+not rewritten: Phase 6G's "the default engine remains `legacy`" statements
+describe that slice at that time and are superseded here, not edited.
+
+**Compatibility envelope.**
+
+- Explicit Legacy without preprocessing retains the pre-Phase-6H direct plain
+  loop: it is uncapped at run level, never appends `PRE039`, renders stdin as
+  `-`, and reproduces the six Legacy goldens captured from base `4dd01ca…`.
+- The default AST path without preprocessing uses identity preparation (source
+  bytes copied unchanged with a source map) and the unit-based runner. It
+  applies the 10,000 rendered-diagnostic per-unit cap and the invocation-wide
+  10,000 cap, can append one terminal `PRE039`, cannot return exit 3, and
+  renders stdin as `<stdin>`.
+- With `--preprocess` or `--dialect firestorm`, every engine uses the same full
+  preprocessor and dialect lifecycle; default AST derives `AstParseOptions`
+  from the prepared source's effective gates.
+- Firestorm `switch` statements are accepted by AST when the switches gate is
+  enabled; explicit Legacy rejects them as unsupported syntax.
+- The frozen `AnalysisUnit::analyze()` and `AnalysisRun::analyze()` signatures
+  and Legacy behavior are unchanged. They remain compatibility entry points;
+  engine choice is explicit through the engine API and CLI/config.
+- Exit codes 0/1/2/3 and their precedence are unchanged. Compare stays opt-in,
+  displays only the Legacy semantic stream, and reports on stderr.
+- Stable `main` and v1.0.0 are not changed by this phase. The cutover exists
+  only on the Phase 6H experimental branch.
+
+**Accepted AST/Legacy differences.** Both engines are deterministic, but they
+do not promise identical output on every input:
+
+- Diagnostic ordering follows each engine's pass order; AST order can differ
+  from Legacy order, and neither stream is globally sorted.
+- The default AST path is capped as described above; explicit Legacy is
+  uncapped. A capped run therefore ends in `PRE039` and exits 1.
+- stdin diagnostics are labelled `<stdin>` under AST and `-` under Legacy.
+- Firestorm `switch`/lazy-list constructs are parsed only by AST, and only when
+  the corresponding gate is effective.
+- The Phase 6G accepted-input SEM002 divergence remains intentional: an event
+  name that collides with a builtin name is token-scanned as a builtin call by
+  Legacy, while AST inspects expression call sites. Compare reports that delta
+  rather than concealing it.
+- Parser/lexer recovery diagnostics are not part of the Compare report, which
+  covers SEM001–SEM023 only; parser/lexer parity is not claimed.
+
+**Suppression before the rendered cap (`2c0e9f5`).** The CLI now applies
+`disable` filtering before evaluating the rendered-diagnostic cap. A disabled
+noisy rule therefore cannot fill the budget and manufacture a terminal `PRE039`
+for an otherwise clean display; the cap applies to what is actually rendered.
+The frozen `AnalysisUnit::analyze()`/`AnalysisRun::analyze()` entry points still
+apply no suppression, preserving their Legacy cap behavior.
+
+**Golden baseline provenance.** `tests/golden/ast/` was captured by Slice 0
+`fd4a509` from the unmodified base binary at
+`ab49154dee10e6e52629bf95c869bf9b33798764`, before any production-source edit.
+`tests/ast_golden.rs` verifies on-disk SHA-256 digests before comparison, runs
+both the default invocation and `--engine ast`, and asserts they are identical.
+The Legacy goldens in `tests/legacy_golden.rs` remain the byte-exact oracle for
+explicit Legacy, captured from base `4dd01ca16539e6944a6714f133e9d2636adb6a95`.
+Phase 6H Slice 0 added the separate `tests/golden/ast/` tree; no existing Legacy
+golden was modified, and Slices 1–2 made no further changes under
+`tests/golden/**`.
+
+**Validation evidence (final working-tree run).**
+
+- `cargo fmt --all -- --check` → exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
+- `cargo test --all-targets --all-features` → exit 0, 829 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 829 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 829 passed.
+- `cargo test --test ast_golden` → exit 0, 6 passed.
+- `cargo test --test legacy_golden` → exit 0, 3 passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
+- `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
+  → 9 tests OK.
+- `python3 scripts/test_documentation.py` → 6 tests OK.
+- `git diff --check` → exit 0.
+
+**Boundary.** Phase 6H Slice 2 is documentation and test hardening only. It
+changes Markdown documentation, the `src/main.rs` module comment, and
+`tests/{cap_suppression,cli,analysis_engine_api,corpus}.rs`. It does not change
+SEM rules, the parser, the lexer, the preprocessor, `SourceMap`, the comparator,
+or exit-code semantics; it adds no dependencies and no production
+`unwrap`/`expect`/panic. MSRV remains Rust 1.75.
 
 ---
 

@@ -386,11 +386,9 @@ fn corpus_manifest_is_valid_and_complete() {
     for fixture in &fixtures {
         *categories.entry(fixture.category.as_str()).or_insert(0) += 1;
     }
-    assert_eq!(
-        fixtures.len(),
-        29,
-        "update corpus report when adding fixtures"
-    );
+    // The real fixture-count invariant is the manifest/on-disk set equality
+    // asserted by `assert_manifest_is_valid` above: adding a corpus fixture
+    // requires its manifest row and `.lsl` file, not a hardcoded total here.
     assert_eq!(categories.get("small"), Some(&9));
     assert_eq!(categories.get("medium"), Some(&6));
     assert_eq!(categories.get("large"), Some(&3));
