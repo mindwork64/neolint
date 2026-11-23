@@ -235,3 +235,56 @@ fn suppression_does_not_mask_overflow_from_other_rules() {
     assert_eq!(json_code_count(&stdout, "PRE039"), 1);
     assert_eq!(json_last_code(&stdout), Some("PRE039"));
 }
+
+#[test]
+fn explicit_legacy_preprocessed_disabled_flood_does_not_trigger_pre039() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let output = run_with_stdin(
+        &[
+            "--engine",
+            "legacy",
+            "--preprocess",
+            "--format",
+            "json",
+            "--disable",
+            "SEM012",
+            "-",
+        ],
+        source.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.trim(), "[]");
+    assert_eq!(json_code_count(&stdout, "SEM012"), 0);
+    assert_eq!(json_code_count(&stdout, "PRE039"), 0);
+}
+
+#[test]
+fn explicit_legacy_preprocessed_suppression_does_not_mask_other_overflow() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let mut source = "integer duplicate;\n".repeat(limit + 2);
+    source.push_str("default { state_entry() { x = 1; y = 2; } }\n");
+    let output = run_with_stdin(
+        &[
+            "--engine",
+            "legacy",
+            "--preprocess",
+            "--format",
+            "json",
+            "--disable",
+            "SEM012",
+            "-",
+        ],
+        source.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.matches("\"code\":\"").count(), limit);
+    assert_eq!(json_code_count(&stdout, "SEM012"), 0);
+    assert_eq!(json_code_count(&stdout, "SEM001"), limit - 1);
+    assert_eq!(json_code_count(&stdout, "PRE039"), 1);
+    assert_eq!(json_last_code(&stdout), Some("PRE039"));
+}

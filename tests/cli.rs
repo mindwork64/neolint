@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use neolint::MAX_COMPARE_FINGERPRINTS_PER_ENGINE;
+
 static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
 
 fn temporary_directory() -> PathBuf {
@@ -1288,6 +1290,49 @@ fn compare_report_uses_stderr_and_json_stdout_keeps_old_schema() {
 }
 
 #[test]
+fn compare_over_budget_reports_incomplete_unit_and_exits_three() {
+    let directory = temporary_directory();
+    // Each unresolved assignment emits one SEM012 in both engines. A duplicate
+    // global flood also works but takes ~85s in the debug build; SEM012 is the
+    // same comparator path and keeps the CLI regression test reasonably fast.
+    let statements = MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1;
+    let mut source = String::from("default { state_entry() {\n");
+    for _ in 0..statements {
+        source.push_str("x = 1;\n");
+    }
+    source.push_str("} }\n");
+    let source = write_file(&directory, "over-budget.lsl", &source);
+
+    let output = run_args(&[
+        "--engine",
+        "compare",
+        "--format",
+        "json",
+        source.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(3));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        json_array_is_structurally_valid(&stdout),
+        "stdout lost the Legacy JSON diagnostics array: {stdout:.200}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let expected = MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1;
+    assert!(stderr.contains("\"comparison_complete\":false"), "{stderr}");
+    assert!(stderr.contains("\"matched\":false"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "\"code\":\"SEM012\",\"legacy_count\":{expected},\"ast_count\":{expected},\"missing_total\":null,\"extra_total\":null"
+        )),
+        "{stderr}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn compare_exit_codes_follow_mismatch_and_failure_precedence() {
     let directory = temporary_directory();
     let clean = write_file(&directory, "clean.lsl", CLEAN_SOURCE);
@@ -1738,6 +1783,8 @@ fn default_invocation_equals_explicit_ast_for_representative_inputs() {
     fs::create_dir_all(tree.join("nested")).unwrap();
     write_file(&tree, "a.lsl", ERROR_SOURCE);
     write_file(&tree.join("nested"), "b.lsl", CLEAN_SOURCE);
+    let missing = directory.join("missing.lsl");
+    let missing = missing.to_str().unwrap();
     let clean = clean.to_str().unwrap();
     let error = error.to_str().unwrap();
     let macro_source = macro_source.to_str().unwrap();
@@ -1752,6 +1799,9 @@ fn default_invocation_equals_explicit_ast_for_representative_inputs() {
     assert_default_matches_explicit_ast(&[tree]);
     assert_default_matches_explicit_ast(&["--config", config, error]);
     assert_default_matches_explicit_ast(&["--severity", "SEM004=warning", error]);
+    assert_default_matches_explicit_ast(&[missing]);
+    assert_default_matches_explicit_ast(&["-I", tree, clean]);
+    assert_default_matches_explicit_ast(&["--tokens", "--format", "json", error]);
 
     fs::remove_dir_all(directory).unwrap();
 }

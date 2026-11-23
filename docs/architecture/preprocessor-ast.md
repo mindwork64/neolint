@@ -2425,6 +2425,9 @@ implementations, not stages of the same code.
    through `--engine` and the `engine` configuration key in the experimental
    branch. The default remains `legacy` until a separate Phase 6 stabilization
    decision; `ast` and `compare` are opt-in.
+   **Superseded in Phase 6H (2026-11-23):** on the experimental integration
+   branch AST is the default and `legacy` is the explicit rollback engine. See
+   fixed decision 23 and the Phase 6H implementation record.
 9. **Rollback (status).** The legacy parser and semantic analyzer remain
    compiled, public, and selectable (`--engine legacy` or `engine = legacy`);
    removal requires a separate decision and a major-version boundary. Legacy
@@ -3445,8 +3448,11 @@ parity is still not claimed; Compare covers SEM001–SEM023 only.
 (`fd4a509`) captured the AST-default CLI goldens from the unmodified base
 `ab49154dee10e6e52629bf95c869bf9b33798764`; `2c0e9f5` fixed
 suppression-before-cap ordering; Slice 1 (`3d33b0c`) made AST the default;
-Slice 2 (this change) removes stale Legacy-default documentation and hardens the
-cutover tests. Stable `main` and the published v1.0.0 release are untouched.
+Slice 2 (`9c7a965`) removed stale Legacy-default documentation and hardened the
+cutover tests; Slice 2b (this change) corrects the remaining §14 policy marker,
+qualifies the path-sensitive suppression/stdin claims, and adds the missing
+Legacy-preprocessed and Compare-budget CLI coverage. Stable `main` and the
+published v1.0.0 release are untouched.
 
 **What changed.** `AnalysisEngine::default()` and `LintConfig::default()` now
 select `AnalysisEngine::Ast`, a config file without an `engine` setting selects
@@ -3477,6 +3483,12 @@ describe that slice at that time and are superseded here, not edited.
   applies the 10,000 rendered-diagnostic per-unit cap and the invocation-wide
   10,000 cap, can append one terminal `PRE039`, cannot return exit 3, and
   renders stdin as `<stdin>`.
+- The stdin label follows the preparation path, not the engine: unit-based runs
+  (default AST, explicit `ast`/`compare`, and preprocessed Legacy) render
+  `<stdin>`; only the direct plain-Legacy path (preprocessing off) renders `-`.
+- Unit-based runs of every engine, including explicit Legacy with
+  `--preprocess`, apply display suppression before the rendered-diagnostic cap.
+  The direct plain-Legacy path has no rendered cap; its bytes are unchanged.
 - With `--preprocess` or `--dialect firestorm`, every engine uses the same full
   preprocessor and dialect lifecycle; default AST derives `AstParseOptions`
   from the prepared source's effective gates.
@@ -3497,22 +3509,29 @@ do not promise identical output on every input:
   from Legacy order, and neither stream is globally sorted.
 - The default AST path is capped as described above; explicit Legacy is
   uncapped. A capped run therefore ends in `PRE039` and exits 1.
-- stdin diagnostics are labelled `<stdin>` under AST and `-` under Legacy.
+- The stdin label follows the preparation path, not the engine: unit-based runs
+  render `<stdin>`, while only the direct plain-Legacy path renders `-`.
 - Firestorm `switch`/lazy-list constructs are parsed only by AST, and only when
   the corresponding gate is effective.
 - The Phase 6G accepted-input SEM002 divergence remains intentional: an event
-  name that collides with a builtin name is token-scanned as a builtin call by
-  Legacy, while AST inspects expression call sites. Compare reports that delta
-  rather than concealing it.
+  name or declaration identifier that collides with a builtin name is
+  token-scanned as a builtin call by Legacy, while AST inspects expression call
+  sites. For example `default { llSay() { } }` is an error under Legacy and
+  clean under AST. Compare reports that delta rather than concealing it.
+- Without preprocessing, a raw `#define` reports `LEX000` under both engines;
+  Legacy additionally emits `SEM012` for `define` and the macro name, while AST
+  does not.
 - Parser/lexer recovery diagnostics are not part of the Compare report, which
   covers SEM001–SEM023 only; parser/lexer parity is not claimed.
 
 **Suppression before the rendered cap (`2c0e9f5`).** The CLI now applies
-`disable` filtering before evaluating the rendered-diagnostic cap. A disabled
+`disable` filtering before evaluating the rendered-diagnostic cap on unit-based
+runs of every engine, including explicit Legacy with `--preprocess`. A disabled
 noisy rule therefore cannot fill the budget and manufacture a terminal `PRE039`
 for an otherwise clean display; the cap applies to what is actually rendered.
-The frozen `AnalysisUnit::analyze()`/`AnalysisRun::analyze()` entry points still
-apply no suppression, preserving their Legacy cap behavior.
+The direct plain-Legacy path has no rendered cap, so this change does not alter
+its diagnostics. The frozen `AnalysisUnit::analyze()`/`AnalysisRun::analyze()`
+entry points still apply no suppression, preserving their Legacy cap behavior.
 
 **Golden baseline provenance.** `tests/golden/ast/` was captured by Slice 0
 `fd4a509` from the unmodified base binary at
@@ -3522,30 +3541,32 @@ both the default invocation and `--engine ast`, and asserts they are identical.
 The Legacy goldens in `tests/legacy_golden.rs` remain the byte-exact oracle for
 explicit Legacy, captured from base `4dd01ca16539e6944a6714f133e9d2636adb6a95`.
 Phase 6H Slice 0 added the separate `tests/golden/ast/` tree; no existing Legacy
-golden was modified, and Slices 1–2 made no further changes under
+golden was modified, and Slices 1–2b made no further changes under
 `tests/golden/**`.
 
 **Validation evidence (final working-tree run).**
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 829 passed, 0 failed.
-- `cargo test --release --all-targets --all-features` → exit 0, 829 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 829 passed.
+- `cargo test --all-targets --all-features` → exit 0, 832 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 832 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 832 passed.
 - `cargo test --test ast_golden` → exit 0, 6 passed.
 - `cargo test --test legacy_golden` → exit 0, 3 passed.
+- `cargo test --test cap_suppression` → exit 0, 9 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
   → 9 tests OK.
 - `python3 scripts/test_documentation.py` → 6 tests OK.
 - `git diff --check` → exit 0.
 
-**Boundary.** Phase 6H Slice 2 is documentation and test hardening only. It
-changes Markdown documentation, the `src/main.rs` module comment, and
-`tests/{cap_suppression,cli,analysis_engine_api,corpus}.rs`. It does not change
-SEM rules, the parser, the lexer, the preprocessor, `SourceMap`, the comparator,
-or exit-code semantics; it adds no dependencies and no production
-`unwrap`/`expect`/panic. MSRV remains Rust 1.75.
+**Boundary.** Phase 6H Slice 2 and Slice 2b are documentation and test hardening
+only. They change Markdown documentation, the `src/main.rs` module comment, and
+`tests/{cap_suppression,cli,analysis_engine_api,corpus}.rs`; Slice 2b also edits
+the provenance prose in `tests/golden/ast/PROVENANCE.md` without changing any
+golden artifact byte. They do not change SEM rules, the parser, the lexer, the
+preprocessor, `SourceMap`, the comparator, or exit-code semantics; they add no
+dependencies and no production `unwrap`/`expect`/panic. MSRV remains Rust 1.75.
 
 ---
 

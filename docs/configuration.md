@@ -53,12 +53,25 @@ even though the Rust signatures are unchanged.
   diagnostics per unit plus the invocation-wide limit; overflow appends a
   terminal `PRE039` and exits 1. Explicit Legacy without preprocessing remains
   uncapped.
-- Diagnostics read from stdin are labelled `<stdin>` under AST and `-` under
-  Legacy.
+- Unit-based runs of every engine, including `--engine legacy --preprocess`,
+  apply display suppression before the rendered-diagnostic cap, so disabling a
+  rule can avoid a terminal `PRE039`.
+- The stdin label follows the preparation path, not the engine: unit-based runs
+  (default AST, explicit `--engine ast`/`--engine compare`, and any preprocessed
+  run including `--engine legacy --preprocess`) render `<stdin>`; only the
+  direct plain-Legacy path (preprocessing off) renders `-`.
 - Firestorm `switch` statements are accepted by AST when the switches gate is
   enabled; explicit Legacy rejects them.
+- An event or declaration identifier that collides with a builtin name is a
+  Legacy-only `SEM002` error; `default { llSay() { } }` is an error under Legacy
+  and clean under AST.
+- Without preprocessing, a raw `#define` reports `LEX000` under both engines;
+  Legacy also emits `SEM012` for `define` and the macro name, while AST does not.
 - Diagnostic ordering follows each engine's pass order, so AST and Legacy can
   order the same findings differently. Neither stream is globally sorted.
+
+The SEM002 and `#define` differences are accepted AST/Legacy deltas analyzed in
+the [Phase 6H implementation record](architecture/preprocessor-ast.md#phase-6h-implementation-record).
 
 ## Examples
 

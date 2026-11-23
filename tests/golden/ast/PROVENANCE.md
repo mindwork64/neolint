@@ -23,6 +23,12 @@ captures themselves wrote only into the ignored `target/` scratch area, so the
 worktree stayed clean while the goldens were produced. The verified scratch
 results were then copied verbatim into `tests/golden/ast/`.
 
+The recorded binary SHA-256 is **environment-specific**: Rust binaries embed
+build paths and other host/toolchain-dependent data, so rebuilding the same
+source in another environment normally produces a different hash. The
+reproducible evidence is the behavioral artifact digests (and the input fixture
+digests), not the binary hash.
+
 ## Exact capture commands
 
 Run from the repository root, with the base binary and a scratch output tree:

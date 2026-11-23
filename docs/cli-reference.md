@@ -26,7 +26,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 
 Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
 
-Without preprocessing flags, the default AST path uses identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map, but macros and includes are not expanded and Firestorm extension gates stay off. Only explicit `--engine legacy` without preprocessing keeps the historical direct Legacy path, whose diagnostics are unchanged from previous releases. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
+Without preprocessing flags, the default AST path uses identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map, but macros and includes are not expanded and Firestorm extension gates stay off. Only explicit `--engine legacy` without preprocessing keeps the historical direct Legacy path, whose diagnostics are unchanged from previous releases. Unit-based runs of every engine, including `--engine legacy --preprocess`, apply display suppression before the rendered-diagnostic cap, so disabling a rule can avoid a terminal `PRE039`. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
 
 `--tokens` cannot be combined with `--format json`; that combination exits with code 2.
 
@@ -41,17 +41,25 @@ historical engine add `engine = legacy` to the configuration file or pass
 | Engine | Behavior |
 | --- | --- |
 | `ast` | Default on the experimental Phase 6H branch. The independent typed-AST parser and AST semantic analyzer. Without preprocessing, input is identity-prepared and the unit-based caps can append a terminal `PRE039`. |
-| `legacy` | Explicit rollback engine. The frozen Legacy lexer/parser/semantic pipeline. Output is unchanged from previous releases. Without preprocessing it uses the uncapped direct plain-Legacy path. |
+| `legacy` | Explicit rollback engine. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from previous releases. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 Without `--preprocess`, `ast` (the default) and `compare` use identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map. Identity preparation is not preprocessing; macros and includes are not expanded. With `--preprocess` (or `--dialect firestorm`), every engine uses the full preprocessor and dialect.
 
 Engine-visible differences on the same input:
 
-- stdin diagnostics use the label `<stdin>` under AST and `-` under Legacy.
+- The stdin label follows the preparation path, not the engine: unit-based runs
+  (default AST, explicit `--engine ast`/`--engine compare`, and any preprocessed
+  run including `--engine legacy --preprocess`) render `<stdin>`. Only the
+  direct plain-Legacy path (explicit Legacy with preprocessing off) renders `-`.
 - Firestorm `switch` statements are parsed by AST when the switches gate is enabled; explicit Legacy rejects them as unsupported syntax.
 - The default no-preprocess AST run is unit-based and capped at 10,000 rendered diagnostics; overflow ends with a terminal `PRE039`. Explicit no-preprocess Legacy is uncapped.
+- An event or declaration identifier that collides with a builtin name is a Legacy-only `SEM002` error; for example `default { llSay() { } }` is an error under Legacy and clean under AST.
+- Without preprocessing, a raw `#define` reports `LEX000` under both engines; Legacy also emits `SEM012` for `define` and the macro name, while AST does not.
 - Diagnostic order follows each engine's own pass order. AST order can differ from Legacy order; neither stream is globally sorted.
+
+The SEM002 and `#define` differences are accepted AST/Legacy deltas analyzed in
+the [Phase 6H implementation record](architecture/preprocessor-ast.md#phase-6h-implementation-record).
 
 In `compare` mode, stdout keeps the existing human/JSON diagnostic schema and contains only the Legacy display stream. The AST semantic stream is not merged into user output. The comparison report always goes to stderr, one deterministic section per unit in unit order, and includes per-rule counts plus bounded exact missing/extra fingerprints. With `--format json`, stdout remains the existing diagnostics array. On a successful run stderr receives a single JSON object: `{"engine":"compare","units":[…],"matched":true|false}`. Consumers must gate on the exit status: per-unit prepare or analyze failures print `neolint: …` error lines before the report, and the report is absent only on early fatal CLI/config/input failures or when no comparison ran. Stderr is therefore not guaranteed to be pure JSON.
 
