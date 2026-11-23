@@ -345,6 +345,10 @@ fn comparison_completeness_flag_is_bound_aware() {
     let report = compare_semantic_diagnostics(&at_bound, &at_bound[..1]);
     assert!(report.comparison_complete);
     assert!(!report.matched);
+    assert!(
+        report.details_truncated,
+        "a 99,999-element delta must be reported as truncated"
+    );
     assert_eq!(
         rule(&report, "SEM001").missing_total,
         Some(MAX_COMPARE_FINGERPRINTS_PER_ENGINE - 1)
@@ -425,6 +429,117 @@ fn fingerprint_budget_counts_only_sem_diagnostics() {
     assert_eq!(rule(&report, "SEM001").legacy_count, 1);
     assert_eq!(rule(&report, "SEM001").missing_total, Some(0));
     assert_eq!(rule(&report, "SEM001").extra_total, Some(0));
+}
+
+#[test]
+fn fingerprint_budget_applies_to_the_total_across_rules() {
+    let half = MAX_COMPARE_FINGERPRINTS_PER_ENGINE / 2;
+
+    // Two buckets each stay below the per-engine limit, but their sum does not;
+    // the budget is on the total SEM fingerprint count.
+    let mut over = vec![diagnostic("SEM001"); half + 1];
+    over.extend(vec![diagnostic("SEM002"); half + 1]);
+    assert_eq!(over.len(), MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 2);
+    let report = compare_semantic_diagnostics(&over, &[]);
+    assert!(!report.comparison_complete);
+    assert!(!report.matched);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 2);
+    assert_eq!(rule(&report, "SEM001").legacy_count, half + 1);
+    assert_eq!(rule(&report, "SEM002").legacy_count, half + 1);
+    assert_eq!(rule(&report, "SEM001").missing_total, None);
+    assert_eq!(rule(&report, "SEM002").missing_total, None);
+
+    // Exactly at the summed limit remains a performed comparison.
+    let mut at_bound = vec![diagnostic("SEM001"); half];
+    at_bound.extend(vec![diagnostic("SEM002"); half]);
+    assert_eq!(at_bound.len(), MAX_COMPARE_FINGERPRINTS_PER_ENGINE);
+    let report = compare_semantic_diagnostics(&at_bound, &at_bound);
+    assert!(report.comparison_complete);
+    assert!(report.matched);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE);
+    assert_eq!(rule(&report, "SEM001").missing_total, Some(0));
+    assert_eq!(rule(&report, "SEM002").extra_total, Some(0));
+}
+
+#[test]
+fn fingerprint_budget_ignores_non_sem_ast_stream() {
+    let lexical = Diagnostic::lexical("LEX001", "bad", span(0, 1));
+    let mut ast = vec![lexical; MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+    ast.push(diagnostic("SEM001"));
+    let legacy = vec![diagnostic("SEM001")];
+
+    let report = compare_semantic_diagnostics(&legacy, &ast);
+    assert!(
+        report.comparison_complete,
+        "a large non-SEM AST stream must not trip the fingerprint budget"
+    );
+    assert!(report.matched, "{report:?}");
+    assert_eq!(report.legacy_count, 1);
+    assert_eq!(report.ast_count, 1);
+    assert_eq!(rule(&report, "SEM001").ast_count, 1);
+    assert_eq!(rule(&report, "SEM001").missing_total, Some(0));
+    assert_eq!(rule(&report, "SEM001").extra_total, Some(0));
+}
+
+#[test]
+fn duplicate_multiplicity_beyond_the_detail_cap_stays_exact() {
+    let a = diagnostic("SEM001");
+    let legacy = vec![a.clone(); 100];
+    let ast = vec![a; 10];
+    let report = compare_semantic_diagnostics(&legacy, &ast);
+    let sem001 = rule(&report, "SEM001");
+    assert_eq!(sem001.legacy_count, 100);
+    assert_eq!(sem001.ast_count, 10);
+    assert_eq!(sem001.missing_total, Some(90));
+    assert_eq!(sem001.extra_total, Some(0));
+    assert_eq!(sem001.missing_from_ast.len(), MAX_COMPARE_DETAILS_PER_RULE);
+    assert!(report.details_truncated);
+    assert!(!report.matched);
+}
+
+#[test]
+fn incomplete_report_keeps_per_rule_counts_exact() {
+    let mut input = vec![diagnostic("SEM001"); MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+    input.extend(vec![diagnostic("SEM023"); 5]);
+
+    let report = compare_semantic_diagnostics(&input, &[]);
+    assert!(!report.comparison_complete);
+    assert!(!report.matched);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 6);
+    assert_eq!(
+        rule(&report, "SEM001").legacy_count,
+        MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1
+    );
+    assert_eq!(rule(&report, "SEM023").legacy_count, 5);
+    assert_eq!(rule(&report, "SEM001").ast_count, 0);
+    assert_eq!(rule(&report, "SEM023").ast_count, 0);
+    for rule in &report.by_rule {
+        assert_eq!(rule.missing_total, None, "{}", rule.code);
+        assert_eq!(rule.extra_total, None, "{}", rule.code);
+    }
+}
+
+#[test]
+fn near_miss_codes_are_not_compared_or_budgeted() {
+    let near_misses = ["SEM01", "SEM0001", "sem001", "SEM024"];
+    let input: Vec<Diagnostic> = (0..=MAX_COMPARE_FINGERPRINTS_PER_ENGINE)
+        .map(|index| diagnostic(near_misses[index % near_misses.len()]))
+        .collect();
+
+    let report = compare_semantic_diagnostics(&input, &[]);
+    assert!(
+        report.comparison_complete,
+        "near-miss codes must not trip the SEM fingerprint budget"
+    );
+    assert!(report.matched);
+    assert_eq!(report.legacy_count, 0);
+    assert_eq!(report.ast_count, 0);
+    assert!(report.by_rule.iter().all(|rule| {
+        rule.legacy_count == 0
+            && rule.ast_count == 0
+            && rule.missing_total == Some(0)
+            && rule.extra_total == Some(0)
+    }));
 }
 
 #[test]

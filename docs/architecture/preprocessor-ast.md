@@ -2147,8 +2147,11 @@ are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 
 Requirements:
 
-- Exceeding a limit produces a single, specific `PRE`/`AST` diagnostic and stops
-  the affected expansion; the rest of the unit continues.
+- Exceeding a preprocessor or AST limit produces a single, specific `PRE`/`AST`
+  diagnostic and stops the affected expansion; the rest of the unit continues.
+  The compare fingerprint budget is different: it emits no diagnostic at all.
+  It marks the comparison incomplete (`comparison_complete = false`) and the
+  Compare CLI then exits 3 instead of claiming parity.
 - The 100,000-fingerprint compare budget is checked by a cheap `[usize; 23]`
   counting pass **before** any fingerprint is materialised. It counts only
   `SEM001`..=`SEM023`, so a long stream of `LEX`/`PAR`/`PRE` findings never

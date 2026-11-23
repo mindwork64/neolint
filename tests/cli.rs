@@ -1226,6 +1226,29 @@ fn compare_exit_codes_follow_mismatch_and_failure_precedence() {
         stderr.contains("rule SEM002: legacy=1 ast=0 missing=1 extra=0"),
         "{stderr}"
     );
+    let nonzero_rule_deltas: std::collections::BTreeSet<String> = stderr
+        .lines()
+        .filter_map(|line| {
+            let (_, after_rule) = line.split_once(" rule ")?;
+            let (code, fields) = after_rule.split_once(':')?;
+            if !code.starts_with("SEM") {
+                return None;
+            }
+            let field_value = |name: &str| {
+                fields
+                    .split_whitespace()
+                    .find_map(|field| field.strip_prefix(name))
+            };
+            let missing = field_value("missing=")?;
+            let extra = field_value("extra=")?;
+            (missing != "0" || extra != "0").then(|| code.to_owned())
+        })
+        .collect();
+    assert_eq!(
+        nonzero_rule_deltas,
+        ["SEM002".to_owned()].into_iter().collect(),
+        "the documented fixture divergence must be exactly SEM002: {stderr}"
+    );
     assert!(
         stderr.contains("missing SEM002 error semantic message="),
         "{stderr}"

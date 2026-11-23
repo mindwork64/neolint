@@ -680,13 +680,10 @@ fn compare_report_human(reports: &[CompareUnitReport]) -> String {
             item.report.ast_count
         );
         for rule in &item.report.by_rule {
-            // An unknown total is never rendered as `0`; such rules are only
-            // skipped when neither engine reported a finding for them.
-            if rule.legacy_count == 0
-                && rule.ast_count == 0
-                && rule.missing_total.unwrap_or(0) == 0
-                && rule.extra_total.unwrap_or(0) == 0
-            {
+            // Zero counts on both sides prove a zero delta in both the complete
+            // and incomplete paths, so those rules carry nothing to render. No
+            // unknown (`None`) total is ever coerced to a number here.
+            if rule.legacy_count == 0 && rule.ast_count == 0 {
                 continue;
             }
             let _ = writeln!(
