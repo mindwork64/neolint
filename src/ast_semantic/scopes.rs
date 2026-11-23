@@ -62,6 +62,13 @@ pub struct ScopeTree {
     root: ScopeId,
     block_scopes: HashMap<(usize, usize), ScopeId>,
     switch_scopes: HashMap<(usize, usize), ScopeId>,
+    /// Per-scope name index: spelling -> symbol indices ordered by declaration start.
+    ///
+    /// Derived from `scopes` and therefore never changes the observable result;
+    /// it turns the per-use linear scan over one scope into a hash lookup plus a
+    /// binary search, which keeps resolution near O(log n) instead of O(n) per
+    /// use when a scope holds many declarations.
+    name_index: Vec<HashMap<String, Vec<u32>>>,
 }
 
 impl ScopeTree {
@@ -75,6 +82,7 @@ impl ScopeTree {
             root: ScopeId(0),
             block_scopes: HashMap::new(),
             switch_scopes: HashMap::new(),
+            name_index: vec![HashMap::new()],
         };
         for item in &ast.items {
             match item {
@@ -129,6 +137,21 @@ impl ScopeTree {
                     }
                 }
                 TopLevel::Error(_) => {}
+            }
+        }
+        // Guarantee the index invariant even if a future registration path adds
+        // bindings out of source order: ordering by declaration start is what the
+        // lookup binary search relies on.
+        for scope_index in 0..tree.scopes.len() {
+            let starts: Vec<usize> = tree.scopes[scope_index]
+                .symbols
+                .iter()
+                .map(|symbol| symbol.span.start)
+                .collect();
+            if let Some(by_name) = tree.name_index.get_mut(scope_index) {
+                for indices in by_name.values_mut() {
+                    indices.sort_by_key(|&index| starts[index as usize]);
+                }
             }
         }
         tree
@@ -186,12 +209,20 @@ impl ScopeTree {
     ) -> Option<&Symbol> {
         loop {
             let current = self.scope(scope)?;
-            if let Some(symbol) = current.symbols.iter().rev().find(|item| {
-                item.name == name
-                    && item.kind != SymbolKind::Function
-                    && item.span.start <= use_offset
-            }) {
-                return Some(symbol);
+            if let Some(indices) = self.name_index.get(scope.0).and_then(|map| map.get(name)) {
+                // Symbols are ordered by declaration start, so the last binding
+                // visible at `use_offset` is the declaration-order-correct one.
+                let visible = indices.partition_point(|&index| {
+                    current.symbols[index as usize].span.start <= use_offset
+                });
+                // Functions are not value bindings: skip over any same-named
+                // function rather than stopping at it, matching the previous scan.
+                for &index in indices[..visible].iter().rev() {
+                    let symbol = &current.symbols[index as usize];
+                    if symbol.kind != SymbolKind::Function {
+                        return Some(symbol);
+                    }
+                }
             }
             scope = current.parent?;
         }
@@ -204,7 +235,13 @@ impl ScopeTree {
     pub fn lookup(&self, mut scope: ScopeId, name: &str) -> Option<&Symbol> {
         loop {
             let current = self.scope(scope)?;
-            if let Some(symbol) = current.symbols.iter().rev().find(|item| item.name == name) {
+            if let Some(symbol) = self
+                .name_index
+                .get(scope.0)
+                .and_then(|map| map.get(name))
+                .and_then(|indices| indices.last())
+                .map(|&index| &current.symbols[index as usize])
+            {
                 return Some(symbol);
             }
             scope = current.parent?;
@@ -217,6 +254,7 @@ impl ScopeTree {
             parent: Some(parent),
             symbols: Vec::new(),
         });
+        self.name_index.push(HashMap::new());
         id
     }
 
@@ -229,6 +267,7 @@ impl ScopeTree {
         span: crate::diagnostic::Span,
     ) {
         if let Some(target) = self.scopes.get_mut(scope.0) {
+            let index = target.symbols.len() as u32;
             target.symbols.push(Symbol {
                 name: name.to_owned(),
                 type_name,
@@ -236,6 +275,9 @@ impl ScopeTree {
                 span,
                 scope,
             });
+            if let Some(by_name) = self.name_index.get_mut(scope.0) {
+                by_name.entry(name.to_owned()).or_default().push(index);
+            }
         }
     }
 
@@ -381,4 +423,82 @@ pub fn symbol_counts(scope: &Scope) -> HashMap<&str, usize> {
 
 fn block_key(block: &Block) -> (usize, usize) {
     (block.span.start, block.span.end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::parse_ast;
+    use crate::lex;
+
+    fn tree_for(source: &str) -> ScopeTree {
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast(&tokens);
+        assert!(syntax.is_empty(), "{syntax:?}");
+        ScopeTree::build(&ast)
+    }
+
+    /// Reference implementation of the pre-index linear scan.
+    fn naive_value_at<'a>(
+        tree: &'a ScopeTree,
+        mut scope: ScopeId,
+        name: &str,
+        offset: usize,
+    ) -> Option<&'a Symbol> {
+        loop {
+            let current = tree.scope(scope)?;
+            if let Some(symbol) = current.symbols.iter().rev().find(|item| {
+                item.name == name && item.kind != SymbolKind::Function && item.span.start <= offset
+            }) {
+                return Some(symbol);
+            }
+            scope = current.parent?;
+        }
+    }
+
+    fn naive_lookup<'a>(tree: &'a ScopeTree, mut scope: ScopeId, name: &str) -> Option<&'a Symbol> {
+        loop {
+            let current = tree.scope(scope)?;
+            if let Some(symbol) = current.symbols.iter().rev().find(|item| item.name == name) {
+                return Some(symbol);
+            }
+            scope = current.parent?;
+        }
+    }
+
+    #[test]
+    fn name_index_matches_the_linear_scan_for_every_binding_and_offset() {
+        let sources = [
+            "integer value;\nfunction_name() { }\ndefault { state_entry() { integer value; value = 1; } }",
+            "integer a;\ndefault { state_entry() { { integer a; a = 1; } a = 2; } }",
+            "default { state_entry() { integer v; v = 1; { integer v; v = 2; { integer v; v = 3; } } } }",
+            "integer g;\ninteger helper(integer g) { integer local; local = g; return local; }\ndefault { state_entry() { g = helper(g); } }",
+            "integer x;\ninteger x;\ndefault { state_entry() { integer x; x = 1; } }",
+        ];
+        for source in sources {
+            let tree = tree_for(source);
+            for scope_index in 0..tree.scopes().len() {
+                let scope = ScopeId(scope_index);
+                let names: Vec<String> = tree
+                    .scope(scope)
+                    .map(|current| current.symbols.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
+                for name in names {
+                    assert_eq!(
+                        tree.lookup(scope, &name).map(|s| (s.span.start, s.scope)),
+                        naive_lookup(&tree, scope, &name).map(|s| (s.span.start, s.scope)),
+                        "lookup disagreed for {name:?} in scope {scope_index}"
+                    );
+                    for offset in 0..=source.len() {
+                        assert_eq!(
+                            tree.lookup_value_at(scope, &name, offset).map(|s| (s.span.start, s.scope)),
+                            naive_value_at(&tree, scope, &name, offset).map(|s| (s.span.start, s.scope)),
+                            "lookup_value_at disagreed for {name:?} at {offset} in scope {scope_index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
