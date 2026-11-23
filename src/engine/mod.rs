@@ -225,15 +225,14 @@ impl RunEngineAnalysis {
     /// Returns `true` when the engine produced no comparison reports
     /// ([`AnalysisEngine::Legacy`] or [`AnalysisEngine::Ast`]), including an
     /// empty run. For [`AnalysisEngine::Compare`], returns `true` only when
-    /// every unit's [`EngineComparisonReport::matched`] and
-    /// [`EngineComparisonReport::comparison_complete`] are both `true`. An
-    /// incomplete report (`comparison_complete == false`) is never matched even
+    /// every unit's [`EngineComparisonReport::is_parity`] is `true`. An
+    /// incomplete report (`comparison_complete == false`) is never parity even
     /// if an inconsistent report sets `matched`, so it makes this return
     /// `false`. This is the parity signal for exit-code decisions.
     pub fn all_matched(&self) -> bool {
         self.comparisons
             .iter()
-            .all(|comparison| comparison.report.matched && comparison.report.comparison_complete)
+            .all(|comparison| comparison.report.is_parity())
     }
 }
 

@@ -609,9 +609,7 @@ fn run_units(
     let all_matched = !input_failed
         && analyzed_units == expected_units
         && reports.len() == expected_units
-        && reports
-            .iter()
-            .all(|item| item.report.matched && item.report.comparison_complete);
+        && reports.iter().all(|item| item.report.is_parity());
     if engine == AnalysisEngine::Compare {
         print_compare_report(&reports, format, all_matched);
     }

@@ -153,6 +153,17 @@ pub struct EngineComparisonReport {
     pub by_rule: Vec<RuleComparison>,
 }
 
+impl EngineComparisonReport {
+    /// Whether this report asserts full semantic parity.
+    ///
+    /// This is the exit-code parity signal. Both [`Self::matched`] and
+    /// [`Self::comparison_complete`] must be true; an incomplete comparison is
+    /// never parity, even if an inconsistent report sets `matched`.
+    pub fn is_parity(&self) -> bool {
+        self.matched && self.comparison_complete
+    }
+}
+
 fn sem_index(code: &str) -> Option<usize> {
     SEM_CODES.binary_search(&code).ok()
 }
@@ -378,5 +389,26 @@ mod tests {
         assert!(report.matched);
         assert_eq!(report.legacy_count, 0);
         assert_eq!(report.ast_count, 0);
+    }
+
+    #[test]
+    fn is_parity_requires_matched_and_complete() {
+        for (matched, comparison_complete) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let report = EngineComparisonReport {
+                matched,
+                comparison_complete,
+                details_truncated: false,
+                legacy_count: 0,
+                ast_count: 0,
+                by_rule: Vec::new(),
+            };
+            assert_eq!(
+                report.is_parity(),
+                matched && comparison_complete,
+                "matched={matched}, comparison_complete={comparison_complete}"
+            );
+        }
     }
 }

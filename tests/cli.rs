@@ -848,8 +848,9 @@ const ERROR_SOURCE: &str = "default { state_entry() { llOwnerSay(42); } }\n";
 const DISC_SOURCE: &str = "default { llSay() { } }\n";
 // Deliberately corrupted input: an unbalanced `while (i < n(` condition, a
 // function that can reach its end without returning, and an event named
-// `llSay`. The SEM002 divergence is parser-recovery behavior on invalid input,
-// not a parity defect.
+// `llSay`. Its only cross-engine divergence is the event-header SEM002 delta;
+// SEM011 and the syntax findings agree. This is not a parser-recovery artifact
+// and not a parity defect.
 const MISMATCH_SOURCE: &str = "integer i;\ninteger n;\ninteger f() {\n}\ndefault {\n    llSay() {\n        while (i < n( {\n    }\n}\n";
 const FIRESTORM_SIMPLE: &str =
     "#define USE_SWITCHES\ndefault { state_entry() { llOwnerSay(\"ok\"); } }\n";

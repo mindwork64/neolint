@@ -3312,32 +3312,39 @@ JSON stdout compatibility, exit 0/1/2/3 precedence, multi-file and directory
 report order, and single-lex token parity. Slice 2b adds config-before-report,
 AST/Compare invocation-cap, help, legacy-override, prepared-token, and
 identity-byte coverage, plus incomplete-vs-truncated, every-code and absolute-limit
-engine tests. One exit-3 fixture is deliberately
-corrupted input (`while (i < n( {` plus an unterminated non-returning function
-and an event named `llSay`); that SEM002 divergence is recovery behavior on
-invalid input, not a parity defect. Divergence also occurs on accepted input: a
-declaration identifier that collides with a builtin name (for example
-`default { llSay() { } }`) yields a Legacy-only SEM002, because Legacy scans the
-event header as a builtin call while AST only inspects expression call sites.
-The differential corpus does not contain that collision, so the rule matrix's
-`exact` status remains corpus-relative; Compare reports the genuine delta.
+engine tests. Slice 2c adds the shared `is_parity()` predicate and pins its four
+combinations. The exit-3 fixture is deliberately corrupted input
+(`while (i < n( {` plus an unterminated non-returning function and an event
+named `llSay`); its only divergence is the same event-header `SEM002` delta,
+while its other findings (for example `SEM011` for the non-returning function)
+agree across engines. The same delta occurs on fully accepted input
+(`default { llSay() { } }`): Legacy token-scans the event header as a builtin
+call while AST only inspects expression call sites. It is therefore a Legacy/AST
+divergence in builtin-call detection, not a parser-recovery artifact and not a
+parity defect introduced here. The differential corpus does not contain that
+collision, so the rule matrix's `exact` and `Known differences` cells remain
+corpus-relative; Compare reports the genuine delta.
 
 **Validation evidence (final working-tree run).**
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 788 passed, 0 failed.
-- `cargo test --release --all-targets --all-features` → exit 0, 788 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 788 passed.
+- `cargo test --all-targets --all-features` → exit 0, 789 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 789 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 789 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
   → 9 tests OK.
 - `python3 scripts/test_documentation.py` → 6 tests OK.
 - `git diff --check` → exit 0.
 
-**Boundary.** No AST parser/semantic rule, engine, source, pipeline, lexer,
-diagnostic, or preprocessor module changed in this slice. Parser/lexer parity is
-still not claimed; Compare covers SEM001–SEM023 only.
+**Boundary.** Phase 6G added `src/engine/{mod,compare,wiring}.rs` and made
+additive changes to `src/source/unit.rs`, `src/pipeline.rs`, and `src/lib.rs`;
+it also wired `src/config.rs`, `src/main.rs`, docs, and tests. It deliberately did
+not change `src/parser.rs`, `src/semantic.rs`, `src/lexer.rs`,
+`src/diagnostic/**`, `src/preprocessor/**`, `src/ast/**`, or any AST rule module;
+no SEM001–SEM023 logic, message, span, severity or kind changed. Parser/lexer
+parity is still not claimed; Compare covers SEM001–SEM023 only.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
