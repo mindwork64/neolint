@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const MIGRATED: &[&str] = &[
     "SEM001", "SEM002", "SEM003", "SEM004", "SEM005", "SEM006", "SEM007", "SEM008", "SEM009",
     "SEM010", "SEM011", "SEM012", "SEM013", "SEM014", "SEM015", "SEM016", "SEM017", "SEM018",
-    "SEM019", "SEM020", "SEM021",
+    "SEM019", "SEM020", "SEM021", "SEM022", "SEM023",
 ];
 
 type Normalized = (
@@ -99,7 +99,7 @@ fn visit_lsl(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn corpus_twenty_one_migrated_rules_match_legacy_exactly() {
+fn corpus_twenty_three_migrated_rules_match_legacy_exactly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut files = Vec::new();
     visit_lsl(&root, &mut files);
@@ -1988,4 +1988,145 @@ fn sem013_preserves_source_order_for_nested_calls() {
     assert_eq!(deprecated.len(), 2, "{diagnostics:?}");
     assert!(deprecated[0].span.start <= deprecated[1].span.start);
     assert_parity(&source);
+}
+
+#[test]
+fn focused_final_rule_parity() {
+    for source in [
+        "default { state_entry() { state missing; } }",
+        "default { state_entry() { state later; } } state later { }",
+        "default { state_entry() { state running; } } state running { state_entry() { state running; } }",
+        "default { state_entry() { state default; } }",
+        "default { state_entry() { state first; state second; } }",
+        "default { state_entry() { if (1) { state missing; } } }",
+        "default { state_entry() { while (1) { state missing; } } }",
+        "integer f() { state missing; return 1; } default { }",
+        "default { custom_event() { state missing; } }",
+        "default { state_entry() { state missing; }",
+        "default { state_entry() { state ; } }",
+        "default { } state incomplete { state_entry() { state missing; }",
+        "default { state_entry() { 1 == 2; } }",
+        "default { state_entry() { 1 != 2; 1 < 2; 1 <= 2; 1 > 2; 1 >= 2; } }",
+        "default { state_entry() { (1 == 2); ((1 == 2)); } }",
+        "integer f() { 1 == 2; return 1; } default { }",
+        "default { custom_event() { 1 == 2; } }",
+        "default { state_entry() { if (1) 1 == 2; else 2 == 3; } }",
+        "default { state_entry() { while (1) 1 == 2; } }",
+        "default { state_entry() { for (; 1; ) 1 == 2; } }",
+        "default { state_entry() { do 1 == 2; while (1); } }",
+        "default { state_entry() { if (1 == 2) { } return 1 == 2; } }",
+        "default { state_entry() { llOwnerSay((string)(1 == 2)); } }",
+        "integer result = (1 == 2); default { }",
+        "default { state_entry() { 1 == llOwnerSay(); } }",
+        "default { state_entry() { 1 == (2 + 3); } }",
+        "default { state_entry() { 1 == 2 && 3 == 4; } }",
+        "default { state_entry() { integer x; (x = 1) == 2; } }",
+        "default { state_entry() { integer x; x++ == 2; } }",
+        "default { state_entry() { (1 == 2) + 3; } }",
+        "default { state_entry() { integer a; integer b; a == b + ; } }",
+        "default { state_entry() { integer a; integer b; if (TRUE) a == b + ; } }",
+        "default { state_entry() { integer a; integer b; a == b; a == b + ; } }",
+        "integer f() { if (TRUE) ; else 1 == 2; } default { }",
+        "default { custom_event() { 1 == 2; state missing; } }",
+    ] {
+        assert_parity(source);
+    }
+}
+
+#[test]
+fn sem022_exact_message_and_target_span() {
+    let source = "default { state_entry() { state missing; } }";
+    let target = source.find("missing").unwrap();
+    assert_eq!(
+        migrated(&semantic(source))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected(
+            "SEM022",
+            "state target 'missing' is not defined; add that state or use state default".to_owned(),
+            source,
+            target,
+            "missing".len()
+        )]
+    );
+}
+
+#[test]
+fn sem023_exact_warning_operator_span() {
+    let source = "default { state_entry() { integer a; integer b; a == b; } }";
+    let operator = source.find("==").unwrap();
+    assert_eq!(
+        migrated(&semantic(source)).into_iter().cloned().collect::<Vec<_>>(),
+        vec![expected_warning(
+            "SEM023",
+            neolint::DiagnosticKind::Lint,
+            "comparison result is discarded; use '=' for assignment or use the comparison in a condition".to_owned(),
+            source,
+            operator,
+            2
+        )]
+    );
+}
+
+#[test]
+fn sem023_statement_local_syntax_suppression() {
+    let source = "default { state_entry() { integer a; integer b; a == b + ; } }";
+    assert!(!semantic(source)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SEM023"));
+    assert_parity(source);
+
+    let source = "default { state_entry() { integer a; integer b; a == b; a == b + ; } }";
+    assert_eq!(
+        semantic(source)
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM023")
+            .count(),
+        1
+    );
+    assert_parity(source);
+}
+
+#[test]
+fn firestorm_switch_arms_receive_sem023() {
+    use neolint::ast::{parse_ast_with_options, AstParseOptions};
+    let source = "default { state_entry() { integer a; integer b; switch (1) { case 1: { a == b; } break; } } }";
+    let (tokens, lexical) = lex(source);
+    assert!(lexical.is_empty());
+    let (ast, syntax) =
+        parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+    assert!(syntax.is_empty(), "{syntax:?}");
+    let diagnostics = analyze_ast(&ast, &syntax);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM023")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn sem023_scans_closed_nested_blocks_inside_unclosed_outer_bodies() {
+    for source in [
+        "integer f() { if (TRUE) { integer a; integer b; a == b; }",
+        "default { state_entry() { if (TRUE) { integer a; integer b; a == b; }",
+    ] {
+        let tokens = lex(source).0;
+        let syntax = parse_legacy(&tokens);
+        let legacy = analyze_with_syntax_diagnostics(&tokens, &syntax);
+        let (ast, ast_syntax) = parse_ast(&tokens);
+        let ast_diagnostics = analyze_ast(&ast, &ast_syntax);
+        let legacy_sem023: Vec<_> = legacy.iter().filter(|item| item.code == "SEM023").collect();
+        let ast_sem023: Vec<_> = ast_diagnostics
+            .iter()
+            .filter(|item| item.code == "SEM023")
+            .collect();
+        assert_eq!(legacy_sem023.len(), 1, "{source}: {legacy:#?}");
+        assert_eq!(ast_sem023.len(), 1, "{source}: {ast_diagnostics:#?}");
+        assert_eq!(legacy_sem023[0].span, ast_sem023[0].span);
+        assert_parity(source);
+    }
 }
