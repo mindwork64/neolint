@@ -10,8 +10,12 @@ records verified state.
   experimental branch and open as PR [#112](https://github.com/mindwork64/neolint/pull/112),
   not merged.**
 - Branch: `exp-preprocessor-ast-phase-08-stabilization`.
-- Tested PR head: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
 - Integration base: `66936b0e175d51cba8d83377061229869ef64e96` (`exp/preprocessor-ast`).
+- Benchmark evidence artifact snapshot: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
+- Benchmark harness capture source: `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`
+  (tree `8264d70e02802de0fe57e4d49e2a662c8086eeef`, clean worktree).
+- Latest full CI gate baseline before this checkpoint-only correction:
+  PR head `efd6349b551fd366bc943eda292573ddac1c8566`.
 - Stable `main`: `98556e21e175190c95f2da39fc0e2ba7a8d9544c` — frozen and unchanged.
 - AST is the default engine **only on the experimental branch**. Legacy remains
   selectable (`--engine legacy`) and unchanged; Compare remains opt-in and compares
@@ -33,12 +37,13 @@ display (10,000 per unit and per invocation, terminal `PRE039`).
 ## Verified gates
 
 Rust sources are unchanged since `0ea4a604d309aa65b83a0793ee7e8ffa9e2de8e6`
-(tree `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4`); every commit after it touches
-only `bench/`, `scripts/` and docs. CI on the tested head `4a73292` is green:
-[45286936785](https://github.com/mindwork64/neolint/actions/runs/45286936785)
-(pull_request) and [45286929926](https://github.com/mindwork64/neolint/actions/runs/45286929926)
-(push), with formatting, Clippy, debug tests, release tests, rustdoc, MSRV 1.75,
-metadata/documentation tests and whitespace steps all successful.
+(tree `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4`); every later commit touches
+only `bench/`, `scripts/` and docs. The full gate is green on PR head
+`efd6349b551fd366bc943eda292573ddac1c8566`:
+[45288202923](https://github.com/mindwork64/neolint/actions/runs/45288202923)
+(pull_request) and [45288194335](https://github.com/mindwork64/neolint/actions/runs/45288194335)
+(push), including formatting, Clippy, debug/release tests, rustdoc, MSRV 1.75,
+Python metadata/harness tests, documentation tests and whitespace.
 
 - `cargo test --all-targets --all-features`: **951 passed, 0 failed** (also 951 in
   release and on Rust 1.75).
@@ -56,9 +61,12 @@ metadata/documentation tests and whitespace steps all successful.
 - Both measured binaries were rebuilt from clean worktrees at the recorded commits
   and re-verified inside the harness (`--verify-build`): base `66936b0` →
   `83d9fce6…`, post-fix `1273c4d` → `227352d9…`.
-- Captures ran from a clean harness worktree at `a0fea1e` (tree `8264d70e…`,
-  `harness_dirty: false`); the recorded harness source digest is `babcf808…`,
-  which still matches the current tree.
+- Captures ran from a clean harness worktree at
+  `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d` (tree
+  `8264d70e02802de0fe57e4d49e2a662c8086eeef`, `harness_dirty: false`).
+  The recorded source digest is
+  `babcf808592bf1803849ff1e4313dca8f334f7964d128587230186808347efe3`,
+  independently checked against `bench/bench.py` and `bench/workloads.py`.
 - Two independent passes per binary, cross-pass signatures consistent, identical
   70-file input manifest (8,764,087 bytes).
 - Headline effects: `diagnostic_flood/default` 173.59 → 91.18 ms (**−47.5 %**) and
@@ -89,5 +97,6 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 ## Next action
 
-Review and merge decision for PR #112 is a separate authorization. Any change to
-stable `main`, v1.0.0 or Legacy retirement requires its own Issue.
+Phase 8 is scoped to the experimental integration branch `exp/preprocessor-ast`.
+Any migration to stable `main`, v1.0.0 publication or Legacy retirement requires
+a separate decision and Issue.
