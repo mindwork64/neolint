@@ -11,6 +11,9 @@ use crate::diagnostic::Span;
 use crate::source::file::{AnalysisUnitId, SourceFile, SourceId};
 use crate::source::line_index::LineIndexError;
 
+/// Maximum supported origin-parent chain length.
+pub(crate) const MAX_ORIGIN_DEPTH: usize = 64;
+
 /// A range in the prepared buffer. Fields are private; only
 /// [`PreparedSource`](crate::preprocessor::PreparedSource) creates one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -629,7 +632,7 @@ impl SourceMap {
                 .ok_or(SpanError::UnknownOriginId)?;
             self.validate_origin_spans(origin)?;
             chain.push(origin_id);
-            if chain.len() > 64 {
+            if chain.len() > MAX_ORIGIN_DEPTH {
                 return Err(SpanError::MapInvariant);
             }
             current = origin.parent;
@@ -899,7 +902,7 @@ impl SourceMapBuilder {
             if parent.index as usize >= self.origins.len() {
                 return Err(SpanError::UnknownOriginId);
             }
-            if self.origin_depth(parent) >= 64 {
+            if self.origin_depth(parent) >= MAX_ORIGIN_DEPTH {
                 return Err(SpanError::MapInvariant);
             }
         }
@@ -1063,7 +1066,7 @@ impl SourceMapBuilder {
         let mut depth = 0;
         loop {
             depth += 1;
-            if depth > 65 {
+            if depth > MAX_ORIGIN_DEPTH + 1 {
                 return depth;
             }
             let Some(origin) = self.origins.get(id.index as usize) else {
@@ -1548,6 +1551,25 @@ mod tests {
                 None
             )
             .is_ok());
+    }
+
+    #[test]
+    fn origin_chain_accepts_the_documented_depth_and_rejects_one_more() {
+        let (unit, root, files) = fixture("abcd", 0);
+        let mut builder = SourceMapBuilder::new(unit, Arc::from("abcd"), files.clone()).unwrap();
+        let span = builder.source_span(root, 0, 1).unwrap();
+        let mut parent = None;
+        for _ in 0..MAX_ORIGIN_DEPTH {
+            parent = Some(
+                builder
+                    .push_origin(OriginKind::Direct, span, None, None, parent, None)
+                    .expect("origins up to the documented depth must be accepted"),
+            );
+        }
+        let error = builder
+            .push_origin(OriginKind::Direct, span, None, None, parent, None)
+            .expect_err("one origin beyond the documented depth must fail closed");
+        assert_eq!(error, SpanError::MapInvariant);
     }
 
     #[test]

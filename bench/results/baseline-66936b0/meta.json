@@ -1,0 +1,717 @@
+{
+  "binary": "/home/eloraam/apps/neolint/target/wt-base/target/release/neolint",
+  "binary_bytes": 1659648,
+  "binary_sha256": "83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8",
+  "binary_sha256_expected": "83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8",
+  "binary_sha256_verified": true,
+  "binary_source_build_verified": true,
+  "binary_source_commit": "66936b0e175d51cba8d83377061229869ef64e96",
+  "binary_source_rebuilt_sha256": "83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8",
+  "binary_source_tree": "87d810459064f438fe61c0a632fa83642ea68971",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "cpu_count": 12,
+  "cpu_model": "AMD Ryzen 5 2600X Six-Core Processor",
+  "cross_pass_consistent": true,
+  "cross_pass_inconsistencies": [],
+  "features": "default",
+  "harness_branch": "exp-preprocessor-ast-phase-08-stabilization",
+  "harness_commit": "a0fea1ea5ce73557a8e925efc34c50528fdd6a5d",
+  "harness_dirty": false,
+  "harness_source": {
+    "combined_sha256": "babcf808592bf1803849ff1e4313dca8f334f7964d128587230186808347efe3",
+    "files": {
+      "bench/bench.py": {
+        "bytes": 31639,
+        "sha256": "96cfb5da15a607880c68cff4a0956b1ef5e8bdc93d69cd8f0c6935288465a0fe"
+      },
+      "bench/workloads.py": {
+        "bytes": 7771,
+        "sha256": "f42519287a780468e9c60e45e63d7cf42af9aac8ba05b1cf2f2baeebdfc85ed2"
+      }
+    }
+  },
+  "harness_tree": "8264d70e02802de0fe57e4d49e2a662c8086eeef",
+  "input_file_count": 70,
+  "input_total_bytes": 8764087,
+  "inputs": {
+    "corpus/invalid/calls_and_assignments.lsl": {
+      "bytes": 257,
+      "sha256": "1823dc52a17358bac8a710ca3712806ac804d04c3eadee0d7a3558b81af9abed"
+    },
+    "corpus/invalid/components.lsl": {
+      "bytes": 222,
+      "sha256": "0bb65008be1c95c5f982501ee1037663c603bdf7a719e906bd4acc8b9cadbcee"
+    },
+    "corpus/invalid/control_flow.lsl": {
+      "bytes": 201,
+      "sha256": "bed459cb6beaecd4901435e6ed1b2df8c924a63cfa96a69efd9d6c325b00a4e2"
+    },
+    "corpus/invalid/duplicate_event.lsl": {
+      "bytes": 132,
+      "sha256": "d955c173e417f2f2d84113a9202387c4a34993c1c4b046df902b0bb75b275505"
+    },
+    "corpus/invalid/duplicate_globals.lsl": {
+      "bytes": 90,
+      "sha256": "20d04a1f0b577a526ca43efdc2233de95f4fd8a53b33373df3e6b30c1275400f"
+    },
+    "corpus/invalid/duplicate_state.lsl": {
+      "bytes": 222,
+      "sha256": "4a024cf83d553b8acf079b9fa2983399b0ba490fc03dac282412d6e4fe6bd9c7"
+    },
+    "corpus/invalid/malformed_condition.lsl": {
+      "bytes": 112,
+      "sha256": "8b600ae1dcec2d031f05a748add6870bb5dd7139bc520d9b7ed0931e56d2075b"
+    },
+    "corpus/invalid/scope_and_jumps.lsl": {
+      "bytes": 187,
+      "sha256": "4551a9b7f7b68cd256ef9fb27357ff66778c86b29a05edbdfe7d6fb148eafa02"
+    },
+    "corpus/invalid/state_namespace.lsl": {
+      "bytes": 158,
+      "sha256": "102073e967bc768ba4ee8dad0000f6c8faa92fa705584ce7bb51796fb0c84376"
+    },
+    "corpus/invalid/syntax_unclosed.lsl": {
+      "bytes": 76,
+      "sha256": "e2c9d00e934033a35cc14a7a7aa70dcdf840a3ee4c536fd5df84aed55a5eee91"
+    },
+    "corpus/invalid/undefined_state.lsl": {
+      "bytes": 65,
+      "sha256": "78375f33311415c0aa9c9227a72dd98c8ba49b053c41f2cb5d4a0dd02966c07c"
+    },
+    "corpus/large/combat_hud.lsl": {
+      "bytes": 2383,
+      "sha256": "2e2a963970e0171e6d5a2acf551277c463ac222287a42b6a2b0a5177595016ba"
+    },
+    "corpus/large/rental_controller.lsl": {
+      "bytes": 2516,
+      "sha256": "d48219f90b911cd96a9065fb71ac143c526066ec47063b5fba94d2484ed2d9ba"
+    },
+    "corpus/large/teleporter.lsl": {
+      "bytes": 1903,
+      "sha256": "d394ccf5ab6910bc69f8a186afba5098ebefb6decd1d2cd00501357da71dae79"
+    },
+    "corpus/manifest.txt": {
+      "bytes": 4951,
+      "sha256": "fa30c5218307c813a3a939a761ca791c859b19ba79f842d7497aa1d573fe14f5"
+    },
+    "corpus/medium/dialog_menu.lsl": {
+      "bytes": 890,
+      "sha256": "8a1a892d9ec369332221130df357a5301d860758296ba4aa450a952f1695fa97"
+    },
+    "corpus/medium/extension_safe.lsl": {
+      "bytes": 414,
+      "sha256": "c13574b3ade83056d719b5962c0792a79478fe86c2e5e85097ed724de8747f4a"
+    },
+    "corpus/medium/inventory_manager.lsl": {
+      "bytes": 1296,
+      "sha256": "4eaa5080649eb14e82f39eaf627aea9d1ca29a5edc7fdf8db378313af5f0ff95"
+    },
+    "corpus/medium/object_mover.lsl": {
+      "bytes": 1050,
+      "sha256": "cf18361d717a6a20e04dd31d7de24bbf106344f0c8acc41bbad1ca48cae5cd5a"
+    },
+    "corpus/medium/scope_shadowing.lsl": {
+      "bytes": 705,
+      "sha256": "0f8da8374333fede486bfa234c381b09e4e59e01afac9b9c9ea5b5099c3f990d"
+    },
+    "corpus/medium/sensor_scan.lsl": {
+      "bytes": 1316,
+      "sha256": "6bf1938a59d3a00e763bf2aca12076da4b84d5b8b2106531680418f0f4448521"
+    },
+    "corpus/small/casts_assignments.lsl": {
+      "bytes": 441,
+      "sha256": "7b13b02cf2a5bf6fe34b8071aa0d237ace15080ae7cb84e443146ae477b187aa"
+    },
+    "corpus/small/control_flow.lsl": {
+      "bytes": 396,
+      "sha256": "cf037abaa8c1c44e7a1f3b4eeb041ed167e0d1cd182a30e7cddbc9eb0c9cafc1"
+    },
+    "corpus/small/extension_boundary.lsl": {
+      "bytes": 214,
+      "sha256": "b9069bd6a71a32c689113f245554d8e28f4d5b72785a221c5d23dab0ac23bf57"
+    },
+    "corpus/small/functions_scope.lsl": {
+      "bytes": 344,
+      "sha256": "202864c00cbe04d9db744b7d7168d109769de1009cadba7be9f07e61a32a6240"
+    },
+    "corpus/small/hex_and_bitwise.lsl": {
+      "bytes": 425,
+      "sha256": "301ee3fcceb81be2ecb0c836ad8ba425700996fa6f6f67211992c496e08f2f8b"
+    },
+    "corpus/small/lists_strings.lsl": {
+      "bytes": 506,
+      "sha256": "060243e8df6a6a87048a523a5910a607c5b7289e31fda39750d5bf1208213332"
+    },
+    "corpus/small/states_and_timer.lsl": {
+      "bytes": 521,
+      "sha256": "138b62ab143daedab98354d8cb9f249284e7bbd7ad3c27652136394d52ddf4b8"
+    },
+    "corpus/small/timer_dialog.lsl": {
+      "bytes": 421,
+      "sha256": "0a1f166bc0dad599c5e243532a99faffa71d148cd43e6915274128a5bd9ac88c"
+    },
+    "corpus/small/vector_math.lsl": {
+      "bytes": 508,
+      "sha256": "a795c937cf68ef0fc37252a0fba90add0d527e129b5ac2dbe4d1909af257ca36"
+    },
+    "target/bench-fixtures/call_graph.lsl": {
+      "bytes": 66431,
+      "sha256": "6555db41e45c1e80be584789ef50baf677a894f8379170b8e4baa97239295e63"
+    },
+    "target/bench-fixtures/diagnostic_flood.lsl": {
+      "bytes": 448932,
+      "sha256": "1d478c97c7d80b432e34cd9e5eaa1eb8de1f62bdd27456c50152b49f17a27f2b"
+    },
+    "target/bench-fixtures/include/inc0.lsl": {
+      "bytes": 1731,
+      "sha256": "d52a76b9861f72d5690e2cfe74f3b63c26c0d7ac55c8cbd54940ee5278204dde"
+    },
+    "target/bench-fixtures/include/inc1.lsl": {
+      "bytes": 1747,
+      "sha256": "d677901897ffab7d8282785dcf6410933c5f2f2f34d5d40c76484116ba42e896"
+    },
+    "target/bench-fixtures/include/inc2.lsl": {
+      "bytes": 1794,
+      "sha256": "a9d3b78b91b42f1d5999e748eba0f0a45ad6b710fc47da13c519a431b340be53"
+    },
+    "target/bench-fixtures/include/inc3.lsl": {
+      "bytes": 1794,
+      "sha256": "6d8bf6234f3ede040175a62af561a6b964a1dd16ffb2d0ff9e617fb7440e1f13"
+    },
+    "target/bench-fixtures/include/inc4.lsl": {
+      "bytes": 1797,
+      "sha256": "ef5eab518c7522e58aa6c011c928d070962d86ee7ae3876c08f60e3b17b8c6fb"
+    },
+    "target/bench-fixtures/include/inc5.lsl": {
+      "bytes": 1791,
+      "sha256": "a2cc11c3447ca680f85a05071453d88812586356c5ff33d05a29243f40e57921"
+    },
+    "target/bench-fixtures/include/inc6.lsl": {
+      "bytes": 1800,
+      "sha256": "ea1c1b8e652eea75cd97c0b4b04e005cdfea7dae3e08178dd246abd218f0550f"
+    },
+    "target/bench-fixtures/include/inc7.lsl": {
+      "bytes": 1791,
+      "sha256": "956f756f2a9f36cea98f9054d29603bbe3887eb8d4a34cb09f81c6a50712beb2"
+    },
+    "target/bench-fixtures/malformed.lsl": {
+      "bytes": 14932,
+      "sha256": "73c2886339f2205cb0b9f89570ecb321cb55e67b0834b56de4a67e5e4e32f82a"
+    },
+    "target/bench-fixtures/many_symbols.lsl": {
+      "bytes": 113822,
+      "sha256": "70a8f3886edc24d80a39dca5f53f51568bfb2ba5e6c0ccbf065ddbd880fe68d0"
+    },
+    "target/bench-fixtures/multi/unit000.lsl": {
+      "bytes": 114,
+      "sha256": "4836476d80fb1e846ec1f248f26c61b385f2b64f0d2e1f9eb8c6d5f203cccb96"
+    },
+    "target/bench-fixtures/multi/unit001.lsl": {
+      "bytes": 114,
+      "sha256": "4a237b239d17422a4f7ad1d6cce8bdda903a941be8a6fd64405337f50a88cdb5"
+    },
+    "target/bench-fixtures/multi/unit002.lsl": {
+      "bytes": 114,
+      "sha256": "8915129904df6e28e42105c8c633702a616fa685398be6902db8697ce2303966"
+    },
+    "target/bench-fixtures/multi/unit003.lsl": {
+      "bytes": 114,
+      "sha256": "a5cea2c718a03c273167b290eae1421c3a91eb0231c06c32d08704ddf59dbf10"
+    },
+    "target/bench-fixtures/multi/unit004.lsl": {
+      "bytes": 114,
+      "sha256": "792b99210697818f3eea1f5425c9ea7e49648c81ceabf59f36ddab252462e001"
+    },
+    "target/bench-fixtures/multi/unit005.lsl": {
+      "bytes": 114,
+      "sha256": "d0582fdeeb55b9437b7da108e8e84506bbbe89c2f220432808419d3aa9a16c1c"
+    },
+    "target/bench-fixtures/multi/unit006.lsl": {
+      "bytes": 114,
+      "sha256": "206a6d1914d2e154539455f940453830fde82863a78ff9dddd35912bb6426161"
+    },
+    "target/bench-fixtures/multi/unit007.lsl": {
+      "bytes": 114,
+      "sha256": "eac43aa375f5785be64b598c8b21c1e00052b56919094b22a49b85c3ab7e2a46"
+    },
+    "target/bench-fixtures/multi/unit008.lsl": {
+      "bytes": 114,
+      "sha256": "5792562db4a020ff7e08c851a579c79d825bdb744aee5e576e7c9ac86159b555"
+    },
+    "target/bench-fixtures/multi/unit009.lsl": {
+      "bytes": 114,
+      "sha256": "49cc51776752141a7e63c13fb76eb10ca5f29335492dd04bf337fb0b250c1537"
+    },
+    "target/bench-fixtures/multi/unit010.lsl": {
+      "bytes": 115,
+      "sha256": "d9cc8cdc2beeacf1ff28233d8ed49c4d9f7dbb5025cc3705b369694928ad022b"
+    },
+    "target/bench-fixtures/multi/unit011.lsl": {
+      "bytes": 115,
+      "sha256": "af631f8672ae1eadcd3fe81a1fcb43615ff1771797e7f2cbcd9aa4e70f02d70f"
+    },
+    "target/bench-fixtures/multi/unit012.lsl": {
+      "bytes": 115,
+      "sha256": "9a93136706bde7bf21917464e3e69e196528ba5373c9d7af1fed380969772c15"
+    },
+    "target/bench-fixtures/multi/unit013.lsl": {
+      "bytes": 115,
+      "sha256": "b3653ad4d941456560d1768df52a437404c3f29332753bef4dd7afd0df22705c"
+    },
+    "target/bench-fixtures/multi/unit014.lsl": {
+      "bytes": 115,
+      "sha256": "31bdd6ffa4f6e70529b738ebf3e77f69612627b887241b62e9a25e5326d6b65f"
+    },
+    "target/bench-fixtures/multi/unit015.lsl": {
+      "bytes": 115,
+      "sha256": "5d152f576d52e03f7a9bf997941929b4d30de7996e082c074436ae4f947cb89d"
+    },
+    "target/bench-fixtures/multi/unit016.lsl": {
+      "bytes": 115,
+      "sha256": "4301525a752e2a93c42b0c769a48cf1b884f27bddd10d2483d43b4265ee1be91"
+    },
+    "target/bench-fixtures/multi/unit017.lsl": {
+      "bytes": 115,
+      "sha256": "1437faa224e96c0b1f6905355389b9c019e2c5d84a2a3bec588b0e9941ca4060"
+    },
+    "target/bench-fixtures/multi/unit018.lsl": {
+      "bytes": 115,
+      "sha256": "0441025cba7f9dd07c0c0b7151d7b65e258f9a1df52e69cd96d9dc80fcb41398"
+    },
+    "target/bench-fixtures/multi/unit019.lsl": {
+      "bytes": 115,
+      "sha256": "ec63d077f6a6892cefc358acf78bdb930cc3fa942cbea40c91c3f7bb8573ae0f"
+    },
+    "target/bench-fixtures/multi/unit020.lsl": {
+      "bytes": 115,
+      "sha256": "0202d9313497629aae17d61071514ac27dcdb163db81b21dc3a29ec86b8167a1"
+    },
+    "target/bench-fixtures/multi/unit021.lsl": {
+      "bytes": 115,
+      "sha256": "04faa6b0f6710e0826659918d3c606bd21e61da1cdcd419956ff361e0c2b0d65"
+    },
+    "target/bench-fixtures/multi/unit022.lsl": {
+      "bytes": 115,
+      "sha256": "32ca8d4b9ddb342f275e12cccff99ea143aec6de572e53f71548c411a49048bc"
+    },
+    "target/bench-fixtures/multi/unit023.lsl": {
+      "bytes": 115,
+      "sha256": "2a6c7a1af23cdbd77b3784a34b42e8433fea8636c94bced4465cd1a6c9a2fd19"
+    },
+    "target/bench-fixtures/near_limit.lsl": {
+      "bytes": 8026842,
+      "sha256": "84e03b23704f131c1f20e57fff75790f88de37b7c33d7f6c69015cfbdc3a3c76"
+    },
+    "target/bench-fixtures/nested_scopes.lsl": {
+      "bytes": 36949,
+      "sha256": "d2b6eb3060d9b9b834ddda18a7deb6103e03065b51336209cb82ddc12f5b3cab"
+    },
+    "target/bench-fixtures/preprocess_root.lsl": {
+      "bytes": 16148,
+      "sha256": "6809da09c436623e090d71f84335eb94dc814a12bd687c8510aa2abb83f0a7c8"
+    },
+    "target/bench-fixtures/stdin.lsl": {
+      "bytes": 114,
+      "sha256": "4a237b239d17422a4f7ad1d6cce8bdda903a941be8a6fd64405337f50a88cdb5"
+    }
+  },
+  "issue": "https://github.com/mindwork64/neolint/issues/107",
+  "kernel": "7.0.0-43-generic",
+  "machine": "x86_64",
+  "os": "Linux-7.0.0-43-generic-x86_64-with-glibc2.39",
+  "profile": "release",
+  "python": "3.12.3",
+  "rows": [
+    {
+      "argv": [
+        "--version"
+      ],
+      "note": "binary/startup baseline",
+      "row": "startup",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/small/states_and_timer.lsl"
+      ],
+      "note": "",
+      "row": "corpus_small/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/medium/dialog_menu.lsl"
+      ],
+      "note": "",
+      "row": "corpus_medium/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/large/teleporter.lsl"
+      ],
+      "note": "",
+      "row": "corpus_large/compare",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/default",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/ast",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/legacy",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus/invalid/calls_and_assignments.lsl"
+      ],
+      "note": "",
+      "row": "corpus_invalid/compare",
+      "samples": 50
+    },
+    {
+      "argv": [
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/default",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/ast",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/legacy",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "--engine",
+        "compare",
+        "corpus"
+      ],
+      "note": "",
+      "row": "corpus_dir/compare",
+      "samples": 40
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/many_symbols.lsl"
+      ],
+      "note": "",
+      "row": "many_symbols/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/call_graph.lsl"
+      ],
+      "note": "",
+      "row": "call_graph/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/call_graph.lsl"
+      ],
+      "note": "",
+      "row": "call_graph/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/nested_scopes.lsl"
+      ],
+      "note": "",
+      "row": "nested_scopes/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/nested_scopes.lsl"
+      ],
+      "note": "",
+      "row": "nested_scopes/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/malformed.lsl"
+      ],
+      "note": "",
+      "row": "malformed/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/malformed.lsl"
+      ],
+      "note": "",
+      "row": "malformed/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/multi"
+      ],
+      "note": "",
+      "row": "multi_file/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/multi"
+      ],
+      "note": "",
+      "row": "multi_file/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/near_limit.lsl"
+      ],
+      "note": "5 samples: 7.65 MiB valid file, ~0.5 s per run",
+      "row": "near_limit/default",
+      "samples": 5
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/near_limit.lsl"
+      ],
+      "note": "reduced samples: multi-megabyte parse",
+      "row": "near_limit/legacy",
+      "samples": 5
+    },
+    {
+      "argv": [
+        "target/bench-fixtures/diagnostic_flood.lsl"
+      ],
+      "note": "reduced samples: rendered-diagnostic cap",
+      "row": "diagnostic_flood/default",
+      "samples": 20
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "target/bench-fixtures/diagnostic_flood.lsl"
+      ],
+      "note": "reduced samples: rendered-diagnostic cap",
+      "row": "diagnostic_flood/legacy",
+      "samples": 20
+    },
+    {
+      "argv": [
+        "--preprocess",
+        "-I",
+        "/home/eloraam/apps/neolint/target/bench-fixtures/include",
+        "target/bench-fixtures/preprocess_root.lsl"
+      ],
+      "note": "",
+      "row": "preprocess/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "--preprocess",
+        "-I",
+        "/home/eloraam/apps/neolint/target/bench-fixtures/include",
+        "target/bench-fixtures/preprocess_root.lsl"
+      ],
+      "note": "",
+      "row": "preprocess/legacy",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/default",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "ast",
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/ast",
+      "samples": 30
+    },
+    {
+      "argv": [
+        "--engine",
+        "legacy",
+        "-"
+      ],
+      "note": "",
+      "row": "stdin/legacy",
+      "samples": 30
+    }
+  ],
+  "rss_available": true,
+  "rss_method": "proc_vmhwm_poll",
+  "rss_samples_per_row": 3,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "warmup_iterations": 3
+}

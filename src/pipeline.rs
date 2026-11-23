@@ -354,6 +354,22 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    #[test]
+    fn unit_capacity_is_enforced_before_the_next_unit_is_constructed() {
+        let mut run = AnalysisRun::new().unwrap();
+        let source = "integer gValue;";
+        for _ in 0..MAX_ANALYSIS_UNITS_PER_INVOCATION {
+            run.add_legacy_text("unit.lsl", source).unwrap();
+        }
+        assert_eq!(run.units().len(), MAX_ANALYSIS_UNITS_PER_INVOCATION);
+        match run.add_legacy_text("unit.lsl", source) {
+            Err(SetupError::TooManyUnits { limit }) => {
+                assert_eq!(limit, MAX_ANALYSIS_UNITS_PER_INVOCATION);
+            }
+            other => panic!("expected TooManyUnits, got {other:?}"),
+        }
+    }
+
     fn span(start: usize, end: usize) -> Span {
         Span {
             start,

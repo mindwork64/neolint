@@ -153,13 +153,22 @@ impl RenderedDiagnostic {
         diagnostic: PreparedDiagnostic,
         prepared: &crate::preprocessor::PreparedSource,
     ) -> Result<Self, SpanError> {
+        validate_prepared(prepared)?;
+        Self::from_prepared_validated(diagnostic, prepared)
+    }
+
+    /// Convert a prepared diagnostic after the caller validated the source once.
+    ///
+    /// Resolution is called once per diagnostic, so the whole-buffer equality
+    /// check that proves the prepared source and its map agree is hoisted out of
+    /// this path: comparing a multi-hundred-kilobyte buffer per diagnostic made
+    /// rendering quadratic in the diagnostic count. Callers must have called
+    /// [`validate_prepared`] for the same `prepared` value.
+    pub(crate) fn from_prepared_validated(
+        diagnostic: PreparedDiagnostic,
+        prepared: &crate::preprocessor::PreparedSource,
+    ) -> Result<Self, SpanError> {
         let map = prepared.map();
-        if prepared.unit() != map.unit()
-            || prepared.prepared_len() != map.prepared_len()
-            || prepared.text() != map.prepared_text()
-        {
-            return Err(SpanError::ForeignPreparedSource);
-        }
         let prepared_span = prepared.prepared_span(diagnostic.span)?;
         let resolved = map.resolve_span(prepared_span)?;
         let primary = resolved.primary();
@@ -186,6 +195,16 @@ impl RenderedDiagnostic {
             source: primary.source(),
             related,
         })
+    }
+
+    /// Prove that a prepared source and its map describe the same buffer.
+    ///
+    /// This is the expensive whole-buffer check that must run once per unit, not
+    /// once per rendered diagnostic.
+    pub(crate) fn validate(
+        prepared: &crate::preprocessor::PreparedSource,
+    ) -> Result<(), SpanError> {
+        validate_prepared(prepared)
     }
 
     /// Convert a Legacy diagnostic without touching any source map.
@@ -219,6 +238,20 @@ fn push_related(
         return Ok(());
     }
     related.push(RelatedLocation::new(span, "related location"));
+    Ok(())
+}
+
+/// Shared prepared-source validation used by the per-unit and per-diagnostic paths.
+pub(crate) fn validate_prepared(
+    prepared: &crate::preprocessor::PreparedSource,
+) -> Result<(), SpanError> {
+    let map = prepared.map();
+    if prepared.unit() != map.unit()
+        || prepared.prepared_len() != map.prepared_len()
+        || prepared.text() != map.prepared_text()
+    {
+        return Err(SpanError::ForeignPreparedSource);
+    }
     Ok(())
 }
 

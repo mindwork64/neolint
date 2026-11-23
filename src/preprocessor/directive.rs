@@ -35,6 +35,9 @@ use crate::source::{AnalysisUnitId, OriginKind, SourceId};
 
 pub(crate) const MAX_CONDITIONAL_DEPTH: usize = 64;
 
+/// Maximum include nesting depth (one frame per open include).
+pub(crate) const MAX_INCLUDE_DEPTH: usize = 64;
+
 #[derive(Debug)]
 struct CondFrame {
     parent_active: bool,
@@ -500,7 +503,7 @@ impl<'a> Preprocessor<'a> {
                 return;
             }
         }
-        if self.frames.len() > 64 {
+        if self.frames.len() > MAX_INCLUDE_DEPTH {
             let mut related = Vec::new();
             if let Some(frame) = self.frames.last() {
                 if let Some(span) = frame.entry_span {
