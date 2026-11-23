@@ -280,8 +280,12 @@ impl AnalysisUnit {
                 display
             }
         };
+        // Validate the prepared source once per unit: the check compares the whole
+        // prepared buffer, so doing it per diagnostic made rendering quadratic in
+        // the number of diagnostics.
+        RenderedDiagnostic::validate(prepared)?;
         for diagnostic in display {
-            rendered.push(RenderedDiagnostic::from_prepared(
+            rendered.push(RenderedDiagnostic::from_prepared_validated(
                 PreparedDiagnostic::new(
                     diagnostic.code,
                     diagnostic.severity,
