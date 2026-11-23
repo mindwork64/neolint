@@ -22,6 +22,7 @@ comparisons.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -49,7 +50,7 @@ SAMPLES_DEFAULT = 50
 SAMPLES_LARGE = 30
 SAMPLES_DIR = 40
 SAMPLES_SYNTHETIC = 30
-SAMPLES_NEAR_LIMIT = 8
+SAMPLES_NEAR_LIMIT = 5
 SAMPLES_FLOOD = 20
 
 
@@ -210,7 +211,7 @@ def build_fixtures(root: pathlib.Path) -> dict:
     created["call_graph"] = workloads.call_graph(root, reachable=800, unreachable=700, fanout=400)
     created["nested_scopes"] = workloads.nested_scopes(root, depth=40, per_level=5)
     created["preprocess"] = workloads.preprocess(root, macros=400, includes=8)
-    created["near_limit"] = workloads.near_limit(root, statements=25000)
+    created["near_limit"] = workloads.near_limit(root, statements=120000)
     created["malformed"] = workloads.malformed(root, errors=500)
     created["diagnostic_flood"] = workloads.diagnostic_flood(root, findings=10000)
     created["multi_file"] = workloads.multi_file(root, files=24)
@@ -264,7 +265,7 @@ def build_rows(fixtures: dict) -> list[Row]:
             "near_limit/default",
             [replace(fixtures["near_limit"])],
             SAMPLES_NEAR_LIMIT,
-            note="reduced samples: multi-megabyte parse",
+            note="5 samples: 7.65 MiB valid file, ~0.5 s per run",
         )
     )
     rows.append(
@@ -317,7 +318,43 @@ def git(*args) -> str:
     ).stdout.strip()
 
 
-def metadata(fixtures: dict, rows: list[Row], binary) -> dict:
+def hash_inputs(paths) -> dict:
+    """Hash every benchmark input file, recursing into directories.
+
+    Keys are repository-relative POSIX paths so the manifest is stable across
+    hosts and checkout locations. Directories are never skipped: generated
+    multi-file and include trees are expanded file by file.
+    """
+    entries = {}
+    for path in paths:
+        full = path if path.is_absolute() else REPO / path
+        if full.is_dir():
+            for child in sorted(full.rglob("*")):
+                if child.is_file():
+                    entries[child.relative_to(REPO).as_posix()] = {
+                        "sha256": sha256_file(child),
+                        "bytes": child.stat().st_size,
+                    }
+        elif full.is_file():
+            entries[full.relative_to(REPO).as_posix()] = {
+                "sha256": sha256_file(full),
+                "bytes": full.stat().st_size,
+            }
+    return dict(sorted(entries.items()))
+
+
+def git_show(commit: str, format_string: str) -> str | None:
+    result = subprocess.run(
+        ["git", "show", "-s", f"--format={format_string}", commit],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def metadata(fixtures: dict, rows: list[Row], binary, binary_provenance: dict) -> dict:
     rustc = subprocess.run(["rustc", "-Vv"], capture_output=True, text=True, check=False)
     cargo = subprocess.run(["cargo", "-V"], capture_output=True, text=True, check=False)
     cpu_model = "unknown"
@@ -328,18 +365,16 @@ def metadata(fixtures: dict, rows: list[Row], binary) -> dict:
                 break
     except OSError:
         pass
-    fixture_hashes = {}
-    for path in sorted(fixtures.values()):
-        if path.is_dir():
-            continue
-        if path.exists() and path.is_file():
-            fixture_hashes[path.name] = sha256_file(path)
-    fixture_hashes["corpus"] = sha256_file(REPO / workloads.CORPUS_DIR / "manifest.txt")
+    inputs = hash_inputs([REPO / workloads.CORPUS_DIR, fixtures_root()])
     return {
         "issue": "https://github.com/mindwork64/neolint/issues/107",
-        "commit": git("rev-parse", "HEAD"),
-        "tree": git("rev-parse", "HEAD^{tree}"),
-        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "harness_commit": git("rev-parse", "HEAD"),
+        "harness_tree": git("rev-parse", "HEAD^{tree}"),
+        "harness_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "binary_source_commit": binary_provenance.get("commit"),
+        "binary_source_tree": binary_provenance.get("tree"),
+        "binary_source_verified": binary_provenance.get("verified", False),
+        "binary_sha256_expected": binary_provenance.get("expected_sha256"),
         "rustc": rustc.stdout.strip() if rustc.returncode == 0 else "unavailable",
         "cargo": cargo.stdout.strip() if cargo.returncode == 0 else "unavailable",
         "python": platform.python_version(),
@@ -357,7 +392,9 @@ def metadata(fixtures: dict, rows: list[Row], binary) -> dict:
         "rss_available": pathlib.Path("/proc/self/status").exists(),
         "rss_samples_per_row": 3,
         "warmup_iterations": 3,
-        "fixture_hashes": fixture_hashes,
+        "inputs": inputs,
+        "input_file_count": len(inputs),
+        "input_total_bytes": sum(entry["bytes"] for entry in inputs.values()),
         "rows": [
             {"row": row.name, "argv": row.argv, "samples": row.samples, "note": row.note}
             for row in rows
@@ -368,10 +405,26 @@ def metadata(fixtures: dict, rows: list[Row], binary) -> dict:
 def write_summary(path, meta, summaries, variance):
     lines = []
     lines.append("# neolint CLI benchmark — Phase 8 baseline\n")
-    lines.append(f"- commit `{meta['commit']}` (tree `{meta['tree']}`), branch `{meta['branch']}`")
+    lines.append(
+        f"- harness revision: `{meta['harness_commit']}` (tree `{meta['harness_tree']}`), "
+        f"branch `{meta['harness_branch']}`"
+    )
+    verification = (
+        "verified against the expected SHA-256"
+        if meta["binary_source_verified"]
+        else "not verified against an expected SHA-256"
+    )
+    lines.append(
+        f"- measured binary: built from `{meta['binary_source_commit']}` "
+        f"(tree `{meta['binary_source_tree']}`), sha256 `{meta['binary_sha256']}`, {verification}"
+    )
+    lines.append(
+        f"- benchmark inputs: {meta['input_file_count']} files, "
+        f"{meta['input_total_bytes']} bytes (per-file hashes in `meta.json`)"
+    )
     lines.append(f"- rustc `{meta['rustc'].splitlines()[0] if meta['rustc'] else 'n/a'}`, cargo `{meta['cargo']}`")
     lines.append(f"- host: {meta['os']} / {meta['machine']} / {meta['cpu_model']} / {meta['cpu_count']} threads")
-    lines.append(f"- binary: `{meta['binary']}` sha256 `{meta['binary_sha256']}` ({meta['binary_bytes']} bytes)")
+    lines.append(f"- binary path: `{meta['binary']}` ({meta['binary_bytes']} bytes)")
     lines.append(f"- warm-up: {meta['warmup_iterations']} iterations per row; two independent passes")
     lines.append(
         f"- RSS: {'peak VmHWM polled from /proc, 3 untimed samples per row' if meta['rss_available'] else 'unavailable on this host'}"
@@ -422,6 +475,21 @@ def main(argv=None):
         default=None,
         help="measure an existing binary instead of building target/release/neolint",
     )
+    parser.add_argument(
+        "--binary-source-commit",
+        default=None,
+        help="commit the measured binary was built from (defaults to the harness commit)",
+    )
+    parser.add_argument(
+        "--expect-binary-sha256",
+        default=None,
+        help="refuse to measure unless the binary has this SHA-256",
+    )
+    parser.add_argument(
+        "--verify-build",
+        action="store_true",
+        help="rebuild the binary source commit in a throwaway worktree and compare SHA-256",
+    )
     args = parser.parse_args(argv)
 
     if not args.skip_build:
@@ -438,6 +506,23 @@ def main(argv=None):
     if not binary.exists():
         print(f"binary missing: {binary}", file=sys.stderr)
         return 1
+
+    binary_sha = sha256_file(binary)
+    if args.expect_binary_sha256 and binary_sha != args.expect_binary_sha256:
+        print(
+            f"binary SHA-256 mismatch: expected {args.expect_binary_sha256}, got {binary_sha}",
+            file=sys.stderr,
+        )
+        return 5
+    source_commit = args.binary_source_commit or git("rev-parse", "HEAD")
+    source_tree = git_show(source_commit, "%T")
+    provenance = {
+        "commit": source_commit,
+        "tree": source_tree,
+        "sha256": binary_sha,
+        "expected_sha256": args.expect_binary_sha256,
+        "verified": bool(args.expect_binary_sha256) and binary_sha == args.expect_binary_sha256,
+    }
 
     fixtures = build_fixtures(fixtures_root())
     rows = build_rows(fixtures)
@@ -484,7 +569,7 @@ def main(argv=None):
                 flush=True,
             )
 
-    meta = metadata(fixtures, rows, binary)
+    meta = metadata(fixtures, rows, binary, provenance)
     variance = {}
     for pass_number in (1, 2):
         for entry in summaries:
@@ -496,12 +581,15 @@ def main(argv=None):
             pair[pass_number - 1] = entry["median_ms"]
     variance = {name: pair for name, pair in variance.items() if None not in pair}
 
-    default_name = meta["commit"][:12]
+    default_name = meta["harness_commit"][:12]
     if args.binary:
         default_name = f"{default_name}-vs-{meta['binary_sha256'][:8]}"
     out_dir = pathlib.Path(args.out) if args.out else REPO / "bench" / "results" / default_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "raw.jsonl").write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+    raw_text = "\n".join(raw_lines) + "\n"
+    (out_dir / "raw.jsonl").write_text(raw_text, encoding="utf-8")
+    with gzip.open(out_dir / "raw.jsonl.gz", "wb", compresslevel=9) as compressed:
+        compressed.write(raw_text.encode("utf-8"))
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_summary(out_dir / "summary.md", meta, summaries, variance)
 

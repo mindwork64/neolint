@@ -1,9 +1,11 @@
 # neolint CLI benchmark — Phase 8 baseline
 
-- commit `1273c4d325428c9fa95a49c9122bfc99ae5d9e34` (tree `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4`), branch `exp-preprocessor-ast-phase-08-stabilization`
+- harness revision: `0ea4a604d309aa65b83a0793ee7e8ffa9e2de8e6` (tree `33f97eee79f211b1c7cb06a0d977e41b8eb1ce46`), branch `exp-preprocessor-ast-phase-08-stabilization`
+- measured binary: built from `1273c4d325428c9fa95a49c9122bfc99ae5d9e34` (tree `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4`), sha256 `227352d90b1ed1233046e6e7073726c43a354352e94c1e3ac06cc7509843babc`, verified against the expected SHA-256
+- benchmark inputs: 70 files, 8764087 bytes (per-file hashes in `meta.json`)
 - rustc `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, cargo `cargo 1.99.1 (5f94df478 2026-08-27)`
 - host: Linux-7.0.0-43-generic-x86_64-with-glibc2.39 / x86_64 / AMD Ryzen 5 2600X Six-Core Processor / 12 threads
-- binary: `/home/eloraam/apps/neolint/target/release/neolint` sha256 `227352d90b1ed1233046e6e7073726c43a354352e94c1e3ac06cc7509843babc` (1675040 bytes)
+- binary path: `/home/eloraam/apps/neolint/target/wt-fixed/target/release/neolint` (1675040 bytes)
 - warm-up: 3 iterations per row; two independent passes
 - RSS: peak VmHWM polled from /proc, 3 untimed samples per row
 
@@ -14,133 +16,133 @@ between those modes are not parser-only comparisons.
 
 | Row | Pass | Samples | Median ms | p95 ms | Min ms | Max ms | Exit | RSS KB | Digests |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `startup` | 1 | 50 | 1.366 | 1.473 | 1.302 | 1.680 | 0 | 2272 | stable |
-| `corpus_small/default` | 1 | 50 | 3.796 | 4.299 | 3.617 | 4.498 | 0 | 3900 | stable |
-| `corpus_small/ast` | 1 | 50 | 3.815 | 4.195 | 2.520 | 4.364 | 0 | 3840 | stable |
-| `corpus_small/legacy` | 1 | 50 | 3.584 | 3.945 | 3.419 | 4.227 | 0 | 3560 | stable |
-| `corpus_small/compare` | 1 | 50 | 4.125 | 4.585 | 2.429 | 5.131 | 0 | 3864 | stable |
-| `corpus_medium/default` | 1 | 50 | 2.401 | 4.641 | 2.233 | 5.102 | 0 | 3888 | stable |
-| `corpus_medium/ast` | 1 | 50 | 2.247 | 4.267 | 2.159 | 4.559 | 0 | 4068 | stable |
-| `corpus_medium/legacy` | 1 | 50 | 3.553 | 3.935 | 2.155 | 3.969 | 0 | 3584 | stable |
-| `corpus_medium/compare` | 1 | 50 | 2.447 | 4.613 | 2.365 | 4.977 | 0 | 3864 | stable |
-| `corpus_large/default` | 1 | 30 | 4.157 | 4.681 | 2.283 | 4.767 | 0 | 4000 | stable |
-| `corpus_large/ast` | 1 | 30 | 4.028 | 4.568 | 2.485 | 4.650 | 0 | 4132 | stable |
-| `corpus_large/legacy` | 1 | 30 | 3.752 | 4.158 | 3.037 | 4.273 | 0 | 3528 | stable |
-| `corpus_large/compare` | 1 | 30 | 4.467 | 4.912 | 4.374 | 4.986 | 0 | 4088 | stable |
-| `corpus_invalid/default` | 1 | 50 | 3.741 | 4.068 | 3.657 | 4.475 | 1 | 3848 | stable |
-| `corpus_invalid/ast` | 1 | 50 | 3.941 | 4.234 | 3.757 | 4.444 | 1 | 3820 | stable |
-| `corpus_invalid/legacy` | 1 | 50 | 3.574 | 3.935 | 3.439 | 4.836 | 1 | 3600 | stable |
-| `corpus_invalid/compare` | 1 | 50 | 4.013 | 4.343 | 3.819 | 4.521 | 1 | 3848 | stable |
-| `corpus_dir/default` | 1 | 40 | 11.998 | 12.912 | 8.032 | 13.346 | 1 | 4228 | stable |
-| `corpus_dir/ast` | 1 | 40 | 12.301 | 13.438 | 8.243 | 13.989 | 1 | 4308 | stable |
-| `corpus_dir/legacy` | 1 | 40 | 6.897 | 7.092 | 3.671 | 7.131 | 1 | 4084 | stable |
-| `corpus_dir/compare` | 1 | 40 | 13.332 | 15.405 | 8.157 | 16.462 | 1 | 4308 | stable |
-| `many_symbols/default` | 1 | 30 | 27.407 | 36.060 | 18.902 | 36.732 | 0 | 16256 | stable |
-| `many_symbols/ast` | 1 | 30 | 31.933 | 36.685 | 20.512 | 37.630 | 0 | 16272 | stable |
-| `many_symbols/legacy` | 1 | 30 | 11.653 | 16.876 | 9.269 | 18.472 | 0 | 7616 | stable |
-| `call_graph/default` | 1 | 30 | 27.922 | 29.722 | 17.187 | 29.998 | 0 | 11808 | stable |
-| `call_graph/legacy` | 1 | 30 | 8.766 | 14.771 | 8.135 | 14.801 | 0 | 6584 | stable |
-| `nested_scopes/default` | 1 | 30 | 7.001 | 7.644 | 5.729 | 7.679 | 0 | 4840 | stable |
-| `nested_scopes/legacy` | 1 | 30 | 4.530 | 5.104 | 4.352 | 5.175 | 0 | 3636 | stable |
-| `malformed/default` | 1 | 30 | 4.769 | 7.587 | 3.878 | 7.751 | 1 | 4396 | stable |
-| `malformed/legacy` | 1 | 30 | 6.629 | 6.701 | 3.611 | 7.061 | 1 | 3944 | stable |
-| `multi_file/default` | 1 | 30 | 7.197 | 7.589 | 5.765 | 7.599 | 0 | 3976 | stable |
-| `multi_file/legacy` | 1 | 30 | 4.297 | 4.930 | 2.328 | 5.201 | 0 | 3488 | stable |
-| `near_limit/default` | 1 | 8 | 104.487 | 118.003 | 96.414 | 118.003 | 0 | 66884 | stable |
-| `near_limit/legacy` | 1 | 8 | 48.096 | 57.159 | 45.905 | 57.159 | 0 | 20620 | stable |
-| `diagnostic_flood/default` | 1 | 20 | 83.378 | 94.618 | 70.947 | 108.202 | 0 | 38500 | stable |
-| `diagnostic_flood/legacy` | 1 | 20 | 43.681 | 52.049 | 42.703 | 55.617 | 0 | 16620 | stable |
-| `preprocess/default` | 1 | 30 | 15.909 | 22.619 | 12.534 | 23.266 | 0 | 8268 | stable |
-| `preprocess/legacy` | 1 | 30 | 9.862 | 18.253 | 9.507 | 18.968 | 0 | 7524 | stable |
-| `stdin/default` | 1 | 30 | 2.048 | 4.014 | 2.008 | 4.030 | 0 | 3888 | stable |
-| `stdin/ast` | 1 | 30 | 3.662 | 4.109 | 3.544 | 4.154 | 0 | 3980 | stable |
-| `stdin/legacy` | 1 | 30 | 3.373 | 3.588 | 2.204 | 3.892 | 0 | 3480 | stable |
-| `startup` | 2 | 50 | 1.400 | 1.475 | 1.076 | 1.650 | 0 | 2136 | stable |
-| `corpus_small/default` | 2 | 50 | 4.041 | 4.514 | 3.823 | 5.493 | 0 | 3828 | stable |
-| `corpus_small/ast` | 2 | 50 | 3.935 | 4.241 | 3.781 | 4.663 | 0 | 3832 | stable |
-| `corpus_small/legacy` | 2 | 50 | 3.669 | 3.988 | 3.439 | 4.043 | 0 | 3476 | stable |
-| `corpus_small/compare` | 2 | 50 | 4.041 | 4.513 | 2.501 | 4.598 | 0 | 3852 | stable |
-| `corpus_medium/default` | 2 | 50 | 4.075 | 4.461 | 3.005 | 4.546 | 0 | 3920 | stable |
-| `corpus_medium/ast` | 2 | 50 | 4.047 | 4.500 | 2.942 | 4.586 | 0 | 3936 | stable |
-| `corpus_medium/legacy` | 2 | 50 | 3.604 | 3.923 | 3.494 | 4.195 | 0 | 3460 | stable |
-| `corpus_medium/compare` | 2 | 50 | 4.209 | 4.575 | 4.066 | 4.784 | 0 | 3904 | stable |
-| `corpus_large/default` | 2 | 30 | 4.114 | 4.367 | 4.013 | 4.386 | 0 | 3952 | stable |
-| `corpus_large/ast` | 2 | 30 | 2.506 | 3.063 | 2.318 | 4.752 | 0 | 4128 | stable |
-| `corpus_large/legacy` | 2 | 30 | 2.142 | 3.056 | 2.025 | 4.234 | 0 | 3612 | stable |
-| `corpus_large/compare` | 2 | 30 | 4.428 | 4.807 | 2.513 | 4.826 | 0 | 4116 | stable |
-| `corpus_invalid/default` | 2 | 50 | 3.757 | 3.890 | 3.625 | 3.897 | 1 | 4000 | stable |
-| `corpus_invalid/ast` | 2 | 50 | 2.406 | 3.513 | 2.131 | 4.422 | 1 | 3920 | stable |
-| `corpus_invalid/legacy` | 2 | 50 | 3.505 | 3.920 | 1.872 | 4.323 | 1 | 3600 | stable |
-| `corpus_invalid/compare` | 2 | 50 | 3.852 | 4.027 | 3.051 | 4.273 | 1 | 3852 | stable |
-| `corpus_dir/default` | 2 | 40 | 11.773 | 12.430 | 10.867 | 12.745 | 1 | 4212 | stable |
-| `corpus_dir/ast` | 2 | 40 | 11.627 | 12.278 | 10.874 | 13.186 | 1 | 4232 | stable |
-| `corpus_dir/legacy` | 2 | 40 | 6.832 | 7.193 | 3.677 | 7.352 | 1 | 4048 | stable |
-| `corpus_dir/compare` | 2 | 40 | 14.400 | 15.311 | 9.091 | 15.466 | 1 | 4288 | stable |
-| `many_symbols/default` | 2 | 30 | 32.560 | 35.046 | 24.860 | 38.033 | 0 | 16316 | stable |
-| `many_symbols/ast` | 2 | 30 | 31.227 | 41.185 | 21.615 | 44.059 | 0 | 16292 | stable |
-| `many_symbols/legacy` | 2 | 30 | 9.440 | 15.077 | 9.082 | 17.804 | 0 | 7680 | stable |
-| `call_graph/default` | 2 | 30 | 18.391 | 23.411 | 15.551 | 26.083 | 0 | 11812 | stable |
-| `call_graph/legacy` | 2 | 30 | 8.111 | 8.560 | 7.897 | 8.571 | 0 | 6592 | stable |
-| `nested_scopes/default` | 2 | 30 | 7.039 | 7.185 | 5.206 | 7.204 | 0 | 4712 | stable |
-| `nested_scopes/legacy` | 2 | 30 | 4.508 | 4.870 | 4.414 | 4.948 | 0 | 3608 | stable |
-| `malformed/default` | 2 | 30 | 6.538 | 7.135 | 6.385 | 7.137 | 1 | 4408 | stable |
-| `malformed/legacy` | 2 | 30 | 6.255 | 6.733 | 6.097 | 6.745 | 1 | 3976 | stable |
-| `multi_file/default` | 2 | 30 | 7.511 | 7.934 | 7.048 | 8.022 | 0 | 3980 | stable |
-| `multi_file/legacy` | 2 | 30 | 4.171 | 4.445 | 4.099 | 4.541 | 0 | 3488 | stable |
-| `near_limit/default` | 2 | 8 | 103.834 | 111.074 | 101.602 | 111.074 | 0 | 66868 | stable |
-| `near_limit/legacy` | 2 | 8 | 45.690 | 46.829 | 45.224 | 46.829 | 0 | 20560 | stable |
-| `diagnostic_flood/default` | 2 | 20 | 90.076 | 96.160 | 77.418 | 97.401 | 0 | 38524 | stable |
-| `diagnostic_flood/legacy` | 2 | 20 | 43.079 | 51.752 | 42.172 | 51.850 | 0 | 16656 | stable |
-| `preprocess/default` | 2 | 30 | 12.658 | 13.731 | 11.871 | 18.831 | 0 | 8236 | stable |
-| `preprocess/legacy` | 2 | 30 | 9.660 | 18.141 | 9.431 | 18.856 | 0 | 7524 | stable |
-| `stdin/default` | 2 | 30 | 3.883 | 3.970 | 2.041 | 4.459 | 0 | 3888 | stable |
-| `stdin/ast` | 2 | 30 | 3.644 | 3.764 | 2.053 | 4.263 | 0 | 3932 | stable |
-| `stdin/legacy` | 2 | 30 | 3.427 | 3.505 | 3.300 | 3.726 | 0 | 3384 | stable |
+| `startup` | 1 | 50 | 1.473 | 1.636 | 0.841 | 1.648 | 0 | 2404 | stable |
+| `corpus_small/default` | 1 | 50 | 3.680 | 4.584 | 2.464 | 4.714 | 0 | 3796 | stable |
+| `corpus_small/ast` | 1 | 50 | 2.862 | 4.524 | 2.283 | 4.926 | 0 | 3864 | stable |
+| `corpus_small/legacy` | 1 | 50 | 3.583 | 3.955 | 2.609 | 4.129 | 0 | 3452 | stable |
+| `corpus_small/compare` | 1 | 50 | 4.118 | 4.325 | 3.906 | 4.463 | 0 | 3888 | stable |
+| `corpus_medium/default` | 1 | 50 | 4.227 | 4.715 | 2.449 | 4.964 | 0 | 3888 | stable |
+| `corpus_medium/ast` | 1 | 50 | 3.339 | 5.792 | 2.287 | 7.004 | 0 | 3992 | stable |
+| `corpus_medium/legacy` | 1 | 50 | 2.319 | 4.391 | 1.994 | 4.671 | 0 | 3456 | stable |
+| `corpus_medium/compare` | 1 | 50 | 3.535 | 5.034 | 2.475 | 5.111 | 0 | 4048 | stable |
+| `corpus_large/default` | 1 | 30 | 2.694 | 3.237 | 2.369 | 3.554 | 0 | 3984 | stable |
+| `corpus_large/ast` | 1 | 30 | 2.818 | 4.366 | 2.369 | 4.554 | 0 | 3984 | stable |
+| `corpus_large/legacy` | 1 | 30 | 2.373 | 4.311 | 2.100 | 4.457 | 0 | 3576 | stable |
+| `corpus_large/compare` | 1 | 30 | 3.171 | 5.085 | 2.574 | 5.120 | 0 | 3980 | stable |
+| `corpus_invalid/default` | 1 | 50 | 2.653 | 4.473 | 2.234 | 4.648 | 1 | 3832 | stable |
+| `corpus_invalid/ast` | 1 | 50 | 3.254 | 4.659 | 2.324 | 5.069 | 1 | 3852 | stable |
+| `corpus_invalid/legacy` | 1 | 50 | 3.495 | 4.368 | 2.043 | 4.555 | 1 | 3632 | stable |
+| `corpus_invalid/compare` | 1 | 50 | 4.054 | 4.817 | 2.401 | 5.223 | 1 | 3956 | stable |
+| `corpus_dir/default` | 1 | 40 | 9.181 | 13.238 | 7.798 | 15.781 | 1 | 4296 | stable |
+| `corpus_dir/ast` | 1 | 40 | 7.795 | 9.792 | 6.604 | 12.012 | 1 | 4284 | stable |
+| `corpus_dir/legacy` | 1 | 40 | 5.967 | 8.092 | 4.072 | 8.251 | 1 | 4044 | stable |
+| `corpus_dir/compare` | 1 | 40 | 9.257 | 14.500 | 8.441 | 15.089 | 1 | 4292 | stable |
+| `many_symbols/default` | 1 | 30 | 29.236 | 35.813 | 19.426 | 36.152 | 0 | 16280 | stable |
+| `many_symbols/ast` | 1 | 30 | 29.428 | 36.499 | 19.326 | 36.679 | 0 | 16256 | stable |
+| `many_symbols/legacy` | 1 | 30 | 10.121 | 18.438 | 9.451 | 19.663 | 0 | 7576 | stable |
+| `call_graph/default` | 1 | 30 | 16.923 | 26.324 | 15.609 | 26.816 | 0 | 11788 | stable |
+| `call_graph/legacy` | 1 | 30 | 9.776 | 13.726 | 8.185 | 14.860 | 0 | 6524 | stable |
+| `nested_scopes/default` | 1 | 30 | 4.805 | 7.615 | 4.615 | 9.207 | 0 | 4868 | stable |
+| `nested_scopes/legacy` | 1 | 30 | 3.197 | 4.743 | 3.108 | 4.810 | 0 | 3612 | stable |
+| `malformed/default` | 1 | 30 | 4.627 | 8.341 | 4.056 | 9.314 | 1 | 4396 | stable |
+| `malformed/legacy` | 1 | 30 | 4.581 | 7.027 | 3.576 | 7.240 | 1 | 4036 | stable |
+| `multi_file/default` | 1 | 30 | 5.928 | 8.181 | 4.617 | 8.181 | 0 | 3992 | stable |
+| `multi_file/legacy` | 1 | 30 | 4.662 | 5.274 | 2.484 | 5.688 | 0 | 3660 | stable |
+| `near_limit/default` | 1 | 5 | 478.131 | 505.600 | 464.042 | 505.600 | 0 | 309756 | stable |
+| `near_limit/legacy` | 1 | 5 | 235.212 | 242.444 | 231.647 | 242.444 | 0 | 85252 | stable |
+| `diagnostic_flood/default` | 1 | 20 | 80.228 | 97.749 | 75.578 | 99.261 | 0 | 38520 | stable |
+| `diagnostic_flood/legacy` | 1 | 20 | 49.825 | 54.300 | 43.715 | 55.023 | 0 | 16576 | stable |
+| `preprocess/default` | 1 | 30 | 13.175 | 17.371 | 11.876 | 21.648 | 0 | 8284 | stable |
+| `preprocess/legacy` | 1 | 30 | 10.715 | 18.626 | 9.819 | 19.092 | 0 | 7464 | stable |
+| `stdin/default` | 1 | 30 | 2.431 | 4.475 | 2.149 | 4.936 | 0 | 3844 | stable |
+| `stdin/ast` | 1 | 30 | 2.472 | 4.420 | 2.162 | 4.488 | 0 | 3868 | stable |
+| `stdin/legacy` | 1 | 30 | 2.502 | 2.948 | 1.975 | 4.588 | 0 | 3476 | stable |
+| `startup` | 2 | 50 | 1.058 | 1.299 | 0.822 | 2.219 | 0 | 2184 | stable |
+| `corpus_small/default` | 2 | 50 | 2.887 | 4.259 | 2.379 | 4.464 | 0 | 3828 | stable |
+| `corpus_small/ast` | 2 | 50 | 3.798 | 4.608 | 2.193 | 5.620 | 0 | 3760 | stable |
+| `corpus_small/legacy` | 2 | 50 | 3.655 | 4.416 | 2.468 | 4.592 | 0 | 3432 | stable |
+| `corpus_small/compare` | 2 | 50 | 2.959 | 4.292 | 2.319 | 4.322 | 0 | 4056 | stable |
+| `corpus_medium/default` | 2 | 50 | 2.968 | 4.336 | 2.543 | 4.507 | 0 | 3928 | stable |
+| `corpus_medium/ast` | 2 | 50 | 4.016 | 4.628 | 2.503 | 6.675 | 0 | 3928 | stable |
+| `corpus_medium/legacy` | 2 | 50 | 3.420 | 4.475 | 2.069 | 4.631 | 0 | 3424 | stable |
+| `corpus_medium/compare` | 2 | 50 | 4.310 | 4.931 | 2.598 | 5.046 | 0 | 3896 | stable |
+| `corpus_large/default` | 2 | 30 | 3.599 | 5.517 | 2.545 | 6.073 | 0 | 3960 | stable |
+| `corpus_large/ast` | 2 | 30 | 3.071 | 5.358 | 2.586 | 5.775 | 0 | 4068 | stable |
+| `corpus_large/legacy` | 2 | 30 | 3.563 | 4.488 | 2.251 | 4.636 | 0 | 3528 | stable |
+| `corpus_large/compare` | 2 | 30 | 4.731 | 5.196 | 2.746 | 6.720 | 0 | 3984 | stable |
+| `corpus_invalid/default` | 2 | 50 | 4.016 | 4.808 | 2.576 | 6.290 | 1 | 3924 | stable |
+| `corpus_invalid/ast` | 2 | 50 | 2.618 | 4.127 | 2.200 | 4.562 | 1 | 3984 | stable |
+| `corpus_invalid/legacy` | 2 | 50 | 2.122 | 3.688 | 1.982 | 3.776 | 1 | 3512 | stable |
+| `corpus_invalid/compare` | 2 | 50 | 4.189 | 5.169 | 2.509 | 5.638 | 1 | 3816 | stable |
+| `corpus_dir/default` | 2 | 40 | 10.237 | 12.850 | 7.727 | 13.255 | 1 | 4300 | stable |
+| `corpus_dir/ast` | 2 | 40 | 12.024 | 14.028 | 8.275 | 14.354 | 1 | 4300 | stable |
+| `corpus_dir/legacy` | 2 | 40 | 7.121 | 7.520 | 4.054 | 8.652 | 1 | 4072 | stable |
+| `corpus_dir/compare` | 2 | 40 | 13.529 | 15.810 | 8.771 | 16.197 | 1 | 4284 | stable |
+| `many_symbols/default` | 2 | 30 | 28.396 | 36.014 | 19.605 | 36.351 | 0 | 16256 | stable |
+| `many_symbols/ast` | 2 | 30 | 29.593 | 35.256 | 19.583 | 35.381 | 0 | 16220 | stable |
+| `many_symbols/legacy` | 2 | 30 | 10.882 | 17.744 | 9.459 | 17.929 | 0 | 7608 | stable |
+| `call_graph/default` | 2 | 30 | 24.870 | 30.971 | 18.762 | 32.723 | 0 | 11844 | stable |
+| `call_graph/legacy` | 2 | 30 | 12.153 | 16.084 | 8.277 | 16.325 | 0 | 6556 | stable |
+| `nested_scopes/default` | 2 | 30 | 6.904 | 7.889 | 4.429 | 8.637 | 0 | 4724 | stable |
+| `nested_scopes/legacy` | 2 | 30 | 4.596 | 5.867 | 2.502 | 6.296 | 0 | 3604 | stable |
+| `malformed/default` | 2 | 30 | 6.811 | 7.237 | 4.914 | 7.546 | 1 | 4424 | stable |
+| `malformed/legacy` | 2 | 30 | 6.292 | 6.596 | 4.382 | 8.817 | 1 | 4016 | stable |
+| `multi_file/default` | 2 | 30 | 7.449 | 7.977 | 5.732 | 9.343 | 0 | 3980 | stable |
+| `multi_file/legacy` | 2 | 30 | 4.295 | 4.679 | 2.851 | 4.813 | 0 | 3588 | stable |
+| `near_limit/default` | 2 | 5 | 476.574 | 481.755 | 468.141 | 481.755 | 0 | 309752 | stable |
+| `near_limit/legacy` | 2 | 5 | 225.691 | 243.231 | 219.401 | 243.231 | 0 | 85268 | stable |
+| `diagnostic_flood/default` | 2 | 20 | 88.838 | 103.272 | 77.744 | 104.327 | 0 | 38488 | stable |
+| `diagnostic_flood/legacy` | 2 | 20 | 49.291 | 70.322 | 44.039 | 77.999 | 0 | 16624 | stable |
+| `preprocess/default` | 2 | 30 | 13.051 | 21.665 | 12.053 | 21.688 | 0 | 8260 | stable |
+| `preprocess/legacy` | 2 | 30 | 10.952 | 16.202 | 9.718 | 17.733 | 0 | 7500 | stable |
+| `stdin/default` | 2 | 30 | 3.722 | 4.737 | 2.411 | 4.756 | 0 | 3892 | stable |
+| `stdin/ast` | 2 | 30 | 3.997 | 4.682 | 2.482 | 4.686 | 0 | 3800 | stable |
+| `stdin/legacy` | 2 | 30 | 3.505 | 3.690 | 3.106 | 3.703 | 0 | 3480 | stable |
 
 ## Two-pass variation (median)
 
 | Row | Pass 1 ms | Pass 2 ms | Delta % |
 | --- | --- | --- | --- |
-| `call_graph/default` | 27.922 | 18.391 | 51.8 |
-| `call_graph/legacy` | 8.766 | 8.111 | 8.1 |
-| `corpus_dir/ast` | 12.301 | 11.627 | 5.8 |
-| `corpus_dir/compare` | 13.332 | 14.400 | 8.0 |
-| `corpus_dir/default` | 11.998 | 11.773 | 1.9 |
-| `corpus_dir/legacy` | 6.897 | 6.832 | 0.9 |
-| `corpus_invalid/ast` | 3.941 | 2.406 | 63.8 |
-| `corpus_invalid/compare` | 4.013 | 3.852 | 4.2 |
-| `corpus_invalid/default` | 3.741 | 3.757 | 0.4 |
-| `corpus_invalid/legacy` | 3.574 | 3.505 | 1.9 |
-| `corpus_large/ast` | 4.028 | 2.506 | 60.8 |
-| `corpus_large/compare` | 4.467 | 4.428 | 0.9 |
-| `corpus_large/default` | 4.157 | 4.114 | 1.0 |
-| `corpus_large/legacy` | 3.752 | 2.142 | 75.1 |
-| `corpus_medium/ast` | 2.247 | 4.047 | 80.1 |
-| `corpus_medium/compare` | 2.447 | 4.209 | 72.0 |
-| `corpus_medium/default` | 2.401 | 4.075 | 69.7 |
-| `corpus_medium/legacy` | 3.553 | 3.604 | 1.4 |
-| `corpus_small/ast` | 3.815 | 3.935 | 3.2 |
-| `corpus_small/compare` | 4.125 | 4.041 | 2.1 |
-| `corpus_small/default` | 3.796 | 4.041 | 6.5 |
-| `corpus_small/legacy` | 3.584 | 3.669 | 2.4 |
-| `diagnostic_flood/default` | 83.378 | 90.076 | 8.0 |
-| `diagnostic_flood/legacy` | 43.681 | 43.079 | 1.4 |
-| `malformed/default` | 4.769 | 6.538 | 37.1 |
-| `malformed/legacy` | 6.629 | 6.255 | 6.0 |
-| `many_symbols/ast` | 31.933 | 31.227 | 2.3 |
-| `many_symbols/default` | 27.407 | 32.560 | 18.8 |
-| `many_symbols/legacy` | 11.653 | 9.440 | 23.4 |
-| `multi_file/default` | 7.197 | 7.511 | 4.4 |
-| `multi_file/legacy` | 4.297 | 4.171 | 3.0 |
-| `near_limit/default` | 104.487 | 103.834 | 0.6 |
-| `near_limit/legacy` | 48.096 | 45.690 | 5.3 |
-| `nested_scopes/default` | 7.001 | 7.039 | 0.6 |
-| `nested_scopes/legacy` | 4.530 | 4.508 | 0.5 |
-| `preprocess/default` | 15.909 | 12.658 | 25.7 |
-| `preprocess/legacy` | 9.862 | 9.660 | 2.1 |
-| `stdin/ast` | 3.662 | 3.644 | 0.5 |
-| `stdin/default` | 2.048 | 3.883 | 89.6 |
-| `stdin/legacy` | 3.373 | 3.427 | 1.6 |
+| `call_graph/default` | 16.923 | 24.870 | 47.0 |
+| `call_graph/legacy` | 9.776 | 12.153 | 24.3 |
+| `corpus_dir/ast` | 7.795 | 12.024 | 54.2 |
+| `corpus_dir/compare` | 9.257 | 13.529 | 46.1 |
+| `corpus_dir/default` | 9.181 | 10.237 | 11.5 |
+| `corpus_dir/legacy` | 5.967 | 7.121 | 19.3 |
+| `corpus_invalid/ast` | 3.254 | 2.618 | 24.3 |
+| `corpus_invalid/compare` | 4.054 | 4.189 | 3.3 |
+| `corpus_invalid/default` | 2.653 | 4.016 | 51.4 |
+| `corpus_invalid/legacy` | 3.495 | 2.122 | 64.7 |
+| `corpus_large/ast` | 2.818 | 3.071 | 9.0 |
+| `corpus_large/compare` | 3.171 | 4.731 | 49.2 |
+| `corpus_large/default` | 2.694 | 3.599 | 33.6 |
+| `corpus_large/legacy` | 2.373 | 3.563 | 50.1 |
+| `corpus_medium/ast` | 3.339 | 4.016 | 20.3 |
+| `corpus_medium/compare` | 3.535 | 4.310 | 21.9 |
+| `corpus_medium/default` | 4.227 | 2.968 | 42.4 |
+| `corpus_medium/legacy` | 2.319 | 3.420 | 47.5 |
+| `corpus_small/ast` | 2.862 | 3.798 | 32.7 |
+| `corpus_small/compare` | 4.118 | 2.959 | 39.2 |
+| `corpus_small/default` | 3.680 | 2.887 | 27.4 |
+| `corpus_small/legacy` | 3.583 | 3.655 | 2.0 |
+| `diagnostic_flood/default` | 80.228 | 88.838 | 10.7 |
+| `diagnostic_flood/legacy` | 49.825 | 49.291 | 1.1 |
+| `malformed/default` | 4.627 | 6.811 | 47.2 |
+| `malformed/legacy` | 4.581 | 6.292 | 37.4 |
+| `many_symbols/ast` | 29.428 | 29.593 | 0.6 |
+| `many_symbols/default` | 29.236 | 28.396 | 3.0 |
+| `many_symbols/legacy` | 10.121 | 10.882 | 7.5 |
+| `multi_file/default` | 5.928 | 7.449 | 25.7 |
+| `multi_file/legacy` | 4.662 | 4.295 | 8.6 |
+| `near_limit/default` | 478.131 | 476.574 | 0.3 |
+| `near_limit/legacy` | 235.212 | 225.691 | 4.2 |
+| `nested_scopes/default` | 4.805 | 6.904 | 43.7 |
+| `nested_scopes/legacy` | 3.197 | 4.596 | 43.8 |
+| `preprocess/default` | 13.175 | 13.051 | 1.0 |
+| `preprocess/legacy` | 10.715 | 10.952 | 2.2 |
+| `stdin/ast` | 2.472 | 3.997 | 61.7 |
+| `stdin/default` | 2.431 | 3.722 | 53.1 |
+| `stdin/legacy` | 2.502 | 3.505 | 40.1 |
 
 ## Notes
 

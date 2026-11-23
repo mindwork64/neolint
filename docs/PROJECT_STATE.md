@@ -44,9 +44,11 @@ Recorded for the exact tested revisions; re-run only when source or tests change
 - Harness: `bench/bench.py` (+ `bench/workloads.py`, `bench/README.md`), stdlib
   only. Baseline and post-fix runs live in `bench/results/`.
 - Evidence document: `docs/architecture/ast-stabilization.md`.
-- Two measured fixes: per-diagnostic whole-buffer validation hoisted to per-unit
-  (flood −49 % end-to-end), and name-indexed scope lookup (4,000-declaration
-  analysis 86 ms → 7.8 ms). No regression beyond the stated noise floor.
+- Two measured fixes, verified with binaries rebuilt from clean worktrees at
+  `66936b0` (base) and `1273c4d` (post-fix) and digest-checked: per-diagnostic
+  whole-buffer validation hoisted to per-unit (flood −50 % end-to-end) and
+  name-indexed scope lookup (4,000-declaration workload 136 ms → 53 ms CLI;
+  larger analysis-only effect). Legacy rows act as a negative control for noise.
 
 ## Limits
 

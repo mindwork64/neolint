@@ -10,17 +10,25 @@ adding a crate, a benchmark framework or a timing assertion to CI.
 # Build once, then measure two independent passes
 python3 bench/bench.py --passes 2
 
-# Reuse an existing release binary
-python3 bench/bench.py --passes 2 --skip-build
+# Measure a binary built from a specific commit and verify its digest
+python3 bench/bench.py --passes 2 --skip-build \
+  --binary target/wt-base/target/release/neolint \
+  --binary-source-commit <commit> --expect-binary-sha256 <sha256>
 
 # Fast smoke check of the harness itself (never a timing threshold)
 python3 bench/bench.py --quick --self-test --skip-build
 ```
 
-Results are written to `bench/results/<commit>/{summary.md,meta.json,raw.jsonl}`.
-`summary.md` and `meta.json` are committed; `raw.jsonl` is regenerated on demand
-and is ignored by git because a two-pass run produces several hundred kilobytes
-per commit.
+Results are written to `bench/results/<label>/{summary.md,meta.json,raw.jsonl,raw.jsonl.gz}`.
+`summary.md`, `meta.json` and the compressed `raw.jsonl.gz` are committed;
+uncompressed `raw.jsonl` is regenerated on demand and ignored by git.
+
+`meta.json` separates the **harness** revision (`harness_commit`/`harness_tree`/
+`harness_branch`) from the **measured binary** revision
+(`binary_source_commit`/`binary_source_tree`) and records the binary SHA-256.
+Passing `--expect-binary-sha256` makes the harness refuse to measure a binary that
+does not match, and sets `binary_source_verified`. Every input file is hashed
+recursively under `inputs` with repository-relative keys and byte sizes.
 
 ## What is measured
 
@@ -49,7 +57,7 @@ corpus-manifest changes):
 | `call_graph` | 800 reachable + 700 unreachable functions, 400-wide fan-out | call-graph construction and reachability |
 | `nested_scopes` | depth 40, 5 locals per level | scope chain walk |
 | `preprocess` | 400 generated helpers over 8 includes | macro/include expansion |
-| `near_limit` | 25,000 statements (~1.3 MB) | large valid input |
+| `near_limit` | 120,000 statements (7.65 MiB, 91 % of the 8 MiB root limit) | large valid input near a documented limit |
 | `malformed` | 500 malformed initializers | recovery path |
 | `diagnostic_flood` | 10,000 undeclared references | rendered-diagnostic cap |
 | `multi_file` | 24 units in one directory | multi-unit aggregation |
