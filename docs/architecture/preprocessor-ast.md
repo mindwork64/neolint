@@ -2156,28 +2156,37 @@ classifications.
 
 ## 12. Resource limits (L)
 
-Limits are mandatory because preprocessor input is untrusted. The values below
-are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
+Limits are mandatory because preprocessor input is untrusted. The table maps every
+documented limit to the constant that implements it, the enforcement point, its
+scope and the observable behaviour when it is exceeded. "Checked before work" means
+the guard runs before the allocation or traversal it bounds.
 
-| Limit | Implemented value | Enforcement point |
-| --- | --- | --- |
-| Root file size | 8 MiB (`MAX_ROOT_SOURCE_BYTES`) | Source Manager |
-| Root AnalysisUnits per CLI invocation | 65,536 (`MAX_ANALYSIS_UNITS_PER_INVOCATION`) | Pipeline |
-| Included file size | 4 MiB (`MAX_INCLUDED_SOURCE_BYTES`, future include phase) | Source Manager |
-| Source files per AnalysisUnit | 256 (`MAX_SOURCE_FILES_PER_UNIT`) | Source Manager |
-| Include depth | 64 | Preprocessor include stack |
-| Macro expansion depth | 64 | Preprocessor expander |
-| Conditional nesting depth | 64 | Preprocessor conditional stack |
-| Expression nesting depth | 128 | Preprocessor expression parser |
-| Expanded bytes/tokens per unit | 8 MiB / 1,000,000 tokens | Preprocessor output budget |
-| Origin chain depth | 64 | Source Map |
-| Preprocessor diagnostics | 1,000 | Preprocessor diagnostic sink |
-| Total rendered diagnostics per unit | 10,000 | Unified analysis result |
-| Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
-| AST recursion depth | 256 recursive constructs (explicit AST001 guard) | AST parser |
-| Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
-| Compare SEM fingerprints per engine per unit | 100,000 (`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`) | Engine comparator |
-| Compare detail samples | 64 per rule per direction (`MAX_COMPARE_DETAILS_PER_RULE`) | Engine comparator |
+| Limit | Constant | Value | Enforcement | Scope | Behaviour on exceed | Boundary test |
+| --- | --- | --- | --- | --- | --- | --- |
+| Root file size | `MAX_ROOT_SOURCE_BYTES` | 8 MiB | `SourceManager::load_root_file` via `read_bounded` (`src/source/manager.rs:159`, `:314`) | Per root file | `SourceLoadError::TooLarge` ⇒ input error, exit 2 | `enforces_root_size_boundary_with_bounded_reads` |
+| Included file size | `MAX_INCLUDED_SOURCE_BYTES` | 4 MiB | `SourceManager::load_included_file` via `read_bounded` (`src/source/manager.rs:251`) | Per included file | `TooLarge` ⇒ `PRE035` | `enforces_included_size_boundary_with_bounded_reads` |
+| Source files per unit | `MAX_SOURCE_FILES_PER_UNIT` | 256 | `check_capacity` before registration (`src/source/manager.rs:262`) | Per `AnalysisUnit` | `TooManyFiles` ⇒ `PRE035` | `enforces_source_file_count_capacity` |
+| Analysis units per invocation | `MAX_ANALYSIS_UNITS_PER_INVOCATION` | 65,536 | `AnalysisRun::begin_unit` before unit construction (`src/pipeline.rs:336`) | Per CLI invocation | `SetupError::TooManyUnits` ⇒ exit 2 | `unit_capacity_is_enforced_before_the_next_unit_is_constructed` |
+| Include depth | `MAX_INCLUDE_DEPTH` | 64 | `IncludeResolver` before loading the included file (`src/preprocessor/directive.rs:506`) | Per unit | `PRE034`, expansion stops | `include_depth_64_is_allowed_and_65_is_diagnosed` |
+| Macro expansion depth | `MAX_EXPANSION_DEPTH` | 64 | Expander entry (`src/preprocessor/expand.rs:19`) | Per expansion | `PRE019` | `macro_depth_limit`, `function_macro_expansion_at_depth_64_succeeds` |
+| Conditional nesting depth | `MAX_CONDITIONAL_DEPTH` | 64 | Directive stack (`src/preprocessor/directive.rs:36`) | Per unit | `PRE025` | `conditional_depth_limit` |
+| Preprocessor expression depth | `MAX_EXPRESSION_DEPTH` | 128 | Expression parser entry (`src/preprocessor/expr.rs:232`) | Per `#if` expression | `PRE006`, expression rejected | `PRE006` cases in `src/preprocessor/directive.rs` |
+| Expanded bytes per unit | `MAX_EXPANDED_BYTES` | 8 MiB | Expander output budget (`src/preprocessor/expand.rs:20`) | Per unit | `PRE020` | `src/preprocessor/directive.rs:2387` |
+| Expanded tokens per unit | `MAX_EXPANDED_TOKENS` | 1,000,000 | Expander output budget (`src/preprocessor/expand.rs:21`) | Per unit | `PRE021` | `src/preprocessor/directive.rs:2387` |
+| Origin chain depth | `MAX_ORIGIN_DEPTH` | 64 | `SourceMapBuilder` chain validation and insertion (`src/source/map.rs:635`, `:905`) | Per span resolution | `SpanError::MapInvariant`, fails closed | `origin_chain_accepts_the_documented_depth_and_rejects_one_more` |
+| Preprocessor diagnostics | `MAX_PREPROCESS_DIAGNOSTICS` | 1,000 | Diagnostic sink (`src/preprocessor/diagnostics.rs:66`) | Per unit | `PRE022` | `src/preprocessor/directive.rs:2083` |
+| Rendered diagnostics | `MAX_TOTAL_DIAGNOSTICS` | 10,000 | `cap_rendered_with` after rule suppression (`src/source/unit.rs:179`, `:296`) | Per unit | Truncate, append terminal `PRE039` | `tests/cap_suppression.rs` suite |
+| Rendered diagnostics (invocation) | `MAX_TOTAL_DIAGNOSTICS` | 10,000 | CLI aggregation (`src/main.rs:582`) | Per CLI invocation | Truncate, append terminal `PRE039` | `global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039`, `invocation_cap_applies_to_ast_and_compare` |
+| AST recursion depth | `MAX_AST_RECURSION_DEPTH` | 256 | Parser entry for statements and expressions (`src/ast/parser.rs:460`, `:1114`) | Per unit | `AST001`, deepest construct skipped | `AST001` cases in `tests/ast_parser.rs`, `tests/ast_firestorm.rs` |
+| AST parser worker stack | `PARSER_STACK_BYTES` | 16 MiB | Dedicated parser thread (`src/ast/parser.rs:2695`) | Per parse | `AST002` if the worker cannot start | `worker_failure_returns_empty_ast_and_one_safe_diagnostic` |
+| AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` growth and traversal (`src/ast_semantic/flow.rs:19-22`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
+| AST constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` | 128 / 64 | `evaluate_integer` budget (`src/ast_semantic/flow.rs:23-24`) | Per expression | Evaluation yields "not constant"; dependent rule is suppressed | Phase 6C/6D suites |
+| Type inference depth | `MAX_TYPE_DEPTH` | 256 | `infer_expression_type` (`src/ast_semantic/types.rs:11`, `:86`) | Per expression | Type inference yields unknown; dependent rules are suppressed | Defensive: the parser cap fires first (see below) |
+| Call-graph analysis | `MAX_CALL_GRAPH_NODES` / `MAX_CALL_GRAPH_EDGES` / `MAX_CALL_GRAPH_WORK` | 4,096 / 8,192 / 16,384 | Graph construction and reachability (`src/ast_semantic/callgraph.rs:24-28`) | Per unit | Whole graph suppressed; `SEM026` emits nothing | `call_graph_budget_overflow_suppresses_sem026`, `production_edge_budget_overflow_suppresses_sem026`, `production_work_budget_overflow_suppresses_sem026` |
+| Legacy control-flow analysis | `MAX_CFG_TOKENS_PER_FUNCTION` / `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` | 16,384 / 4,096 / 8,192 / 128 | Legacy flow scanner (`src/semantic.rs:1684-1687`) | Per function | Flow rule is suppressed | Legacy semantic tests |
+| Legacy constant evaluation | `MAX_CONSTANT_EXPRESSION_TOKENS` / `MAX_CONSTANT_EXPRESSION_DEPTH` | 128 / 64 | Legacy constant scanner (`src/semantic.rs:1816-1817`) | Per expression | Expression treated as non-constant | Legacy semantic tests |
+| Compare fingerprints | `MAX_COMPARE_FINGERPRINTS_PER_ENGINE` | 100,000 | Counting pass before fingerprint materialisation (`src/engine/compare.rs:36`, `:344`) | Per engine per unit | No diagnostic: `comparison_complete = false`, `matched = false`, CLI exits 3 | `compare_budget_enforcement` suite |
+| Compare detail samples | `MAX_COMPARE_DETAILS_PER_RULE` | 64 | Merge keeps at most 64 samples per rule per direction (`src/engine/compare.rs:25`) | Per rule per direction | `details_truncated = true`; totals stay exact | `extra_detail_samples_are_bounded_and_sorted` |
 
 Requirements:
 
@@ -2203,14 +2212,29 @@ Requirements:
   O(delta). Exceeding that 64-sample cap (more than 64 missing/extra
   fingerprints in one rule/direction) sets `details_truncated = true`; that is a
   display bound, not an incomplete comparison, and the totals remain exact.
-- Limits are checked before allocation where possible.
+- Flow-analysis and constant-evaluation caps suppress their dependent rule
+  silently: no partial graph and no guessed reachability is reported. This is
+  the same fail-closed policy the Phase 7 call graph uses.
+- `MAX_TYPE_DEPTH` is defence in depth. The AST parser's own 256-deep recursion
+  guard rejects deeper nesting first, so the type walker cannot be reached with
+  a source-level expression deeper than its limit; the cap protects a future
+  parser relaxation rather than current input.
+- The parser runs on a dedicated thread with a 16 MiB stack. `AST002` reports a
+  worker that cannot be created or that terminates unexpectedly, so a stack
+  failure degrades to a safe diagnostic instead of a panic.
+- Limits are checked before allocation where possible: bounded reads take at
+  most `limit + 1` bytes, capacity checks run before registration, the unit cap
+  runs before the unit is constructed, and the call-graph counters are checked
+  before every node, edge and work step.
 - `AnalysisUnitId` and `RunId` assignment uses checked arithmetic. Exceeding
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
   re-use, or `panic`. `RunId` is process-local and never emitted.
-- Phase 1 tests cover root size boundary/+1, source count capacity, and unit
-  count arithmetic. Phase 2 tests cover conditional depth 64/65, macro depth
-  64/65, expansion growth, and the diagnostic cap; include limits remain Phase 3.
 - No limit may depend on machine memory size.
+- The CFG limit constants exist twice, in `src/ast_semantic/flow.rs` and
+  `src/semantic.rs`, because the two engines keep independent budgeting code.
+  The values are identical today; consolidating them would couple the Legacy
+  and AST engines and is tracked as a separate follow-up rather than changed
+  inside a stabilization phase.
 
 ---
 
@@ -3819,8 +3843,17 @@ Risks tracked from the baseline analysis:
 7. CI runs stable Rust; MSRV 1.75 is not enforced today. New code must avoid
    post-1.75 std APIs, and an MSRV check should be added when the experimental
    workflow is extended.
+   **Resolved (Phase 6H):** `.github/workflows/experimental-ci.yml` installs
+   Rust 1.75.0 and runs `cargo test --all-targets --all-features` on it; Phase 8
+   re-verified the same command in its required matrix. New code still avoids
+   post-1.75 std APIs.
 8. The documentation test only scans three source files; new diagnostic families
    must extend it, or codes can ship undocumented.
+   **Resolved (Phase 6H):** `scripts/test_documentation.py` scans `src/lexer.rs`,
+   `src/parser.rs`, `src/semantic.rs` and every `*.rs` under `src/preprocessor`,
+   `src/ast` and `src/ast_semantic` recursively, so a new `SEM`/`PRE`/`AST`/`LEX`
+   code fails the gate until it is documented. Phase 8 added a documentation test
+   for the AST-only rule family.
 9. Preprocessor scope can grow without bound; the phase plan and limits are the
    guardrails.
 10. Firestorm behavior must be documented, not guessed; unknown built-ins stay

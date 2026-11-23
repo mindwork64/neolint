@@ -420,6 +420,27 @@ mod tests {
     }
 
     #[test]
+    fn enforces_included_size_boundary_with_bounded_reads() {
+        let directory = temp_dir();
+        let exact = directory.join("exact.lsl");
+        let too_large = directory.join("large.lsl");
+        fs::write(&exact, vec![b'a'; MAX_INCLUDED_SOURCE_BYTES]).unwrap();
+        fs::write(&too_large, vec![b'a'; MAX_INCLUDED_SOURCE_BYTES + 1]).unwrap();
+
+        let mut manager = SourceManager::new(unit(0));
+        assert!(manager.load_included_file(&exact, "exact.lsl").is_ok());
+
+        let mut manager = SourceManager::new(unit(1));
+        assert!(matches!(
+            manager.load_included_file(&too_large, "large.lsl"),
+            Err(SourceLoadError::TooLarge {
+                limit: MAX_INCLUDED_SOURCE_BYTES
+            })
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn enforces_root_size_boundary_with_bounded_reads() {
         let directory = temp_dir();
         let exact = directory.join("exact.lsl");
