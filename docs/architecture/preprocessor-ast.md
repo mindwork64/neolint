@@ -1,16 +1,14 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5 and 6A–6E implemented on the experimental branch**;
+Status: **Phases 1–5 and 6A–6F implemented on the experimental branch**;
 this document remains the normative contract for the remaining Phase 6 slices.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
-implemented; the Phase 6A structural semantics foundation, Phase 6B
-expression-typing/call-signature rules, Phase 6C return/control-flow rules,
-Phase 6D expression/assignment validation and Phase 6E symbol/deprecation
-warnings are implemented, while SEM022/SEM023 and engine migration remain future
-work.
+implemented. All existing SEM001–SEM023 diagnostics now have independent AST
+implementations with differential parity; engine selection/integration remains
+future work.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -2887,7 +2885,7 @@ access/assignment/casts/indices/spans/malformed recovery and deep nesting.
 `tests/ast_bridge.rs` resolves every new node span through identity, macro and
 include prepared streams. Existing Legacy/grammar/corpus tests remain unchanged.
 
-### Phase 6 — AST semantic analyzer and migration (Phase 6A–6E implemented)
+### Phase 6 — AST semantic analyzer and migration (Phase 6A–6F implemented)
 
 #### Phase 6A implementation record
 
@@ -3099,8 +3097,40 @@ the list), unknown-call/event suppression, malformed unmatched calls, nested
 calls, source-order/multiplicity and cross-rule independence. No intentional
 diagnostic deltas exist in this slice.
 
-**Boundary.** SEM022 and SEM023 remain Legacy-only. No new SEM codes, severity
-changes, CLI/pipeline selection or Legacy behavior changes.
+**Boundary at the end of 6E.** SEM022 and SEM023 remained Legacy-only. No new
+SEM codes, severity changes, CLI/pipeline selection or Legacy behavior changes.
+
+#### Phase 6F implementation record
+
+**Status:** implemented independently in `src/ast_semantic/rules/` and the shared
+statement walker; still not connected to `AnalysisRun`, CLI, pipeline, compare
+mode, preprocessor or SourceMap. Legacy remains the only user-visible semantic
+engine.
+
+**SEM022.** Known states come only from complete AST state declarations
+(`body_closed`, non-missing, non-empty names), including `default`. State changes
+are eligible only inside complete state bodies and complete canonical event
+bodies; ordinary functions, unknown extension events, incomplete expressions and
+unmatched bodies are excluded. Later states are known before checking, and the
+Legacy `state default;` keyword exception is preserved.
+
+**SEM023.** A shared iterative statement walker visits function and all event
+bodies, nested blocks, unbraced if/else/loop bodies and switch arms. Only a
+statement-owned expression whose parenthesized root is one of the six comparison
+operators is a candidate. Control conditions, initializers, returns and other
+used expressions are not candidates. Statement-local syntax diagnostics, Error
+descendants, calls, assignments and increments suppress the warning; the span is
+the exact operator token.
+
+**Parity.** The differential harness now compares full normalized records for all
+23 existing codes SEM001–SEM023 over every corpus fixture. Focused exact tests
+cover both rules' messages/spans/severity/kind, state-target completeness and
+event boundaries, all comparison operators, nested/unbraced control flow,
+unknown events, syntax/side-effect suppression, Firestorm switch arms and
+cross-rule coexistence. No intentional diagnostic deltas exist in this slice.
+
+**Boundary.** All existing SEM rules are AST-migrated; engine selection and
+CLI/pipeline integration remain intentionally out of scope.
 
 - **Goal:** migrate SEM rules to the AST engine, add conservative AST-only rules,
   and stabilize.
