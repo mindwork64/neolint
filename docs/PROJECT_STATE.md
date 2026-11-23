@@ -6,9 +6,9 @@ records verified state.
 
 ## Where the project is
 
-- **Phase 8 (Issue #107, AST-first stabilization) is implementation-complete on an
-  experimental branch and open as PR [#112](https://github.com/mindwork64/neolint/pull/112),
-  not merged.**
+- **Phase 8 (Issue #107, AST-first stabilization) is delivered on the
+  experimental feature branch through [PR #112](https://github.com/mindwork64/neolint/pull/112),
+  targeting the integration branch `exp/preprocessor-ast`.**
 - Branch: `exp-preprocessor-ast-phase-08-stabilization`.
 - Integration base: `66936b0e175d51cba8d83377061229869ef64e96` (`exp/preprocessor-ast`).
 - Benchmark evidence artifact snapshot: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
