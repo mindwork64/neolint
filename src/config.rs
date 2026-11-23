@@ -6,7 +6,7 @@
 //! the binary. Parsing and validation return human readable errors so the CLI
 //! can exit with code 2 without panicking.
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::engine::AnalysisEngine;
+use crate::engine::{AnalysisEngine, DisplaySuppression};
 use crate::preprocessor::PreprocessDialect;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -215,6 +215,16 @@ impl LintConfig {
             }
         }
     }
+
+    /// Disabled rule codes as display suppression.
+    ///
+    /// The set combines config-file `disable =` values with command-line
+    /// `--disable` values. Severity overrides are deliberately excluded because
+    /// a downgraded rule still produces diagnostics and still counts toward the
+    /// rendered-diagnostic cap.
+    pub fn display_suppression(&self) -> DisplaySuppression {
+        DisplaySuppression::new(self.disabled_rules.iter().cloned())
+    }
 }
 
 fn validate_rule_code(rule: &str) -> Result<(), String> {
@@ -294,6 +304,19 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn display_suppression_contains_disabled_rules_but_not_severity_overrides() {
+        let mut config = LintConfig::parse("disable = SEM012\nseverity.SEM013 = info\n").unwrap();
+        config.disable(vec!["SEM014".to_owned()]).unwrap();
+
+        let suppression = config.display_suppression();
+        assert!(!suppression.is_empty());
+        assert!(suppression.is_suppressed("SEM012"));
+        assert!(suppression.is_suppressed("SEM014"));
+        assert!(!suppression.is_suppressed("SEM013"));
+        assert!(!suppression.is_suppressed("SEM001"));
     }
 
     #[test]

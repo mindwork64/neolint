@@ -472,6 +472,7 @@ fn run_units(
     let options = EngineAnalysisOptions {
         collect_tokens: show_tokens,
     };
+    let suppression = config.display_suppression();
     let expected_units = unit_indexes.len();
     let mut analyzed_units = 0usize;
     let mut results = Vec::new();
@@ -490,14 +491,15 @@ fn run_units(
             input_failed = true;
             continue;
         };
-        let analysis = match unit.analyze_with_engine_options(engine, &options) {
-            Ok(analysis) => analysis,
-            Err(error) => {
-                eprintln!("neolint: cannot analyze unit {index}: {error}");
-                input_failed = true;
-                continue;
-            }
-        };
+        let analysis =
+            match unit.analyze_with_engine_options_suppressed(engine, &options, &suppression) {
+                Ok(analysis) => analysis,
+                Err(error) => {
+                    eprintln!("neolint: cannot analyze unit {index}: {error}");
+                    input_failed = true;
+                    continue;
+                }
+            };
         analyzed_units += 1;
 
         if engine == AnalysisEngine::Compare {

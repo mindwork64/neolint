@@ -6,7 +6,8 @@
 use neolint::preprocessor::PreprocessSettings;
 use neolint::{
     lex, parser::parse_legacy, AnalysisEngine, AnalysisRun, AstParseOptions, DiagnosticKind,
-    EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity, Span, SpanError,
+    DisplaySuppression, EngineAnalysisError, EngineAnalysisOptions, RenderedDiagnostic, Severity,
+    Span, SpanError,
 };
 
 fn assert_legacy_equal(left: &[RenderedDiagnostic], right: &[RenderedDiagnostic]) {
@@ -372,6 +373,78 @@ fn prepared_cap_boundary_is_exact() {
             assert_eq!(frozen.diagnostic(), legacy.diagnostic(), "{lines} lines");
         }
     }
+}
+
+#[test]
+fn suppression_precedes_prepared_cap_but_frozen_entry_points_do_not_suppress() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("prepared.lsl", &source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let options = EngineAnalysisOptions::default();
+
+    let suppression = DisplaySuppression::new(["SEM012".to_owned()]);
+    let suppressed = unit
+        .analyze_with_engine_options_suppressed(AnalysisEngine::Ast, &options, &suppression)
+        .unwrap();
+    assert!(suppressed.diagnostics().is_empty());
+
+    for diagnostics in [
+        unit.analyze_with_engine(AnalysisEngine::Ast)
+            .unwrap()
+            .into_diagnostics(),
+        unit.analyze().unwrap(),
+        run.analyze().unwrap(),
+    ] {
+        assert_eq!(diagnostics.len(), limit);
+        assert_eq!(diagnostics.last().unwrap().diagnostic().code, "PRE039");
+    }
+
+    let unrelated = DisplaySuppression::new(["SEM001".to_owned()]);
+    let still_capped = unit
+        .analyze_with_engine_options_suppressed(AnalysisEngine::Ast, &options, &unrelated)
+        .unwrap();
+    assert_eq!(still_capped.diagnostics().len(), limit);
+    assert_eq!(
+        still_capped.diagnostics().last().unwrap().diagnostic().code,
+        "PRE039"
+    );
+}
+
+#[test]
+fn suppression_precedes_plain_cap_but_frozen_analyze_does_not_suppress() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = format!(
+        "{}default {{ }}\n",
+        "integer duplicate;\n".repeat(limit + 2)
+    );
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_legacy_text("plain.lsl", &source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let suppression = DisplaySuppression::new(["SEM001".to_owned()]);
+
+    let suppressed = unit
+        .analyze_with_engine_options_suppressed(
+            AnalysisEngine::Legacy,
+            &EngineAnalysisOptions::default(),
+            &suppression,
+        )
+        .unwrap();
+    assert!(suppressed.diagnostics().is_empty());
+
+    let frozen = unit.analyze().unwrap();
+    assert_eq!(frozen.len(), limit);
+    assert_eq!(frozen.last().unwrap().diagnostic().code, "PRE039");
+}
+
+fn unresolved_variable_flood(statements: usize) -> String {
+    let mut source = String::from("default { state_entry() {\n");
+    for _ in 0..statements {
+        source.push_str("x = 1;\n");
+    }
+    source.push_str("} }\n");
+    source
 }
 
 #[test]

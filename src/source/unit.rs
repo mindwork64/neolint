@@ -11,7 +11,8 @@ use crate::engine::wiring::{
     LegacySyntax,
 };
 use crate::engine::{
-    AnalysisEngine, EngineAnalysisError, EngineAnalysisOptions, UnitEngineAnalysis,
+    AnalysisEngine, DisplaySuppression, EngineAnalysisError, EngineAnalysisOptions,
+    UnitEngineAnalysis,
 };
 use crate::preprocessor::PreparedSource;
 use crate::semantic::analyze_with_syntax_diagnostics;
@@ -98,12 +99,13 @@ impl AnalysisUnit {
     /// Prepared units bridge prepared spans through the prepared source and map.
     /// Preprocessor diagnostics, when present, are converted first.
     pub fn analyze(&self) -> Result<Vec<RenderedDiagnostic>, SpanError> {
+        let suppression = DisplaySuppression::default();
         if let Some(prepared) = &self.prepared {
             return Ok(self
-                .analyze_prepared(prepared, AnalysisEngine::Legacy, false)?
+                .analyze_prepared(prepared, AnalysisEngine::Legacy, false, &suppression)?
                 .into_diagnostics());
         }
-        let (rendered, _tokens) = self.analyze_plain(false)?;
+        let (rendered, _tokens) = self.analyze_plain(false, &suppression)?;
         Ok(rendered)
     }
 
@@ -124,13 +126,34 @@ impl AnalysisUnit {
         engine: AnalysisEngine,
         options: &EngineAnalysisOptions,
     ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        self.analyze_with_engine_options_suppressed(engine, options, &DisplaySuppression::default())
+    }
+
+    /// Run an engine-aware analysis with explicit options and display suppression.
+    ///
+    /// Suppressed diagnostics are dropped before the rendered-diagnostic cap is
+    /// evaluated, so a disabled rule cannot cause the terminal `PRE039`
+    /// overflow diagnostic merely by exceeding the cap. The frozen
+    /// [`AnalysisUnit::analyze`] and [`AnalysisUnit::analyze_with_engine_options`]
+    /// entry points apply no suppression and keep their existing cap behavior.
+    pub fn analyze_with_engine_options_suppressed(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+        suppression: &DisplaySuppression,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
         if let Some(prepared) = &self.prepared {
-            return Ok(self.analyze_prepared(prepared, engine, options.collect_tokens)?);
+            return Ok(self.analyze_prepared(
+                prepared,
+                engine,
+                options.collect_tokens,
+                suppression,
+            )?);
         }
         if engine.requires_prepared_source() {
             return Err(EngineAnalysisError::PreparedSourceRequired { unit: self.id });
         }
-        let (diagnostics, tokens) = self.analyze_plain(options.collect_tokens)?;
+        let (diagnostics, tokens) = self.analyze_plain(options.collect_tokens, suppression)?;
         Ok(UnitEngineAnalysis::new(diagnostics, None, tokens))
     }
 
@@ -138,6 +161,7 @@ impl AnalysisUnit {
     fn analyze_plain(
         &self,
         collect_tokens: bool,
+        suppression: &DisplaySuppression,
     ) -> Result<(Vec<RenderedDiagnostic>, Vec<crate::lexer::Token>), SpanError> {
         let root = self.legacy_root().ok_or(SpanError::NotLegacyUnit)?;
         let text = self.manager.text(root).ok_or(SpanError::UnknownSourceId)?;
@@ -148,6 +172,9 @@ impl AnalysisUnit {
         for diagnostic in lexical.into_iter().chain(syntax).chain(semantic) {
             let tagged = self.legacy_diagnostic(diagnostic)?;
             rendered.push(RenderedDiagnostic::from_legacy(tagged, self)?);
+        }
+        if !suppression.is_empty() {
+            rendered.retain(|diagnostic| !suppression.is_suppressed(diagnostic.diagnostic().code));
         }
         let limit = crate::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
         if rendered.len() > limit {
@@ -194,6 +221,7 @@ impl AnalysisUnit {
         prepared: &PreparedSource,
         engine: AnalysisEngine,
         collect_tokens: bool,
+        suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, SpanError> {
         let mut rendered = Vec::new();
         for diagnostic in prepared.preprocess_diagnostics() {
@@ -253,7 +281,15 @@ impl AnalysisUnit {
                 prepared,
             )?);
         }
-        crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
+        if suppression.is_empty() {
+            crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
+        } else {
+            crate::preprocessor::diagnostics::cap_rendered_with(
+                prepared,
+                &mut rendered,
+                |diagnostic| !suppression.is_suppressed(diagnostic.diagnostic().code),
+            )?;
+        }
         let tokens = if collect_tokens { tokens } else { Vec::new() };
         Ok(UnitEngineAnalysis::new(rendered, comparison, tokens))
     }
