@@ -3436,13 +3436,21 @@ mod phase3_include_advanced_tests {
     }
 
     fn run_path(root: &Path, dirs: Vec<PathBuf>) -> (SourceManager, PreparedSource) {
+        run_path_with_settings(root, dirs, PreprocessSettings::full())
+    }
+
+    fn run_path_with_settings(
+        root: &Path,
+        dirs: Vec<PathBuf>,
+        settings: PreprocessSettings,
+    ) -> (SourceManager, PreparedSource) {
         let unit = AnalysisUnitId::new(crate::source::RunId::new(935), 0);
         let mut manager = SourceManager::new(unit);
         let root_id = manager.load_root_file(root).unwrap();
         let prepared = crate::preprocessor::preprocess_with_includes(
             &mut manager,
             root_id,
-            PreprocessSettings::full().with_include_dirs(dirs),
+            settings.with_include_dirs(dirs),
         )
         .unwrap();
         (manager, prepared)
@@ -3490,6 +3498,63 @@ mod phase3_include_advanced_tests {
         assert_eq!(prepared.text().matches("GUARDED").count(), 1);
         assert_eq!(prepared.text().matches("ONCE").count(), 1);
         assert!(prepared.preprocess_diagnostics().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn firestorm_profile_pragma_once_suppresses_repeated_includes_in_a_cache_layout() {
+        // Firestorm opens includes from `<LL_PATH_CACHE>/lslpreproc/<item name>`
+        // (fslslpreproc.cpp:698, :1312) and lets Boost.Wave key `#pragma once` on
+        // the path it opened (boost-1.90.0 util/cpp_iterator.hpp:415, :1598).
+        // This reproduces that on-disk layout for the neolint Firestorm profile;
+        // it is not a viewer integration test.
+        let dir = temp_dir();
+        let cache = dir.join("lslpreproc");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("common.lsl"), "#pragma once\nCOMMON\n").unwrap();
+        fs::write(cache.join("outer.lsl"), "#include \"common.lsl\"\nOUTER\n").unwrap();
+        fs::write(cache.join("inner.lsl"), "#include \"common.lsl\"\nINNER\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"outer.lsl\"\n#include \"inner.lsl\"\n#include \"common.lsl\"\n",
+        )
+        .unwrap();
+
+        let (_manager, prepared) = run_path_with_settings(
+            &dir.join("root.lsl"),
+            vec![cache.clone()],
+            PreprocessSettings::firestorm(),
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert_eq!(prepared.text().matches("COMMON").count(), 1);
+        assert_eq!(prepared.text().matches("OUTER").count(), 1);
+        assert_eq!(prepared.text().matches("INNER").count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn firestorm_profile_pragma_once_covers_spelling_variants_through_canonical_paths() {
+        // Documented deviation from Boost.Wave: Wave keys `#pragma once` on the
+        // path string it opened, so `./x.lsl` and `x.lsl` are different keys.
+        // neolint canonicalises the resolved file, so both spellings share one
+        // guard. This test pins the stricter neolint behaviour explicitly.
+        let dir = temp_dir();
+        let cache = dir.join("lslpreproc");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("once.lsl"), "#pragma once\nONCE\n").unwrap();
+        fs::write(
+            dir.join("root.lsl"),
+            "#include \"once.lsl\"\n#include \"./once.lsl\"\n",
+        )
+        .unwrap();
+
+        let (_manager, prepared) = run_path_with_settings(
+            &dir.join("root.lsl"),
+            vec![cache],
+            PreprocessSettings::firestorm(),
+        );
+        assert!(prepared.preprocess_diagnostics().is_empty());
+        assert_eq!(prepared.text().matches("ONCE").count(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 

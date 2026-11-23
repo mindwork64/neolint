@@ -3874,6 +3874,14 @@ Risks tracked from the baseline analysis:
 15. `#pragma once` is supported by the pinned Boost.Wave but not proven
     end-to-end through Firestorm's inventory include layer; keep it in the
     separate compatibility bucket until evidence exists.
+    **Partially resolved (follow-up to Phase 8):** the upstream path is
+    reconstructed from pinned sources (Boost.Wave `boost-1.90.0` commit
+    `d7aa5a3…`, `util/cpp_iterator.hpp:415`/`:1598`; Firestorm commit
+    `7e44160…`, `indra/newview/fslslpreproc.cpp:559-754`, `:1312`) and neolint's
+    Firestorm-profile behaviour is covered by a labelled regression test. Real
+    viewer integration is still unverified, and neolint deliberately keys the
+    guard on the canonicalised path rather than Wave's path string; see
+    `docs/firestorm-preprocessor.md`.
 16. `Span` has no namespace tag. In the preprocessed path every engine `Span`
     is prepared; in plain-LSL mode it is original. Any code that treats an
     engine span as original after preprocessing is a silent mislocation bug.
