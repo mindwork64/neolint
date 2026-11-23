@@ -678,10 +678,12 @@ pub struct EngineComparisonReport {
     pub by_rule: Vec<RuleComparison>,
 }
 
-// RuleComparison carries exact counts plus bounded missing/extra fingerprint
-// samples. DiagnosticFingerprint carries code, severity, kind, message, start,
-// end, line, column, end_line, and end_column.
-pub struct RuleComparison { /* exact counts and bounded samples */ }
+// RuleComparison carries exact legacy/ast counts, optional exact delta totals
+// (`None` when the SEM fingerprint budget suppressed the comparison), and
+// bounded missing/extra fingerprint samples. DiagnosticFingerprint carries
+// code, severity, kind, message, start, end, line, column, end_line, and
+// end_column.
+pub struct RuleComparison { /* counts, Option totals, bounded samples */ }
 pub struct DiagnosticFingerprint { /* full fingerprint fields */ }
 
 impl PreparedSource {
@@ -2140,19 +2142,29 @@ are implemented in `src/source/manager.rs` and `src/preprocessor/` (Phase 2).
 | Total diagnostics | existing behavior; cap in Phase 3 | Unified layer |
 | AST recursion depth | 256 recursive constructs (explicit AST001 guard) | AST parser |
 | Control-flow analysis | existing legacy caps (tokens/nodes/edges/depth) | AST semantic analyzer |
-| Compare fingerprints per engine per unit | 100,000 (`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`) | Engine comparator |
+| Compare SEM fingerprints per engine per unit | 100,000 (`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`) | Engine comparator |
 | Compare detail samples | 64 per rule per direction (`MAX_COMPARE_DETAILS_PER_RULE`) | Engine comparator |
 
 Requirements:
 
 - Exceeding a limit produces a single, specific `PRE`/`AST` diagnostic and stops
   the affected expansion; the rest of the unit continues.
-- Compare totals stay exact under both compare limits. Exceeding the
-  100,000-fingerprint per-engine budget sets `comparison_complete = false` and
-  forces `matched = false`, while per-rule counts and missing/extra totals remain
-  exact. Exceeding the 64-sample detail cap (more than 64 missing/extra
+- The 100,000-fingerprint compare budget is checked by a cheap `[usize; 23]`
+  counting pass **before** any fingerprint is materialised. It counts only
+  `SEM001`..=`SEM023`, so a long stream of `LEX`/`PAR`/`PRE` findings never
+  trips it. Exceeding the budget performs no comparison at all: no fingerprint
+  collection, no sorting, and no multiset delta vectors. The report then sets
+  `comparison_complete = false` and forces `matched = false`; per-rule
+  `legacy_count`/`ast_count` remain exact from the counting pass, but
+  `missing_total`/`extra_total` are `None` because the delta was not computed.
+  An unknown total is never reported as `0`. `details_truncated` is `false` on
+  this path because no sample lists were produced or shortened.
+- Within the budget, per-rule counts and missing/extra totals stay exact
+  (`Some(n)`). Totals are accumulated during a single merge that keeps at most
+  64 detail samples per rule per direction, so memory is O(64) for samples, not
+  O(delta). Exceeding that 64-sample cap (more than 64 missing/extra
   fingerprints in one rule/direction) sets `details_truncated = true`; that is a
-  display bound, not an incomplete comparison.
+  display bound, not an incomplete comparison, and the totals remain exact.
 - Limits are checked before allocation where possible.
 - `AnalysisUnitId` and `RunId` assignment uses checked arithmetic. Exceeding
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
@@ -3295,13 +3307,20 @@ slice feeds both analyzers and `--tokens`, so the second
 `lex(prepared.text())` call is gone. Compare displays the Legacy stream only on
 stdout, preserving the existing human/JSON schema. A deterministic report is
 written to stderr: compact human lines or one JSON object
-`{"engine":"compare","units":[…],"matched":…}`. Per-rule counts are exact,
-missing/extra fingerprints are bounded at 64 per rule per direction, and the
-100,000-fingerprint budget marks the comparison incomplete. Exit code 3 signals
-an unmatched Compare report after any exit-2 failure; a matched report follows
-the displayed Legacy stream (0/1). The run-level `all_matched()` signal requires
-both `matched` and `comparison_complete` on every unit, so an inconsistent
-incomplete report cannot select a successful exit.
+`{"engine":"compare","units":[…],"matched":…}`. Per-rule `legacy_count` and
+`ast_count` are exact. A cheap `[usize; 23]` counting pass checks the
+100,000 SEM-fingerprint per-engine budget before materialising anything:
+exceeding it performs no collection, sorting, or delta, sets
+`comparison_complete = false` and `matched = false`, and reports per-rule
+`missing_total`/`extra_total` as unknown (`None`, rendered `?` in human output
+and `null` in JSON) rather than zero. Within budget, delta totals are exact
+(`Some(n)`) and a single merge keeps at most 64 detail samples per rule per
+direction; `details_truncated` is derived from those totals and stays
+independent of `comparison_complete`. Exit code 3 signals an unmatched Compare
+report after any exit-2 failure; a matched report follows the displayed Legacy
+stream (0/1). The run-level `all_matched()` signal requires both `matched` and
+`comparison_complete` on every unit, so an inconsistent incomplete report
+cannot select a successful exit.
 
 **Tests and compatibility.** `tests/legacy_golden.rs` runs the same six
 pre-change fixtures captured from base `4dd01ca…` both by default and with
@@ -3313,7 +3332,10 @@ report order, and single-lex token parity. Slice 2b adds config-before-report,
 AST/Compare invocation-cap, help, legacy-override, prepared-token, and
 identity-byte coverage, plus incomplete-vs-truncated, every-code and absolute-limit
 engine tests. Slice 2c adds the shared `is_parity()` predicate and pins its four
-combinations. The exit-3 fixture is deliberately corrupted input
+combinations. Slice 2d makes the SEM fingerprint budget an actual work bound:
+the SEM-scoped counting precheck, over-budget unknown totals with empty detail
+samples, the exactly-at-budget boundary, and `?`/`null` rendering are pinned by
+comparator, engine-integration, and CLI-renderer tests. The exit-3 fixture is deliberately corrupted input
 (`while (i < n( {` plus an unterminated non-returning function and an event
 named `llSay`); its only divergence is the same event-header `SEM002` delta,
 while its other findings (for example `SEM011` for the non-returning function)
@@ -3329,9 +3351,10 @@ corpus-relative; Compare reports the genuine delta.
 
 - `cargo fmt --all -- --check` → exit 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
-- `cargo test --all-targets --all-features` → exit 0, 789 passed, 0 failed.
-- `cargo test --release --all-targets --all-features` → exit 0, 789 passed.
-- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 789 passed.
+- `cargo test --all-targets --all-features` → exit 0, 797 passed, 0 failed.
+- `cargo test --release --all-targets --all-features` → exit 0, 797 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 797 passed.
+- `cargo test --test legacy_golden` → exit 0, 2 passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
 - `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
   → 9 tests OK.

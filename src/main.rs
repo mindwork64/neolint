@@ -659,8 +659,17 @@ fn print_compare_report(reports: &[CompareUnitReport], format: OutputFormat, all
 
 /// Compact, greppable human Compare report.
 fn print_compare_human(reports: &[CompareUnitReport]) {
+    eprint!("{}", compare_report_human(reports));
+}
+
+/// Render the human Compare report, showing unknown totals as `?`.
+fn compare_report_human(reports: &[CompareUnitReport]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
     for item in reports {
-        eprintln!(
+        let _ = writeln!(
+            output,
             "neolint: compare unit {} {}: matched={} complete={} truncated={} legacy={} ast={}",
             item.unit_index,
             item.path,
@@ -671,39 +680,59 @@ fn print_compare_human(reports: &[CompareUnitReport]) {
             item.report.ast_count
         );
         for rule in &item.report.by_rule {
+            // An unknown total is never rendered as `0`; such rules are only
+            // skipped when neither engine reported a finding for them.
             if rule.legacy_count == 0
                 && rule.ast_count == 0
-                && rule.missing_total == 0
-                && rule.extra_total == 0
+                && rule.missing_total.unwrap_or(0) == 0
+                && rule.extra_total.unwrap_or(0) == 0
             {
                 continue;
             }
-            eprintln!(
+            let _ = writeln!(
+                output,
                 "neolint: compare unit {} rule {}: legacy={} ast={} missing={} extra={}",
                 item.unit_index,
                 rule.code,
                 rule.legacy_count,
                 rule.ast_count,
-                rule.missing_total,
-                rule.extra_total
+                format_compare_total(rule.missing_total),
+                format_compare_total(rule.extra_total)
             );
             for fingerprint in &rule.missing_from_ast {
-                print_compare_fingerprint(item.unit_index, "missing", fingerprint);
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    compare_fingerprint_line(item.unit_index, "missing", fingerprint)
+                );
             }
             for fingerprint in &rule.extra_in_ast {
-                print_compare_fingerprint(item.unit_index, "extra", fingerprint);
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    compare_fingerprint_line(item.unit_index, "extra", fingerprint)
+                );
             }
         }
     }
+    output
 }
 
-/// Print one exact fingerprint on a single greppable line.
-fn print_compare_fingerprint(
+/// Render one per-rule total; `None` means the comparison was not performed.
+fn format_compare_total(total: Option<usize>) -> String {
+    match total {
+        Some(value) => value.to_string(),
+        None => "?".to_owned(),
+    }
+}
+
+/// Render one exact fingerprint on a single greppable line.
+fn compare_fingerprint_line(
     unit_index: usize,
     direction: &str,
     fingerprint: &DiagnosticFingerprint,
-) {
-    eprintln!(
+) -> String {
+    format!(
         "neolint: compare unit {unit_index} {direction} {} {} {} message={:?} start={} end={} line={} column={} end_line={} end_column={}",
         fingerprint.code,
         fingerprint.severity.as_str(),
@@ -715,11 +744,16 @@ fn print_compare_fingerprint(
         fingerprint.column,
         fingerprint.end_line,
         fingerprint.end_column
-    );
+    )
 }
 
 /// Single documented JSON object for the Compare report on stderr.
 fn print_compare_json(reports: &[CompareUnitReport], all_matched: bool) {
+    eprint!("{}", compare_report_json(reports, all_matched));
+}
+
+/// Render the Compare report JSON object, emitting `null` for unknown totals.
+fn compare_report_json(reports: &[CompareUnitReport], all_matched: bool) -> String {
     let mut output = String::new();
     output.push('{');
     push_json_key(&mut output, "engine");
@@ -770,10 +804,10 @@ fn print_compare_json(reports: &[CompareUnitReport], all_matched: bool) {
             output.push_str(&rule.ast_count.to_string());
             output.push(',');
             push_json_key(&mut output, "missing_total");
-            output.push_str(&rule.missing_total.to_string());
+            push_compare_total(&mut output, rule.missing_total);
             output.push(',');
             push_json_key(&mut output, "extra_total");
-            output.push_str(&rule.extra_total.to_string());
+            push_compare_total(&mut output, rule.extra_total);
             output.push(',');
             push_json_key(&mut output, "missing_from_ast");
             push_fingerprint_array(&mut output, &rule.missing_from_ast);
@@ -791,7 +825,15 @@ fn print_compare_json(reports: &[CompareUnitReport], all_matched: bool) {
     output.push_str(bool_str(all_matched));
     output.push('}');
     output.push('\n');
-    eprint!("{output}");
+    output
+}
+
+/// Append one per-rule JSON total; `null` marks a total that was not computed.
+fn push_compare_total(output: &mut String, total: Option<usize>) {
+    match total {
+        Some(value) => output.push_str(&value.to_string()),
+        None => output.push_str("null"),
+    }
 }
 
 fn bool_str(value: bool) -> &'static str {
@@ -1053,7 +1095,11 @@ fn json_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_input_paths, has_lsl_extension, json_escape};
+    use super::{
+        collect_input_paths, compare_report_human, compare_report_json, format_compare_total,
+        has_lsl_extension, json_escape, push_compare_total, CompareUnitReport,
+    };
+    use neolint::{EngineComparisonReport, RuleComparison};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1066,6 +1112,78 @@ mod tests {
             std::env::temp_dir().join(format!("neolint-cli-test-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn comparison_report(
+        comparison_complete: bool,
+        missing_total: Option<usize>,
+        extra_total: Option<usize>,
+    ) -> EngineComparisonReport {
+        EngineComparisonReport {
+            matched: false,
+            comparison_complete,
+            details_truncated: false,
+            legacy_count: 3,
+            ast_count: 2,
+            by_rule: vec![RuleComparison {
+                code: "SEM001",
+                legacy_count: 3,
+                ast_count: 2,
+                missing_total,
+                extra_total,
+                missing_from_ast: Vec::new(),
+                extra_in_ast: Vec::new(),
+            }],
+        }
+    }
+
+    fn unit_report(report: EngineComparisonReport) -> CompareUnitReport {
+        CompareUnitReport {
+            unit_index: 0,
+            path: "unknown.lsl".to_owned(),
+            report,
+        }
+    }
+
+    #[test]
+    fn compare_renderers_show_unknown_totals_without_panicking() {
+        assert_eq!(format_compare_total(Some(0)), "0");
+        assert_eq!(format_compare_total(Some(7)), "7");
+        assert_eq!(format_compare_total(None), "?");
+        let mut total = String::new();
+        push_compare_total(&mut total, None);
+        assert_eq!(total, "null");
+
+        let reports = [unit_report(comparison_report(false, None, None))];
+
+        let human = compare_report_human(&reports);
+        assert!(
+            human.contains("rule SEM001: legacy=3 ast=2 missing=? extra=?"),
+            "{human}"
+        );
+        assert!(human.contains("complete=false"), "{human}");
+        assert!(!human.contains("missing=0"), "{human}");
+
+        let json = compare_report_json(&reports, false);
+        assert!(json.contains("\"comparison_complete\":false"), "{json}");
+        assert!(json.contains("\"missing_total\":null"), "{json}");
+        assert!(json.contains("\"extra_total\":null"), "{json}");
+        assert!(json.contains("\"missing_from_ast\":[]"), "{json}");
+        assert!(json.contains("\"extra_in_ast\":[]"), "{json}");
+    }
+
+    #[test]
+    fn compare_renderers_keep_exact_totals_numeric() {
+        let reports = [unit_report(comparison_report(true, Some(0), Some(2)))];
+        let human = compare_report_human(&reports);
+        assert!(
+            human.contains("rule SEM001: legacy=3 ast=2 missing=0 extra=2"),
+            "{human}"
+        );
+        let json = compare_report_json(&reports, false);
+        assert!(json.contains("\"missing_total\":0"), "{json}");
+        assert!(json.contains("\"extra_total\":2"), "{json}");
+        assert!(!json.contains("null"), "{json}");
     }
 
     #[test]

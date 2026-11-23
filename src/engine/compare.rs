@@ -16,12 +16,27 @@ pub const SEM_CODES: [&str; 23] = [
     "SEM019", "SEM020", "SEM021", "SEM022", "SEM023",
 ];
 
-/// Maximum number of missing/extra fingerprints retained per rule.
+/// Maximum number of missing/extra fingerprints retained per rule and
+/// direction.
+///
+/// This bounds only the detail samples; exact delta totals are always
+/// accumulated, so exceeding it sets [`EngineComparisonReport::details_truncated`]
+/// without making the comparison incomplete.
 pub const MAX_COMPARE_DETAILS_PER_RULE: usize = 64;
 
-/// Maximum raw diagnostics accepted per engine before a comparison is declared
-/// incomplete.
+/// Maximum number of `SEM001`..=`SEM023` fingerprints materialised per engine
+/// before a comparison is declared incomplete.
+///
+/// The budget is checked by a cheap per-rule counting pass before any
+/// fingerprint is built. It counts only compared semantic codes, so a large
+/// stream of lexer, parser, or preprocessor findings never trips it. When
+/// either engine exceeds the budget, no fingerprint collection, sorting, or
+/// multiset delta occurs; per-rule delta totals are then reported as unknown
+/// (`None`) rather than zero.
 pub const MAX_COMPARE_FINGERPRINTS_PER_ENGINE: usize = 100_000;
+
+/// Number of compared semantic rules, derived from [`SEM_CODES`].
+const RULE_COUNT: usize = SEM_CODES.len();
 
 /// One raw semantic diagnostic reduced to an orderable value.
 ///
@@ -116,14 +131,20 @@ pub struct RuleComparison {
     pub legacy_count: usize,
     /// Exact number of AST findings for this rule.
     pub ast_count: usize,
-    /// Exact number of Legacy findings with no AST multiset partner.
+    /// Exact number of Legacy findings with no AST multiset partner, or
+    /// `None` when the comparison was not performed because the SEM
+    /// fingerprint budget was exceeded.
     ///
-    /// Always exact, including when the overall comparison is incomplete.
-    pub missing_total: usize,
-    /// Exact number of AST findings with no Legacy multiset partner.
+    /// An unknown total is never reported as `0`; callers must distinguish
+    /// "no delta" (`Some(0)`) from "not computed" (`None`).
+    pub missing_total: Option<usize>,
+    /// Exact number of AST findings with no Legacy multiset partner, or
+    /// `None` when the comparison was not performed because the SEM
+    /// fingerprint budget was exceeded.
     ///
-    /// Always exact, including when the overall comparison is incomplete.
-    pub extra_total: usize,
+    /// An unknown total is never reported as `0`; callers must distinguish
+    /// "no delta" (`Some(0)`) from "not computed" (`None`).
+    pub extra_total: Option<usize>,
     /// Bounded sample of the first `MAX_COMPARE_DETAILS_PER_RULE` missing
     /// findings in deterministic order.
     pub missing_from_ast: Vec<DiagnosticFingerprint>,
@@ -137,13 +158,20 @@ pub struct RuleComparison {
 pub struct EngineComparisonReport {
     /// True when the comparison is complete and every rule multiset matches.
     pub matched: bool,
-    /// False when a raw input exceeded the comparator's safety budget.
+    /// True when the comparison was actually performed over the full inputs.
     ///
-    /// Counts and deltas remain exact; an incomplete report means only that the
-    /// budget was exceeded and parity must not be asserted. `matched` is forced
-    /// to `false` in that case.
+    /// False when either engine's SEM fingerprint count exceeds
+    /// [`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`]. The incomplete path performs no
+    /// fingerprint collection, sorting, or multiset delta: per-rule
+    /// `missing_total`/`extra_total` are unknown (`None`) instead of zero, and
+    /// `matched` is forced to `false`. This flag is independent of
+    /// [`Self::details_truncated`], which only bounds retained detail samples.
     pub comparison_complete: bool,
     /// True when at least one rule's missing/extra total exceeds the detail cap.
+    ///
+    /// Computed from the exact delta totals of a completed comparison, so it
+    /// tracks whether a detail sample list was shortened. The incomplete path
+    /// sets this to `false` because no sample lists were produced or shortened.
     pub details_truncated: bool,
     /// Exact Legacy findings across all compared rules.
     pub legacy_count: usize,
@@ -168,9 +196,23 @@ fn sem_index(code: &str) -> Option<usize> {
     SEM_CODES.binary_search(&code).ok()
 }
 
+/// Count compared semantic diagnostics per rule without materialising anything.
+///
+/// The returned array is the only allocation-sized state on the budget-check
+/// path: O(1) memory, no fingerprints, no sorting, no delta vectors.
+fn count_by_rule(diagnostics: &[Diagnostic]) -> [usize; RULE_COUNT] {
+    let mut counts = [0usize; RULE_COUNT];
+    for diagnostic in diagnostics {
+        if let Some(index) = sem_index(diagnostic.code) {
+            counts[index] += 1;
+        }
+    }
+    counts
+}
+
 fn collect_by_rule(diagnostics: &[Diagnostic]) -> Vec<Vec<DiagnosticFingerprint>> {
     let mut by_rule: Vec<Vec<DiagnosticFingerprint>> =
-        (0..SEM_CODES.len()).map(|_| Vec::new()).collect();
+        (0..RULE_COUNT).map(|_| Vec::new()).collect();
     for diagnostic in diagnostics {
         if let Some(index) = sem_index(diagnostic.code) {
             by_rule[index].push(DiagnosticFingerprint::from_diagnostic(diagnostic));
@@ -182,27 +224,53 @@ fn collect_by_rule(diagnostics: &[Diagnostic]) -> Vec<Vec<DiagnosticFingerprint>
     by_rule
 }
 
+/// Exact multiset-delta totals with bounded leading detail samples.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MultisetDelta {
+    missing_total: usize,
+    extra_total: usize,
+    missing_sample: Vec<DiagnosticFingerprint>,
+    extra_sample: Vec<DiagnosticFingerprint>,
+}
+
+impl MultisetDelta {
+    fn push_missing(&mut self, fingerprint: &DiagnosticFingerprint) {
+        self.missing_total += 1;
+        if self.missing_sample.len() < MAX_COMPARE_DETAILS_PER_RULE {
+            self.missing_sample.push(fingerprint.clone());
+        }
+    }
+
+    fn push_extra(&mut self, fingerprint: &DiagnosticFingerprint) {
+        self.extra_total += 1;
+        if self.extra_sample.len() < MAX_COMPARE_DETAILS_PER_RULE {
+            self.extra_sample.push(fingerprint.clone());
+        }
+    }
+}
+
 /// Subtract two sorted fingerprint multisets element-by-element.
 ///
 /// Equal fingerprints consume one occurrence from each side, so duplicate
-/// multiplicity is preserved. The returned vectors keep the deterministic sort
-/// order of their inputs.
+/// multiplicity is preserved. Totals are exact, while each direction retains
+/// only the first [`MAX_COMPARE_DETAILS_PER_RULE`] samples in deterministic sort
+/// order. Sample memory is therefore O(64), not O(delta), and no full delta
+/// vector is ever built.
 fn multiset_delta(
     legacy: &[DiagnosticFingerprint],
     ast: &[DiagnosticFingerprint],
-) -> (Vec<DiagnosticFingerprint>, Vec<DiagnosticFingerprint>) {
-    let mut missing = Vec::new();
-    let mut extra = Vec::new();
+) -> MultisetDelta {
+    let mut delta = MultisetDelta::default();
     let mut legacy_index = 0usize;
     let mut ast_index = 0usize;
     while legacy_index < legacy.len() && ast_index < ast.len() {
         match legacy[legacy_index].cmp(&ast[ast_index]) {
             Ordering::Less => {
-                missing.push(legacy[legacy_index].clone());
+                delta.push_missing(&legacy[legacy_index]);
                 legacy_index += 1;
             }
             Ordering::Greater => {
-                extra.push(ast[ast_index].clone());
+                delta.push_extra(&ast[ast_index]);
                 ast_index += 1;
             }
             Ordering::Equal => {
@@ -211,67 +279,106 @@ fn multiset_delta(
             }
         }
     }
-    missing.extend_from_slice(&legacy[legacy_index..]);
-    extra.extend_from_slice(&ast[ast_index..]);
-    (missing, extra)
+    for fingerprint in &legacy[legacy_index..] {
+        delta.push_missing(fingerprint);
+    }
+    for fingerprint in &ast[ast_index..] {
+        delta.push_extra(fingerprint);
+    }
+    delta
+}
+
+/// Report every rule as present but with unknown delta totals.
+fn incomplete_report(
+    legacy_counts: &[usize; RULE_COUNT],
+    ast_counts: &[usize; RULE_COUNT],
+    legacy_count: usize,
+    ast_count: usize,
+) -> EngineComparisonReport {
+    let by_rule = SEM_CODES
+        .iter()
+        .enumerate()
+        .map(|(index, code)| RuleComparison {
+            code,
+            legacy_count: legacy_counts[index],
+            ast_count: ast_counts[index],
+            missing_total: None,
+            extra_total: None,
+            missing_from_ast: Vec::new(),
+            extra_in_ast: Vec::new(),
+        })
+        .collect();
+    EngineComparisonReport {
+        matched: false,
+        comparison_complete: false,
+        details_truncated: false,
+        legacy_count,
+        ast_count,
+        by_rule,
+    }
 }
 
 /// Compare two raw semantic streams, filtering to `SEM001`..=`SEM023`.
 ///
-/// All counts and deltas are exact in every call. Per-rule delta details are
-/// boundary samples of at most [`MAX_COMPARE_DETAILS_PER_RULE`] fingerprints.
-/// When either input exceeds [`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`] the
-/// comparison is declared incomplete and `matched` is forced to `false`, but
-/// the exact per-rule counts and multiset deltas are still computed and
-/// reported; `comparison_complete == false` means only that the budget was
-/// exceeded, so parity must not be asserted.
+/// The [`MAX_COMPARE_FINGERPRINTS_PER_ENGINE`] budget applies to the number of
+/// compared SEM fingerprints, not to the raw stream length: a cheap counting
+/// pass runs first, and a non-SEM diagnostic never counts against the budget.
+/// When either engine is over budget the function returns immediately without
+/// collecting, sorting, or diffing fingerprints. The incomplete report keeps
+/// exact `legacy_count`/`ast_count` but reports every rule's
+/// `missing_total`/`extra_total` as `None`, forces `matched = false`, and leaves
+/// the detail samples empty.
+///
+/// Within the budget all totals are exact (`Some(n)`) and per-rule detail
+/// samples retain at most [`MAX_COMPARE_DETAILS_PER_RULE`] fingerprints per
+/// direction.
 pub fn compare_semantic_diagnostics(
     legacy: &[Diagnostic],
     ast: &[Diagnostic],
 ) -> EngineComparisonReport {
-    let comparison_complete = legacy.len() <= MAX_COMPARE_FINGERPRINTS_PER_ENGINE
-        && ast.len() <= MAX_COMPARE_FINGERPRINTS_PER_ENGINE;
+    let legacy_counts = count_by_rule(legacy);
+    let ast_counts = count_by_rule(ast);
+    let legacy_count: usize = legacy_counts.iter().sum();
+    let ast_count: usize = ast_counts.iter().sum();
+
+    if legacy_count > MAX_COMPARE_FINGERPRINTS_PER_ENGINE
+        || ast_count > MAX_COMPARE_FINGERPRINTS_PER_ENGINE
+    {
+        return incomplete_report(&legacy_counts, &ast_counts, legacy_count, ast_count);
+    }
 
     let legacy_by_rule = collect_by_rule(legacy);
     let ast_by_rule = collect_by_rule(ast);
-    let mut by_rule = Vec::with_capacity(SEM_CODES.len());
+    let mut by_rule = Vec::with_capacity(RULE_COUNT);
     let mut details_truncated = false;
     let mut matched = true;
     for (index, code) in SEM_CODES.iter().enumerate() {
-        let (missing, extra) = multiset_delta(&legacy_by_rule[index], &ast_by_rule[index]);
-        let missing_total = missing.len();
-        let extra_total = extra.len();
-        if missing_total > MAX_COMPARE_DETAILS_PER_RULE
-            || extra_total > MAX_COMPARE_DETAILS_PER_RULE
+        let delta = multiset_delta(&legacy_by_rule[index], &ast_by_rule[index]);
+        if delta.missing_total > MAX_COMPARE_DETAILS_PER_RULE
+            || delta.extra_total > MAX_COMPARE_DETAILS_PER_RULE
         {
             details_truncated = true;
         }
-        if missing_total != 0 || extra_total != 0 {
+        if delta.missing_total != 0 || delta.extra_total != 0 {
             matched = false;
         }
         by_rule.push(RuleComparison {
             code,
             legacy_count: legacy_by_rule[index].len(),
             ast_count: ast_by_rule[index].len(),
-            missing_total,
-            extra_total,
-            missing_from_ast: missing
-                .into_iter()
-                .take(MAX_COMPARE_DETAILS_PER_RULE)
-                .collect(),
-            extra_in_ast: extra
-                .into_iter()
-                .take(MAX_COMPARE_DETAILS_PER_RULE)
-                .collect(),
+            missing_total: Some(delta.missing_total),
+            extra_total: Some(delta.extra_total),
+            missing_from_ast: delta.missing_sample,
+            extra_in_ast: delta.extra_sample,
         });
     }
 
     EngineComparisonReport {
-        matched: comparison_complete && matched,
-        comparison_complete,
+        matched,
+        comparison_complete: true,
         details_truncated,
-        legacy_count: legacy_by_rule.iter().map(Vec::len).sum(),
-        ast_count: ast_by_rule.iter().map(Vec::len).sum(),
+        legacy_count,
+        ast_count,
         by_rule,
     }
 }
@@ -348,22 +455,102 @@ mod tests {
     #[test]
     fn multiset_delta_preserves_duplicate_multiplicity() {
         let a = fingerprint("SEM001", 0);
-        let (missing, extra) = multiset_delta(&[a.clone(), a.clone()], std::slice::from_ref(&a));
-        assert_eq!(missing, vec![a.clone()]);
-        assert!(extra.is_empty());
+        let delta = multiset_delta(&[a.clone(), a.clone()], std::slice::from_ref(&a));
+        assert_eq!(delta.missing_total, 1);
+        assert_eq!(delta.extra_total, 0);
+        assert_eq!(delta.missing_sample, vec![a.clone()]);
+        assert!(delta.extra_sample.is_empty());
 
-        let (missing, extra) = multiset_delta(std::slice::from_ref(&a), &[a.clone(), a.clone()]);
-        assert!(missing.is_empty());
-        assert_eq!(extra, vec![a]);
+        let delta = multiset_delta(std::slice::from_ref(&a), &[a.clone(), a.clone()]);
+        assert_eq!(delta.missing_total, 0);
+        assert_eq!(delta.extra_total, 1);
+        assert!(delta.missing_sample.is_empty());
+        assert_eq!(delta.extra_sample, vec![a]);
     }
 
     #[test]
     fn multiset_delta_returns_sorted_boundaries() {
         let legacy = vec![fingerprint("SEM001", 0), fingerprint("SEM001", 1)];
         let ast = vec![fingerprint("SEM001", 1), fingerprint("SEM001", 2)];
-        let (missing, extra) = multiset_delta(&legacy, &ast);
-        assert_eq!(missing, vec![fingerprint("SEM001", 0)]);
-        assert_eq!(extra, vec![fingerprint("SEM001", 2)]);
+        let delta = multiset_delta(&legacy, &ast);
+        assert_eq!(delta.missing_total, 1);
+        assert_eq!(delta.extra_total, 1);
+        assert_eq!(delta.missing_sample, vec![fingerprint("SEM001", 0)]);
+        assert_eq!(delta.extra_sample, vec![fingerprint("SEM001", 2)]);
+    }
+
+    #[test]
+    fn multiset_delta_bounds_samples_but_keeps_exact_totals() {
+        let legacy: Vec<_> = (0..MAX_COMPARE_DETAILS_PER_RULE + 1)
+            .map(|start| fingerprint("SEM001", start))
+            .collect();
+        let delta = multiset_delta(&legacy, &[]);
+        assert_eq!(delta.missing_total, MAX_COMPARE_DETAILS_PER_RULE + 1);
+        assert_eq!(delta.missing_sample.len(), MAX_COMPARE_DETAILS_PER_RULE);
+        assert_eq!(delta.extra_total, 0);
+        assert!(delta.extra_sample.is_empty());
+    }
+
+    #[test]
+    fn count_by_rule_counts_only_compared_semantic_codes() {
+        let lexical = Diagnostic::lexical("LEX001", "bad", span(0, 1));
+        let parser = Diagnostic {
+            code: "PAR001",
+            severity: Severity::Error,
+            kind: DiagnosticKind::Syntax,
+            message: "bad".to_owned(),
+            span: span(0, 1),
+        };
+        let diagnostics = [
+            diagnostic("SEM001", 0),
+            diagnostic("SEM001", 1),
+            diagnostic("SEM023", 2),
+            lexical,
+            parser,
+        ];
+        let counts = count_by_rule(&diagnostics);
+        assert_eq!(counts[0], 2);
+        assert_eq!(counts[RULE_COUNT - 1], 1);
+        assert_eq!(counts.iter().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn over_budget_sem_stream_returns_unknown_totals_without_deltas() {
+        let diagnostics = vec![diagnostic("SEM001", 0); MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+        let report = compare_semantic_diagnostics(&diagnostics, &[]);
+        assert!(!report.matched);
+        assert!(!report.comparison_complete);
+        assert!(!report.details_truncated);
+        assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
+        assert_eq!(report.ast_count, 0);
+        assert_eq!(report.by_rule.len(), RULE_COUNT);
+        for rule in &report.by_rule {
+            assert_eq!(rule.missing_total, None, "{}", rule.code);
+            assert_eq!(rule.extra_total, None, "{}", rule.code);
+            assert!(rule.missing_from_ast.is_empty(), "{}", rule.code);
+            assert!(rule.extra_in_ast.is_empty(), "{}", rule.code);
+        }
+        assert_eq!(
+            report.by_rule[0].legacy_count,
+            MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1
+        );
+    }
+
+    #[test]
+    fn non_semantic_stream_length_does_not_trip_the_budget() {
+        let mut legacy = vec![
+            Diagnostic::lexical("LEX001", "bad", span(0, 1));
+            MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1
+        ];
+        legacy.push(diagnostic("SEM001", 0));
+        let ast = vec![diagnostic("SEM001", 0)];
+        let report = compare_semantic_diagnostics(&legacy, &ast);
+        assert!(report.comparison_complete);
+        assert!(report.matched, "{report:?}");
+        assert_eq!(report.legacy_count, 1);
+        assert_eq!(report.ast_count, 1);
+        assert_eq!(report.by_rule[0].missing_total, Some(0));
+        assert_eq!(report.by_rule[0].extra_total, Some(0));
     }
 
     #[test]

@@ -250,8 +250,8 @@ fn multiplicity_is_preserved_in_both_directions() {
 
     let report = compare_semantic_diagnostics(&[a.clone(), a.clone()], std::slice::from_ref(&a));
     let sem001 = rule(&report, "SEM001");
-    assert_eq!(sem001.missing_total, 1);
-    assert_eq!(sem001.extra_total, 0);
+    assert_eq!(sem001.missing_total, Some(1));
+    assert_eq!(sem001.extra_total, Some(0));
     assert_eq!(sem001.missing_from_ast.len(), 1);
     assert!(sem001.extra_in_ast.is_empty());
     assert!(!report.matched);
@@ -259,8 +259,8 @@ fn multiplicity_is_preserved_in_both_directions() {
     let legacy = [a.clone()];
     let report = compare_semantic_diagnostics(&legacy, &[a.clone(), a]);
     let sem001 = rule(&report, "SEM001");
-    assert_eq!(sem001.missing_total, 0);
-    assert_eq!(sem001.extra_total, 1);
+    assert_eq!(sem001.missing_total, Some(0));
+    assert_eq!(sem001.extra_total, Some(1));
     assert!(sem001.missing_from_ast.is_empty());
     assert_eq!(sem001.extra_in_ast.len(), 1);
     assert!(!report.matched);
@@ -276,10 +276,13 @@ fn legacy_only_and_ast_only_rules_are_grouped_correctly() {
     );
     let first = rule(&report, "SEM001");
     assert_eq!((first.legacy_count, first.ast_count), (1, 0));
-    assert_eq!((first.missing_total, first.extra_total), (1, 0));
+    assert_eq!((first.missing_total, first.extra_total), (Some(1), Some(0)));
     let second = rule(&report, "SEM002");
     assert_eq!((second.legacy_count, second.ast_count), (0, 1));
-    assert_eq!((second.missing_total, second.extra_total), (0, 1));
+    assert_eq!(
+        (second.missing_total, second.extra_total),
+        (Some(0), Some(1))
+    );
     for code in &SEM_CODES[2..] {
         let rule = rule(&report, code);
         assert_eq!(
@@ -289,7 +292,7 @@ fn legacy_only_and_ast_only_rules_are_grouped_correctly() {
                 rule.missing_total,
                 rule.extra_total
             ),
-            (0, 0, 0, 0),
+            (0, 0, Some(0), Some(0)),
             "{code} must stay zero"
         );
     }
@@ -309,8 +312,8 @@ fn per_rule_detail_samples_are_bounded() {
     let sem001 = rule(&report, "SEM001");
     assert_eq!(sem001.legacy_count, 65);
     assert_eq!(sem001.ast_count, 0);
-    assert_eq!(sem001.missing_total, 65);
-    assert_eq!(sem001.extra_total, 0);
+    assert_eq!(sem001.missing_total, Some(65));
+    assert_eq!(sem001.extra_total, Some(0));
     assert_eq!(sem001.missing_from_ast.len(), MAX_COMPARE_DETAILS_PER_RULE);
     assert_eq!(sem001.missing_from_ast.len(), 64);
     assert!(sem001.extra_in_ast.is_empty());
@@ -320,36 +323,23 @@ fn per_rule_detail_samples_are_bounded() {
 
 #[test]
 fn comparison_completeness_flag_is_bound_aware() {
-    let too_many = vec![diagnostic("SEM001"); MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
-    let report = compare_semantic_diagnostics(&too_many, &too_many[..1]);
-    assert!(!report.comparison_complete);
-    assert!(!report.matched);
-    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
-    assert_eq!(report.ast_count, 1);
-    assert_eq!(report.by_rule.len(), 23);
-    // Defect 2: an incomplete report must still carry exact multiset deltas.
-    assert_eq!(
-        rule(&report, "SEM001").missing_total,
-        MAX_COMPARE_FINGERPRINTS_PER_ENGINE
-    );
-    assert_eq!(rule(&report, "SEM001").extra_total, 0);
-
-    let report = compare_semantic_diagnostics(&too_many[..1], &too_many);
-    assert!(!report.comparison_complete);
-    assert!(!report.matched);
-    assert_eq!(rule(&report, "SEM001").missing_total, 0);
-    assert_eq!(
-        rule(&report, "SEM001").extra_total,
-        MAX_COMPARE_FINGERPRINTS_PER_ENGINE
-    );
-
     let at_bound = vec![diagnostic("SEM001"); MAX_COMPARE_FINGERPRINTS_PER_ENGINE];
     let report = compare_semantic_diagnostics(&at_bound, &at_bound);
     assert!(report.comparison_complete);
     assert!(report.matched);
+    assert!(!report.details_truncated);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE);
+    assert_eq!(report.ast_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE);
     assert_eq!(
         rule(&report, "SEM001").legacy_count,
         MAX_COMPARE_FINGERPRINTS_PER_ENGINE
+    );
+    assert!(
+        report
+            .by_rule
+            .iter()
+            .all(|rule| rule.missing_total == Some(0) && rule.extra_total == Some(0)),
+        "an exactly-at-budget comparison must report exact zero totals"
     );
 
     let report = compare_semantic_diagnostics(&at_bound, &at_bound[..1]);
@@ -357,7 +347,7 @@ fn comparison_completeness_flag_is_bound_aware() {
     assert!(!report.matched);
     assert_eq!(
         rule(&report, "SEM001").missing_total,
-        MAX_COMPARE_FINGERPRINTS_PER_ENGINE - 1
+        Some(MAX_COMPARE_FINGERPRINTS_PER_ENGINE - 1)
     );
 
     let small = vec![diagnostic("SEM001"); 2];
@@ -374,8 +364,67 @@ fn comparison_completeness_flag_is_bound_aware() {
     assert!(report.comparison_complete);
     assert!(report.matched);
     assert!(!report.details_truncated);
-    assert_eq!(rule(&report, "SEM001").missing_total, 0);
-    assert_eq!(rule(&report, "SEM001").extra_total, 0);
+    assert_eq!(rule(&report, "SEM001").missing_total, Some(0));
+    assert_eq!(rule(&report, "SEM001").extra_total, Some(0));
+}
+
+#[test]
+fn over_budget_stream_reports_unknown_totals_and_no_samples() {
+    let too_many = vec![diagnostic("SEM001"); MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+    let report = compare_semantic_diagnostics(&too_many, &too_many[..1]);
+    assert!(!report.comparison_complete);
+    assert!(!report.matched);
+    assert!(!report.details_truncated);
+    assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
+    assert_eq!(report.ast_count, 1);
+    assert_eq!(report.by_rule.len(), SEM_CODES.len());
+    assert_eq!(
+        rule(&report, "SEM001").legacy_count,
+        MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1
+    );
+    assert_eq!(rule(&report, "SEM001").ast_count, 1);
+    for rule in &report.by_rule {
+        // Unknown totals are structurally distinguishable from computed ones:
+        // a performed comparison would always produce `Some(n)`.
+        assert_eq!(rule.missing_total, None, "{}", rule.code);
+        assert_eq!(rule.extra_total, None, "{}", rule.code);
+        assert!(rule.missing_from_ast.is_empty(), "{}", rule.code);
+        assert!(rule.extra_in_ast.is_empty(), "{}", rule.code);
+    }
+
+    // Either engine over budget selects the incomplete path.
+    let reversed = compare_semantic_diagnostics(&too_many[..1], &too_many);
+    assert!(!reversed.comparison_complete);
+    assert!(!reversed.matched);
+    assert!(!reversed.details_truncated);
+    assert_eq!(reversed.legacy_count, 1);
+    assert_eq!(reversed.ast_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
+    assert!(reversed.by_rule.iter().all(|rule| {
+        rule.missing_total.is_none()
+            && rule.extra_total.is_none()
+            && rule.missing_from_ast.is_empty()
+            && rule.extra_in_ast.is_empty()
+    }));
+}
+
+#[test]
+fn fingerprint_budget_counts_only_sem_diagnostics() {
+    let lexical = Diagnostic::lexical("LEX001", "bad", span(0, 1));
+    let mut legacy = vec![lexical; MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1];
+    legacy.push(diagnostic("SEM001"));
+    let ast = vec![diagnostic("SEM001")];
+
+    let report = compare_semantic_diagnostics(&legacy, &ast);
+    assert!(
+        report.comparison_complete,
+        "raw non-SEM stream length must not trip the fingerprint budget"
+    );
+    assert!(report.matched, "{report:?}");
+    assert_eq!(report.legacy_count, 1);
+    assert_eq!(report.ast_count, 1);
+    assert_eq!(rule(&report, "SEM001").legacy_count, 1);
+    assert_eq!(rule(&report, "SEM001").missing_total, Some(0));
+    assert_eq!(rule(&report, "SEM001").extra_total, Some(0));
 }
 
 #[test]
@@ -390,7 +439,7 @@ fn extra_detail_samples_are_bounded_and_sorted() {
     let sem001 = rule(&report, "SEM001");
     assert_eq!(sem001.legacy_count, 0);
     assert_eq!(sem001.ast_count, 65);
-    assert_eq!(sem001.extra_total, 65);
+    assert_eq!(sem001.extra_total, Some(65));
     assert_eq!(sem001.extra_in_ast.len(), MAX_COMPARE_DETAILS_PER_RULE);
     assert!(sem001.missing_from_ast.is_empty());
     assert!(report.details_truncated);
@@ -412,7 +461,7 @@ fn extra_detail_samples_are_bounded_and_sorted() {
         .collect();
     let report = compare_semantic_diagnostics(&[], &ast);
     let sem001 = rule(&report, "SEM001");
-    assert_eq!(sem001.extra_total, MAX_COMPARE_DETAILS_PER_RULE);
+    assert_eq!(sem001.extra_total, Some(MAX_COMPARE_DETAILS_PER_RULE));
     assert_eq!(sem001.extra_in_ast.len(), MAX_COMPARE_DETAILS_PER_RULE);
     assert!(!report.details_truncated);
     assert!(!report.matched);
@@ -455,7 +504,7 @@ fn permuted_inputs_produce_identical_reports() {
         .map(|fingerprint| fingerprint.start)
         .collect();
     assert_eq!(missing, vec![0, 2], "delta order is deterministic");
-    assert_eq!(rule(&first, "SEM001").extra_total, 1);
+    assert_eq!(rule(&first, "SEM001").extra_total, Some(1));
 }
 
 #[test]
@@ -519,7 +568,7 @@ fn compare_consumes_independently_wired_semantic_streams() {
     assert!(oracle
         .by_rule
         .iter()
-        .all(|rule| rule.missing_total == 0 && rule.extra_total == 0));
+        .all(|rule| rule.missing_total == Some(0) && rule.extra_total == Some(0)));
 
     // Compare displays the frozen Legacy stream, never `ast_semantic`.
     let expected: Vec<Diagnostic> = lexical
@@ -696,8 +745,10 @@ fn incomplete_but_not_truncated_is_reported_separately() {
     assert!(!report.matched);
     assert_eq!(report.legacy_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
     assert_eq!(report.ast_count, MAX_COMPARE_FINGERPRINTS_PER_ENGINE + 1);
-    assert_eq!(rule(&report, "SEM001").missing_total, 0);
-    assert_eq!(rule(&report, "SEM001").extra_total, 0);
+    assert_eq!(rule(&report, "SEM001").missing_total, None);
+    assert_eq!(rule(&report, "SEM001").extra_total, None);
+    assert!(rule(&report, "SEM001").missing_from_ast.is_empty());
+    assert!(rule(&report, "SEM001").extra_in_ast.is_empty());
 }
 
 #[test]
@@ -711,7 +762,7 @@ fn missing_detail_sample_is_bounded_at_exactly_sixty_four() {
     let report = compare_semantic_diagnostics(&at_limit, &[]);
     let sem001 = rule(&report, "SEM001");
     assert_eq!(sem001.missing_from_ast.len(), 64);
-    assert_eq!(sem001.missing_total, 64);
+    assert_eq!(sem001.missing_total, Some(64));
     assert!(!report.details_truncated);
     assert!(!report.matched);
 
@@ -726,7 +777,7 @@ fn missing_detail_sample_is_bounded_at_exactly_sixty_four() {
     assert_eq!(rule(&report, "SEM001").missing_from_ast.len(), 64);
     assert_eq!(
         rule(&report, "SEM001").missing_total,
-        MAX_COMPARE_DETAILS_PER_RULE + 1
+        Some(MAX_COMPARE_DETAILS_PER_RULE + 1)
     );
 }
 
@@ -738,7 +789,7 @@ fn every_migrated_code_is_collected() {
         assert_eq!(report.ast_count, 0, "{code}");
         let rule = rule(&report, code);
         assert_eq!(rule.legacy_count, 1, "{code}");
-        assert_eq!(rule.missing_total, 1, "{code}");
+        assert_eq!(rule.missing_total, Some(1), "{code}");
         assert_eq!(rule.missing_from_ast.len(), 1, "{code}");
     }
 }
