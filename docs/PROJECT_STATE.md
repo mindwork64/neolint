@@ -6,16 +6,17 @@ records verified state.
 
 ## Where the project is
 
-- **Phase 8 (Issue #107, AST-first stabilization) is delivered on the
-  experimental feature branch through [PR #112](https://github.com/mindwork64/neolint/pull/112),
-  targeting the integration branch `exp/preprocessor-ast`.**
-- Branch: `exp-preprocessor-ast-phase-08-stabilization`.
-- Integration base: `66936b0e175d51cba8d83377061229869ef64e96` (`exp/preprocessor-ast`).
+- **Phase 8 (Issue #107, AST-first stabilization) is merged** into the experimental
+  integration branch through [PR #112](https://github.com/mindwork64/neolint/pull/112).
+- Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
+- Integration branch HEAD: `e4732b300013e26edc60b54af3a6743f93933c08`
+  (squash merge of PR #112; parent was Phase 7 base
+  `66936b0e175d51cba8d83377061229869ef64e96`).
 - Benchmark evidence artifact snapshot: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
 - Benchmark harness capture source: `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`
   (tree `8264d70e02802de0fe57e4d49e2a662c8086eeef`, clean worktree).
-- Latest full CI gate baseline before this checkpoint-only correction:
-  PR head `efd6349b551fd366bc943eda292573ddac1c8566`.
+- Final PR source HEAD before squash merge:
+  `f735c5c2eca03495ca275359aa88288cdfe33d95`.
 - Stable `main`: `98556e21e175190c95f2da39fc0e2ba7a8d9544c` — frozen and unchanged.
 - AST is the default engine **only on the experimental branch**. Legacy remains
   selectable (`--engine legacy`) and unchanged; Compare remains opt-in and compares
@@ -36,14 +37,13 @@ display (10,000 per unit and per invocation, terminal `PRE039`).
 
 ## Verified gates
 
-Rust sources are unchanged since `0ea4a604d309aa65b83a0793ee7e8ffa9e2de8e6`
-(tree `73d77147843f2b6945ddb25bb0cb12b7b9db8cd4`); every later commit touches
-only `bench/`, `scripts/` and docs. The full gate is green on PR head
-`efd6349b551fd366bc943eda292573ddac1c8566`:
-[45288202923](https://github.com/mindwork64/neolint/actions/runs/45288202923)
-(pull_request) and [45288194335](https://github.com/mindwork64/neolint/actions/runs/45288194335)
-(push), including formatting, Clippy, debug/release tests, rustdoc, MSRV 1.75,
-Python metadata/harness tests, documentation tests and whitespace.
+The full gate was green on the final PR source HEAD
+`f735c5c2eca03495ca275359aa88288cdfe33d95`:
+[45289677266](https://github.com/mindwork64/neolint/actions/runs/45289677266)
+(pull_request) and [45289669162](https://github.com/mindwork64/neolint/actions/runs/45289669162)
+(push). Both completed successfully, including formatting, Clippy, debug/release
+tests, rustdoc, MSRV 1.75, Python metadata/harness tests, documentation tests and
+PR whitespace.
 
 - `cargo test --all-targets --all-features`: **951 passed, 0 failed** (also 951 in
   release and on Rust 1.75).
@@ -97,6 +97,6 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 ## Next action
 
-Phase 8 is scoped to the experimental integration branch `exp/preprocessor-ast`.
-Any migration to stable `main`, v1.0.0 publication or Legacy retirement requires
-a separate decision and Issue.
+Phase 8 is integrated into `exp/preprocessor-ast`. Follow-ups #108–#111 remain
+separate Issues. Any migration to stable `main`, v1.0.0 publication or Legacy
+retirement requires its own decision and Issue.
