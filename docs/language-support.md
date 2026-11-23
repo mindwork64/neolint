@@ -175,7 +175,7 @@ Prototypes, recovered signatures, incomplete bodies and duplicate declarations
 after the first definition are never candidates. Functions reached only through
 another unreachable function remain unreachable.
 
-All three rules fail closed on malformed input: if the same unit has an
+All three rules fail closed on unreliable units: if the same unit has an
 error-severity preprocessor or lexical diagnostic, or if parser diagnostics,
 recovered function signatures, error nodes, missing or unclosed
 function/event/state bodies, or other unreliable structure make the read/use set

@@ -3584,9 +3584,9 @@ are untouched.
 **Objective.** Add three conservative AST-native lint diagnostics — `SEM024`
 (variable is never read), `SEM025` (parameter is never read) and `SEM026`
 (user-defined function is unreachable) — without changing SEM001–SEM023, the
-Legacy engine, Compare, engine selection, exit codes or the frozen compatibility
-APIs. All three are warnings with `DiagnosticKind::Lint` and participate in
-`--disable`, config `disable` and `severity.CODE=...`.
+Legacy engine, Compare, engine selection, or the frozen compatibility APIs. All
+three are warnings with `DiagnosticKind::Lint` and participate in `--disable`,
+config `disable` and `severity.CODE=...`.
 
 **Usage model and declaration identity.** `src/ast_semantic/usage.rs` defines
 `SymbolKey = (ScopeId, declaration name-span start)`, so declaration identity is
@@ -3646,19 +3646,27 @@ Legacy display stream. `docs/diagnostics.md`, `docs/language-support.md`,
 boundary.
 
 **Blast radius.** No lexer, parser, preprocessor, `SourceMap`, comparator,
-engine-selection, exit-code or frozen-API change. `tests/golden/**` is untouched:
-the diff from the Phase 6H base `967a83d2dca151dbc4a13b1f1e24247d9c5e308c` to
-this slice contains no golden path. `corpus/manifest.txt` keeps all 29 fixtures
-and 31 lines; its 12 changed rows add AST-only expected diagnostics to existing
-rows, and `tests/corpus.rs` filters those codes only for explicit Legacy runs.
-No new fixture, dependency or manifest row was added. Existing AST parity
-expectations gained the accompanying new warnings where a fixture now produces
-them; no SEM001–SEM023 message, span, severity, kind or ordering changed. MSRV
-remains Rust 1.75 and production code adds no `unwrap`/`expect`/panic. Phase 7b
-adds the additive `analyze_ast_with_environment` entry point, the environment
-flag in `src/source/unit.rs::analyze_prepared`, and source-order sorting in the
-two unused-declaration rules; it does not change Legacy, display composition,
-the comparator, engine selection, exit codes or any existing frozen API.
+engine-selection, exit-code logic or frozen-API change. `tests/golden/**` is
+untouched: the diff from the Phase 6H base `967a83d2dca151dbc4a13b1f1e24247d9c5e308c`
+to this slice contains no golden path. `corpus/manifest.txt` keeps all 29
+fixtures and 31 lines; its 12 changed rows add AST-only expected diagnostics to
+existing rows, and `tests/corpus.rs` filters those codes only for explicit
+Legacy runs. No new fixture, dependency or manifest row was added. Existing AST
+parity expectations gained the accompanying new warnings where a fixture now
+produces them; no SEM001–SEM023 message, span, severity, kind or ordering
+changed. MSRV remains Rust 1.75 and production code adds no
+`unwrap`/`expect`/panic. Phase 7b adds the additive
+`analyze_ast_with_environment` entry point, the environment flag in
+`src/source/unit.rs::analyze_prepared`, and source-order sorting in the two
+unused-declaration rules; it does not change Legacy, display composition, the
+comparator, engine selection, SEM001–SEM023 behavior or any existing frozen API.
+One narrow exit-status exception follows from fail-closed gating: when the
+error-severity preprocessor or lexical diagnostic that makes a unit unreliable
+is itself display-suppressed (for example `disable = PRE032`) and a Phase 7
+finding is escalated with `severity.SEM024 = error`, that escalated finding is
+still absent, so the run can exit 0 where it previously exited 1. SEM001–SEM023,
+Legacy and Compare exit behavior are unchanged, and fail-closed takes priority
+over exit-status parity for a suppressed diagnostic.
 
 **Validation evidence (final working-tree run).**
 

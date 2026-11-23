@@ -488,20 +488,24 @@ fn successful_preprocess_include_keeps_unused_analysis_enabled() {
         "usage.lsl",
         "integer read_global() { return shared_global; }\n",
     );
-    let source = write_file(
-        &directory,
-        "root.lsl",
-        "integer shared_global;\n#include \"usage.lsl\"\ndefault { state_entry() { llOwnerSay((string)read_global()); } }\n",
-    );
+    const ROOT_SOURCE: &str = "integer shared_global;\ninteger root_unused;\n#include \"usage.lsl\"\ndefault { state_entry() { llOwnerSay((string)read_global()); } }\n";
+    let source = write_file(&directory, "root.lsl", ROOT_SOURCE);
     let display = source.to_str().unwrap();
 
     let output = run_args(&["--preprocess", "-I", includes.to_str().unwrap(), display]);
     assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        format!("{display}: no diagnostics\n"),
-        "the included read must keep the global used"
+        stdout,
+        expected_unused_diagnostic(display, ROOT_SOURCE, "root_unused", "SEM024"),
+        "successful preprocessing must keep Phase 7 analysis enabled"
     );
+    assert!(
+        !stdout.contains("shared_global"),
+        "the included read must keep the global used: {stdout}"
+    );
+    assert!(!stdout.contains("SEM025"), "{stdout}");
+    assert!(!stdout.contains("SEM026"), "{stdout}");
 
     fs::remove_dir_all(directory).unwrap();
 }
