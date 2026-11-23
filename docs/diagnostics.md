@@ -118,7 +118,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which are **lint**. `SEM012`, `SEM013` and `SEM023` default to **warning**; the rest default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023` and `SEM024`, which are **lint**. `SEM012`, `SEM013`, `SEM023` and `SEM024` default to **warning**; the rest default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -145,6 +145,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which
 | `SEM021` | Duplicate named state or state/global/function/built-in namespace collision. | error | God-only built-ins are excluded; `default` duplication remains PAR014. |
 | `SEM022` | Undefined state-change target in a known event handler. | error | Function state changes and unknown extension event bodies are not checked. |
 | `SEM023` | Standalone comparison result is discarded. | warning / lint | Only comparison expression statements are checked; calls, assignments, increment/decrement, used comparisons and ambiguous/syntax-error cases are skipped. |
+| `SEM024` | Variable is declared but never read. | warning / lint | Syntactic read/use analysis, not runtime liveness. Plain assignment targets and call callees are not reads; compound assignments, increments/decrements and component reads are. Malformed or incomplete units produce no SEM024. |
 
 ## Illustrative minimal examples
 
@@ -200,6 +201,11 @@ default { state_entry() { state missing; } }
 ```lsl
 // SEM023: comparison result discarded; assignment was likely intended
 default { state_entry() { integer RStat; RStat == FALSE; } }
+```
+
+```lsl
+// SEM024: local variable is never read
+default { state_entry() { integer unused; } }
 ```
 
 ```lsl
@@ -285,6 +291,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - Unresolved types and values are not assigned guessed types.
 - Some complex or malformed control-flow cases are not analyzed.
 - SEM023 intentionally skips comparisons containing calls or side effects and statements with syntax errors.
+- SEM024 is a syntactic read/use analysis, not runtime liveness: a read counts even when reachable only from a function that later call-graph analysis may prove is never invoked. SEM024 fails closed and emits nothing when syntax errors, recovered function signatures, error nodes, missing bodies or unclosed function/event/state bodies make reads unreliable.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

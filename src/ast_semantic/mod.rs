@@ -12,6 +12,7 @@ pub(crate) mod flow;
 pub(crate) mod rules;
 pub(crate) mod statements;
 pub(crate) mod types;
+pub(crate) mod usage;
 
 use crate::ast::Ast;
 use crate::diagnostic::Diagnostic;
@@ -82,5 +83,8 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
         &scopes,
         &jumps.invalid_functions,
     ));
+    let used = usage::used_symbols(&expressions.uses, &scopes);
+    let reliable = usage::unit_is_reliable(ast, syntax_diagnostics, &expressions);
+    diagnostics.extend(rules::unused_variables::check(&scopes, &used, reliable));
     diagnostics
 }

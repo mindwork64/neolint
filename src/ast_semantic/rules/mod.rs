@@ -13,6 +13,7 @@ pub(crate) mod explicit_casts;
 pub(crate) mod state_namespace;
 pub(crate) mod state_targets;
 pub(crate) mod unresolved_variables;
+pub(crate) mod unused_variables;
 pub(crate) mod user_calls;
 pub(crate) mod variable_initializers;
 

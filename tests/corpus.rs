@@ -290,6 +290,23 @@ const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Every CLI corpus run is checked under both the AST default and explicit Legacy.
 const ENGINE_VARIANTS: &[&[&str]] = &[&[], &["--engine", "legacy"]];
 
+/// Diagnostics intentionally emitted only by the AST engine. The manifest row
+/// describes the AST default stream; explicit Legacy runs filter these codes so
+/// all other expected diagnostics remain exact for both engines.
+const AST_ONLY_CODES: &[&str] = &["SEM024"];
+
+fn expected_for_engine(fixture: &Fixture, engine_args: &[&str]) -> BTreeMap<DiagnosticKey, usize> {
+    let mut expected = fixture.expected.clone();
+    let ast_stream = match engine_args.windows(2).find(|pair| pair[0] == "--engine") {
+        Some(pair) => pair[1] == "ast",
+        None => true,
+    };
+    if !ast_stream {
+        expected.retain(|key, _| !AST_ONLY_CODES.contains(&key.code.as_str()));
+    }
+    expected
+}
+
 #[derive(Debug)]
 struct CommandResult {
     stdout: String,
@@ -441,8 +458,9 @@ fn every_fixture_matches_manifest_through_cli() {
             .unwrap_or_else(|error| panic!("{error}"));
             let stdout = output.stdout;
             let actual = parse_output(&stdout);
+            let expected = expected_for_engine(fixture, engine_args);
             assert_eq!(
-                actual, fixture.expected,
+                actual, expected,
                 "{} ({}) diagnostics mismatch under {:?}\nstdout:\n{stdout}",
                 fixture.id, fixture.path, engine_args
             );
@@ -467,14 +485,14 @@ fn every_fixture_matches_manifest_through_cli() {
 fn recursive_directory_run_matches_manifest_aggregate() {
     let fixtures = parse_manifest().expect("valid manifest");
     let root = corpus_root();
-    let mut expected = BTreeMap::new();
-    for fixture in &fixtures {
-        for (key, count) in &fixture.expected {
-            *expected.entry(key.clone()).or_insert(0) += count;
-        }
-    }
 
     for &engine_args in ENGINE_VARIANTS {
+        let mut expected = BTreeMap::new();
+        for fixture in &fixtures {
+            for (key, count) in expected_for_engine(fixture, engine_args) {
+                *expected.entry(key).or_insert(0) += count;
+            }
+        }
         let mut command = neolint();
         command.args(engine_args);
         command.arg(&root);

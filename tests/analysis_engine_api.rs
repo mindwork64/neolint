@@ -133,6 +133,24 @@ fn ast_engine_returns_exact_ast_codes_and_spans() {
                 3,
                 27
             ),
+            (
+                "SEM024",
+                Severity::Warning,
+                DiagnosticKind::Lint,
+                8,
+                9,
+                1,
+                9
+            ),
+            (
+                "SEM024",
+                Severity::Warning,
+                DiagnosticKind::Lint,
+                19,
+                20,
+                2,
+                9
+            ),
         ]
     );
     assert_eq!(
@@ -144,6 +162,16 @@ fn ast_engine_returns_exact_ast_codes_and_spans() {
         &source[summary[1].3..summary[1].4],
         "llSay",
         "SEM002 spans the callee identifier"
+    );
+    assert_eq!(
+        &source[summary[2].3..summary[2].4],
+        "g",
+        "first SEM024 spans the first declaration name"
+    );
+    assert_eq!(
+        &source[summary[3].3..summary[3].4],
+        "g",
+        "second SEM024 spans the second declaration name"
     );
     assert!(analysis.comparison().is_none());
 }

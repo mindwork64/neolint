@@ -128,6 +128,123 @@ fn discarded_comparison_warning_does_not_fail_and_can_be_configured() {
 }
 
 #[test]
+fn sem024_ast_engines_emit_warning_but_legacy_does_not() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused.lsl",
+        "default { state_entry() { integer unused; } }\n",
+    );
+    let source = source.to_str().unwrap();
+
+    let default_output = run_args(&[source]);
+    let explicit_ast = run_args(&["--engine", "ast", source]);
+    for output in [&default_output, &explicit_ast] {
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("warning[SEM024]"), "{stdout}");
+        assert!(
+            stdout.contains("variable 'unused' is declared but never read"),
+            "{stdout}"
+        );
+    }
+    assert_eq!(default_output.stdout, explicit_ast.stdout);
+    assert_eq!(default_output.stderr, explicit_ast.stderr);
+    assert_eq!(default_output.status.code(), explicit_ast.status.code());
+
+    let legacy = run_args(&["--engine", "legacy", source]);
+    assert_eq!(legacy.status.code(), Some(0));
+    let legacy_stdout = String::from_utf8(legacy.stdout).unwrap();
+    assert!(!legacy_stdout.contains("SEM024"), "{legacy_stdout}");
+    assert_eq!(
+        legacy_stdout,
+        format!("{source}: no diagnostics\n"),
+        "legacy output must remain unchanged"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem024_can_be_disabled_by_cli_and_config() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused.lsl",
+        "default { state_entry() { integer unused; } }\n",
+    );
+    let config = write_file(&directory, "disable.conf", "disable = SEM024\n");
+    let source = source.to_str().unwrap();
+
+    let disabled = run_args(&["--disable", "SEM024", source]);
+    assert_eq!(disabled.status.code(), Some(0));
+    let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
+    assert!(!disabled_stdout.contains("SEM024"), "{disabled_stdout}");
+    assert!(
+        disabled_stdout.contains("no diagnostics"),
+        "{disabled_stdout}"
+    );
+
+    let configured = run_args(&["--config", config.to_str().unwrap(), source]);
+    assert_eq!(configured.status.code(), Some(0));
+    let configured_stdout = String::from_utf8(configured.stdout).unwrap();
+    assert!(!configured_stdout.contains("SEM024"), "{configured_stdout}");
+    assert!(
+        configured_stdout.contains("no diagnostics"),
+        "{configured_stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem024_can_be_escalated_to_an_error() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused.lsl",
+        "default { state_entry() { integer unused; } }\n",
+    );
+
+    let output = run_args(&["--severity", "SEM024=error", source.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[SEM024]"), "{stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sem024_appears_in_json_output_with_the_existing_schema() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "unused.lsl",
+        "default { state_entry() { integer unused; } }\n",
+    );
+
+    let output = run_args(&["--format", "json", source.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with('['), "{stdout}");
+    assert!(stdout.trim_end().ends_with(']'), "{stdout}");
+    for field in [
+        "\"code\":\"SEM024\"",
+        "\"severity\":\"warning\"",
+        "\"kind\":\"lint\"",
+        "\"message\":\"variable 'unused' is declared but never read\"",
+        "\"line\":1",
+        "\"column\":35",
+        "\"start\":34",
+        "\"end\":40",
+    ] {
+        assert!(stdout.contains(field), "missing {field}: {stdout}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn unresolved_variable_warning_can_be_escalated_or_disabled() {
     let directory = temporary_directory();
     let source = directory.join("unresolved.lsl");
@@ -1486,9 +1603,24 @@ fn tokens_are_identical_across_engines_and_json_combination_is_rejected() {
     for output in [&legacy_pre, &default_pre, &ast_pre, &compare_pre] {
         assert_eq!(output.status.code(), Some(0));
     }
-    assert_eq!(default_pre.stdout, ast_pre.stdout);
-    assert_eq!(legacy_pre.stdout, ast_pre.stdout);
-    assert_eq!(legacy_pre.stdout, compare_pre.stdout);
+    let sem024 = format!(
+        "{}:2:9: warning[SEM024]: variable 'x' is declared but never read\n",
+        preprocessed.display()
+    );
+    let legacy_pre_stdout = String::from_utf8(legacy_pre.stdout).unwrap();
+    let default_pre_stdout = String::from_utf8(default_pre.stdout).unwrap();
+    let ast_pre_stdout = String::from_utf8(ast_pre.stdout).unwrap();
+    let compare_pre_stdout = String::from_utf8(compare_pre.stdout).unwrap();
+    assert_eq!(default_pre_stdout, ast_pre_stdout);
+    assert_eq!(
+        legacy_pre_stdout, compare_pre_stdout,
+        "Legacy and Compare must display identical tokens"
+    );
+    assert_eq!(
+        ast_pre_stdout,
+        format!("{legacy_pre_stdout}{sem024}"),
+        "AST must keep the exact Legacy token lines and append only SEM024"
+    );
 
     for engine in ["legacy", "ast", "compare"] {
         let output = run_args(&[
@@ -1962,10 +2094,16 @@ fn compare_tokens_come_from_the_single_lex() {
         .unwrap()
         .contains("compare unit 0"));
 
-    // The default AST path obtains the same tokens from its single engine lex.
+    // The default AST path obtains the same tokens from its single engine lex,
+    // then appends the syntactically diagnosed unused global.
     let default_output = run_args(&["--tokens", "--preprocess", display]);
     assert_eq!(default_output.status.code(), Some(0));
-    assert_eq!(String::from_utf8(default_output.stdout).unwrap(), expected);
+    let sem024 =
+        format!("{display}:2:9: warning[SEM024]: variable 'x' is declared but never read\n");
+    assert_eq!(
+        String::from_utf8(default_output.stdout).unwrap(),
+        format!("{expected}{sem024}")
+    );
     assert!(default_output.stderr.is_empty());
 
     fs::remove_dir_all(directory).unwrap();
