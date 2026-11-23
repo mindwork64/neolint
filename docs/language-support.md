@@ -138,6 +138,51 @@ The complete list of diagnostic codes, default severities, examples, and rule bo
 
 Analysis is limited to cases that neolint can determine with reasonable confidence. Unknown extension calls and unknown extension event bodies are excluded from relevant semantic checks. Unresolved expressions are not assigned guessed types, and some complex control-flow cases may remain unchecked.
 
+## Unused and dead-code analysis
+
+Neolint's unused/dead-code analysis is available only in the AST engine: the
+default CLI run and explicit `--engine ast`. Explicit Legacy (`--engine legacy`
+or `engine = legacy`) emits none of these diagnostics, and they are not part of
+the Compare parity report. All three are warnings by default with the `lint`
+kind, and they participate in `--disable`, `disable`, and `severity.CODE=...`
+like the other warnings.
+
+- `SEM024` reports a global or local variable that is never read.
+- `SEM025` reports a parameter that is never read.
+- `SEM026` reports a user-defined function that no script entry point reaches.
+
+The analysis is syntactic. A declaration is used when a resolved identifier
+occurrence reads its value. Plain assignment targets (including plain component
+writes) and direct call callees are not reads; compound assignment targets
+(including compound component writes), `++`/`--`, and component reads are.
+Declaration identity is the owning lexical scope plus the declaration name span,
+so shadowed declarations with the same spelling remain distinct and a read of a
+different binding never marks a declaration used.
+
+`SEM024` and `SEM025` do not perform runtime liveness or CFG-based dead-store
+elimination. A read counts wherever it appears in syntactically valid source,
+including inside a function that `SEM026` separately reports as unreachable.
+`SEM025` covers parameters of user-defined functions and canonical event
+handlers; parameters of unknown extension events are outside the scope model and
+are therefore never reported.
+
+`SEM026` is function reachability, not statement reachability or whole-program
+runtime reachability. Roots are direct user-function calls in event handlers of
+any state (including extension events) and in global initializers. Edges are
+direct identifier calls in user-function bodies, and only calls with a matched
+closing parenthesis create edges. Reachability is iterative and cycle-safe.
+Prototypes, recovered signatures, incomplete bodies and duplicate declarations
+after the first definition are never candidates. Functions reached only through
+another unreachable function remain unreachable.
+
+All three rules fail closed on malformed input: if parser diagnostics, recovered
+function signatures, error nodes, missing or unclosed function/event/state
+bodies, or other unreliable structure make the read/use set or call graph
+untrustworthy, they emit nothing. `SEM026` also suppresses the whole rule when
+its bounded graph limits (4,096 nodes, 8,192 edges, 16,384 work steps) are
+exceeded, rather than reporting a partial result. The exact messages, spans,
+defaults, and boundaries are in the [diagnostic reference](diagnostics.md).
+
 ## Important limitations
 
 Neolint is not a complete LSL compiler or a complete symbol database for every scripting environment. It does not guarantee that a script will compile or behave correctly in Second Life or another simulator. Always use the official compiler and the target runtime to verify scripts that matter.

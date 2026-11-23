@@ -29,6 +29,11 @@ class DocumentationTests(unittest.TestCase):
         missing = sorted(code.strip('"') for code in source_codes if code.strip('"') not in documented)
         self.assertEqual(missing, [], f"missing diagnostic docs: {missing}")
 
+    def test_language_support_documents_ast_only_unused_analysis(self):
+        language_support = (ROOT / "docs/language-support.md").read_text()
+        for code in ("SEM024", "SEM025", "SEM026"):
+            self.assertIn(code, language_support, f"language-support.md omits {code}")
+
     def test_readme_documentation_links_exist(self):
         readme = (ROOT / "README.md").read_text()
         for target in re.findall(r"\]\((docs/[^)#]+)(?:#[^)]*)?\)", readme):

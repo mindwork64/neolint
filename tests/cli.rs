@@ -408,6 +408,109 @@ fn compare_ignores_sem024_sem025_and_sem026() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// Render the exact human line for one AST-only unused-analysis finding.
+fn expected_unused_diagnostic(path: &str, source: &str, name: &str, code: &str) -> String {
+    let start = source.find(name).unwrap();
+    let line = source[..start].matches('\n').count() + 1;
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let column = source[line_start..start].chars().count() + 1;
+    let message = match code {
+        "SEM024" => format!("variable '{name}' is declared but never read"),
+        "SEM025" => format!("parameter '{name}' is never read"),
+        "SEM026" => format!("function '{name}' is never called"),
+        other => panic!("unexpected AST-only code: {other}"),
+    };
+    format!("{path}:{line}:{column}: warning[{code}]: {message}\n")
+}
+
+#[test]
+fn unused_analysis_isolates_each_analysis_unit_across_files_directory_and_stdin() {
+    let directory = temporary_directory();
+    let tree = directory.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+
+    const FIRST_SOURCE: &str = "integer shared_value;\ninteger first_callee(integer first_parameter) { return 1; }\nshared_function() { }\ndefault { state_entry() { llOwnerSay((string)first_callee(1)); } }\n";
+    const SECOND_SOURCE: &str = "integer second_value;\ninteger second_callee(integer second_parameter) { return 1; }\nsecond_dead() { }\ndefault { state_entry() { llOwnerSay((string)second_callee(1)); } }\n";
+    // `shared_value` is read and `shared_function` is called here. The first
+    // unit declares both names without using them, so any state leak would
+    // change one unit's findings.
+    const NESTED_SOURCE: &str = "integer shared_value;\ninteger nested_value;\ninteger nested_callee(integer nested_parameter) { return shared_value; }\nshared_function() { }\nnested_dead() { }\ndefault { state_entry() { shared_function(); llOwnerSay((string)nested_callee(1)); } }\n";
+    const STDIN_SOURCE: &str = "integer stdin_value;\ninteger stdin_callee(integer stdin_parameter) { return 1; }\nstdin_dead() { }\ndefault { state_entry() { llOwnerSay((string)stdin_callee(1)); } }\n";
+
+    let first = write_file(&directory, "first.lsl", FIRST_SOURCE);
+    let second = write_file(&directory, "second.lsl", SECOND_SOURCE);
+    let nested = write_file(&tree, "nested.lsl", NESTED_SOURCE);
+    let first_path = first.to_str().unwrap();
+    let second_path = second.to_str().unwrap();
+    let tree_path = tree.to_str().unwrap();
+    let nested_path = nested.to_str().unwrap();
+    let args = [first_path, second_path, tree_path, "-"];
+
+    let first_run = run_args_with_stdin(&args, STDIN_SOURCE.as_bytes());
+    let second_run = run_args_with_stdin(&args, STDIN_SOURCE.as_bytes());
+    assert_eq!(first_run.status.code(), Some(0));
+    assert_eq!(first_run.status.code(), second_run.status.code());
+    assert_eq!(first_run.stdout, second_run.stdout);
+    assert_eq!(first_run.stderr, second_run.stderr);
+    assert!(first_run.stderr.is_empty(), "{first_run:?}");
+
+    let expected = [
+        expected_unused_diagnostic(first_path, FIRST_SOURCE, "shared_value", "SEM024"),
+        expected_unused_diagnostic(first_path, FIRST_SOURCE, "first_parameter", "SEM025"),
+        expected_unused_diagnostic(first_path, FIRST_SOURCE, "shared_function", "SEM026"),
+        expected_unused_diagnostic(second_path, SECOND_SOURCE, "second_value", "SEM024"),
+        expected_unused_diagnostic(second_path, SECOND_SOURCE, "second_parameter", "SEM025"),
+        expected_unused_diagnostic(second_path, SECOND_SOURCE, "second_dead", "SEM026"),
+        expected_unused_diagnostic(nested_path, NESTED_SOURCE, "nested_value", "SEM024"),
+        expected_unused_diagnostic(nested_path, NESTED_SOURCE, "nested_parameter", "SEM025"),
+        expected_unused_diagnostic(nested_path, NESTED_SOURCE, "nested_dead", "SEM026"),
+        expected_unused_diagnostic("<stdin>", STDIN_SOURCE, "stdin_value", "SEM024"),
+        expected_unused_diagnostic("<stdin>", STDIN_SOURCE, "stdin_parameter", "SEM025"),
+        expected_unused_diagnostic("<stdin>", STDIN_SOURCE, "stdin_dead", "SEM026"),
+    ]
+    .concat();
+    assert_eq!(String::from_utf8(first_run.stdout).unwrap(), expected);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn directory_walk_and_stdin_unit_order_is_deterministic() {
+    let directory = temporary_directory();
+    let tree = directory.join("tree");
+    let nested = tree.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+
+    const A_SOURCE: &str = "integer unused_a;\ndefault { state_entry() { } }\n";
+    const M_SOURCE: &str = "integer unused_m;\ndefault { state_entry() { } }\n";
+    const Z_SOURCE: &str = "integer unused_z;\ndefault { state_entry() { } }\n";
+    const STDIN_SOURCE: &str = "integer unused_stdin;\ndefault { state_entry() { } }\n";
+
+    let a = write_file(&tree, "a.lsl", A_SOURCE);
+    let m = write_file(&nested, "m.lsl", M_SOURCE);
+    let z = write_file(&tree, "z.lsl", Z_SOURCE);
+    let tree_path = tree.to_str().unwrap();
+    let args = [tree_path, "-"];
+
+    let first_run = run_args_with_stdin(&args, STDIN_SOURCE.as_bytes());
+    let second_run = run_args_with_stdin(&args, STDIN_SOURCE.as_bytes());
+    assert_eq!(first_run.status.code(), Some(0));
+    assert_eq!(first_run.status.code(), second_run.status.code());
+    assert_eq!(first_run.stdout, second_run.stdout);
+    assert_eq!(first_run.stderr, second_run.stderr);
+
+    let expected = [
+        expected_unused_diagnostic(a.to_str().unwrap(), A_SOURCE, "unused_a", "SEM024"),
+        expected_unused_diagnostic(m.to_str().unwrap(), M_SOURCE, "unused_m", "SEM024"),
+        expected_unused_diagnostic(z.to_str().unwrap(), Z_SOURCE, "unused_z", "SEM024"),
+        expected_unused_diagnostic("<stdin>", STDIN_SOURCE, "unused_stdin", "SEM024"),
+    ]
+    .concat();
+    assert_eq!(String::from_utf8(first_run.stdout).unwrap(), expected);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn unresolved_variable_warning_can_be_escalated_or_disabled() {
     let directory = temporary_directory();

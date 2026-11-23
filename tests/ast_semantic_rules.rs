@@ -707,3 +707,31 @@ fn sem025_and_sem026_are_deterministic_and_ordered_by_declaration() {
         ]
     );
 }
+
+#[test]
+fn sem024_keeps_reads_inside_unreachable_functions_while_sem026_reports_the_function() {
+    let source = "integer global_read;\ndead_reader() {\n    integer local_read;\n    llOwnerSay((string)global_read + (string)local_read);\n}\nreachable_helper() { }\ndefault { state_entry() { } }\nstate active { state_entry() { reachable_helper(); } }\n";
+    let dead_start = source.find("dead_reader").unwrap();
+    let diagnostics = semantic(source);
+
+    // SEM024 is syntactic: reads inside a function that SEM026 reports as
+    // unreachable still count, so neither variable is reported as unused.
+    assert!(
+        sem024(&diagnostics).is_empty(),
+        "reads in an unreachable function must still count: {diagnostics:?}"
+    );
+    assert_eq!(
+        sem026(&diagnostics),
+        vec![expected_unreachable_function(
+            source,
+            dead_start,
+            "dead_reader"
+        )]
+    );
+
+    // A function reached only through a non-default state's event is a root.
+    assert_eq!(sem026(&diagnostics).len(), 1);
+    assert!(!sem026(&diagnostics)
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("reachable_helper")));
+}
