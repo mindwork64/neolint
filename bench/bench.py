@@ -317,7 +317,7 @@ def git(*args) -> str:
     ).stdout.strip()
 
 
-def metadata(fixtures: dict, rows: list[Row]) -> dict:
+def metadata(fixtures: dict, rows: list[Row], binary) -> dict:
     rustc = subprocess.run(["rustc", "-Vv"], capture_output=True, text=True, check=False)
     cargo = subprocess.run(["cargo", "-V"], capture_output=True, text=True, check=False)
     cpu_model = "unknown"
@@ -348,9 +348,9 @@ def metadata(fixtures: dict, rows: list[Row]) -> dict:
         "machine": platform.machine(),
         "cpu_model": cpu_model,
         "cpu_count": os.cpu_count(),
-        "binary": str(BINARY.relative_to(REPO)),
-        "binary_sha256": sha256_file(BINARY) if BINARY.exists() else None,
-        "binary_bytes": BINARY.stat().st_size if BINARY.exists() else None,
+        "binary": str(binary),
+        "binary_sha256": sha256_file(binary) if binary.exists() else None,
+        "binary_bytes": binary.stat().st_size if binary.exists() else None,
         "profile": "release",
         "features": "default",
         "rss_method": "proc_vmhwm_poll" if pathlib.Path("/proc/self/status").exists() else "unavailable",
@@ -417,6 +417,11 @@ def main(argv=None):
     parser.add_argument("--self-test", action="store_true", help="verify the harness itself")
     parser.add_argument("--out", default=None)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument(
+        "--binary",
+        default=None,
+        help="measure an existing binary instead of building target/release/neolint",
+    )
     args = parser.parse_args(argv)
 
     if not args.skip_build:
@@ -429,8 +434,9 @@ def main(argv=None):
         if build.returncode != 0:
             print(build.stderr[-2000:], file=sys.stderr)
             return 1
-    if not BINARY.exists():
-        print("release binary missing", file=sys.stderr)
+    binary = pathlib.Path(args.binary).resolve() if args.binary else BINARY
+    if not binary.exists():
+        print(f"binary missing: {binary}", file=sys.stderr)
         return 1
 
     fixtures = build_fixtures(fixtures_root())
@@ -448,8 +454,8 @@ def main(argv=None):
     unstable = []
     for pass_number in range(1, args.passes + 1):
         for row in rows:
-            samples = measure(row, BINARY, scratch)
-            rss_kb = measure_rss(row, BINARY)
+            samples = measure(row, binary, scratch)
+            rss_kb = measure_rss(row, binary)
             entry = summarise(row, pass_number, samples, rss_kb)
             summaries.append(entry)
             if not entry["digest_stable"]:
@@ -478,7 +484,7 @@ def main(argv=None):
                 flush=True,
             )
 
-    meta = metadata(fixtures, rows)
+    meta = metadata(fixtures, rows, binary)
     variance = {}
     for pass_number in (1, 2):
         for entry in summaries:
@@ -490,13 +496,20 @@ def main(argv=None):
             pair[pass_number - 1] = entry["median_ms"]
     variance = {name: pair for name, pair in variance.items() if None not in pair}
 
-    out_dir = pathlib.Path(args.out) if args.out else REPO / "bench" / "results" / meta["commit"][:12]
+    default_name = meta["commit"][:12]
+    if args.binary:
+        default_name = f"{default_name}-vs-{meta['binary_sha256'][:8]}"
+    out_dir = pathlib.Path(args.out) if args.out else REPO / "bench" / "results" / default_name
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "raw.jsonl").write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_summary(out_dir / "summary.md", meta, summaries, variance)
 
-    print(f"\nwrote {out_dir.relative_to(REPO)}")
+    try:
+        shown = out_dir.resolve().relative_to(REPO)
+    except ValueError:
+        shown = out_dir
+    print(f"\nwrote {shown}")
     if unstable:
         print(f"UNSTABLE DIGESTS in {len(unstable)} row(s): {[row['row'] for row in unstable]}", file=sys.stderr)
         return 4

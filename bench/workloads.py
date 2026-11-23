@@ -28,10 +28,11 @@ def _write(path: pathlib.Path, text: str) -> pathlib.Path:
 
 
 def many_symbols(root: pathlib.Path, declarations: int, uses: int) -> pathlib.Path:
-    """One scope with many declarations and many uses of the *first* name.
+    """One scope with many declarations and as many reads spread across them.
 
-    Every use resolves through the whole symbol list before finding its target,
-    which is the worst case for a linear reverse scan over one scope.
+    Every declaration is read, so the row does not mix lookup cost with
+    unused-variable diagnostics. Reads cycle through the declarations, which
+    still walks most of the symbol list for the earliest names.
     """
     lines = [f"integer value{index};" for index in range(declarations)]
     lines.append("default")
@@ -39,8 +40,10 @@ def many_symbols(root: pathlib.Path, declarations: int, uses: int) -> pathlib.Pa
     lines.append("    state_entry()")
     lines.append("    {")
     for index in range(uses):
-        # value0 is declared first, so a reverse scan walks every other symbol.
-        lines.append(f"        value0 = value0 + {index % 7};")
+        target = index % max(1, declarations)
+        # A read of valueN walks the whole symbol list for small N, so the
+        # workload still exercises the worst case for the earliest names.
+        lines.append(f"        llOwnerSay((string)value{target});")
     lines.append("    }")
     lines.append("}")
     return _write(root / "many_symbols.lsl", "\n".join(lines) + "\n")

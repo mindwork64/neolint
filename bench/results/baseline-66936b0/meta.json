@@ -1,10 +1,10 @@
 {
-  "binary": "target/release/neolint",
+  "binary": "/home/eloraam/apps/neolint/target/base-wt/target/release/neolint",
   "binary_bytes": 1659648,
   "binary_sha256": "83d9fce60666773fc73318a70a163b147c428eacd155eb89ece85486295f8ac8",
   "branch": "exp-preprocessor-ast-phase-08-stabilization",
   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
-  "commit": "66936b0e175d51cba8d83377061229869ef64e96",
+  "commit": "1273c4d325428c9fa95a49c9122bfc99ae5d9e34",
   "cpu_count": 12,
   "cpu_model": "AMD Ryzen 5 2600X Six-Core Processor",
   "features": "default",
@@ -13,7 +13,7 @@
     "corpus": "fa30c5218307c813a3a939a761ca791c859b19ba79f842d7497aa1d573fe14f5",
     "diagnostic_flood.lsl": "1d478c97c7d80b432e34cd9e5eaa1eb8de1f62bdd27456c50152b49f17a27f2b",
     "malformed.lsl": "73c2886339f2205cb0b9f89570ecb321cb55e67b0834b56de4a67e5e4e32f82a",
-    "many_symbols.lsl": "32416bcae0e28174555c3f2cedbecfbabb9777d43c90443004864d3cb56e3d42",
+    "many_symbols.lsl": "70a8f3886edc24d80a39dca5f53f51568bfb2ba5e6c0ccbf065ddbd880fe68d0",
     "near_limit.lsl": "9fa85b182b19fcd1a87c01d3df8f72a9f0e27129e73a290c371ec12eb64493b6",
     "nested_scopes.lsl": "d2b6eb3060d9b9b834ddda18a7deb6103e03065b51336209cb82ddc12f5b3cab",
     "preprocess_root.lsl": "6809da09c436623e090d71f84335eb94dc814a12bd687c8510aa2abb83f0a7c8",
@@ -417,6 +417,6 @@
   "rss_method": "proc_vmhwm_poll",
   "rss_samples_per_row": 3,
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
-  "tree": "87d810459064f438fe61c0a632fa83642ea68971",
+  "tree": "73d77147843f2b6945ddb25bb0cb12b7b9db8cd4",
   "warmup_iterations": 3
 }
