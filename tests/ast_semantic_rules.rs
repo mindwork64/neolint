@@ -525,6 +525,27 @@ fn extension_event_handler_calls_are_roots() {
 }
 
 #[test]
+fn builtin_name_call_does_not_make_same_named_user_function_reachable() {
+    let source = "llSay() { }\ndefault { state_entry() { llSay(); } }\n";
+    let function_start = source.find("llSay").unwrap();
+    let diagnostics = semantic(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM002"),
+        "the call is analyzed as the canonical built-in: {diagnostics:?}"
+    );
+    assert_eq!(
+        sem026(&diagnostics),
+        vec![expected_unreachable_function(
+            source,
+            function_start,
+            "llSay"
+        )]
+    );
+}
+
+#[test]
 fn calls_from_a_global_initializer_are_roots() {
     let source =
         "integer helper() { return 1; }\ninteger g = helper();\ndefault { state_entry() { } }\n";

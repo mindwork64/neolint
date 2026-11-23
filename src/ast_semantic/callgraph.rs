@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, ExpressionKind, FunctionDeclaration, TopLevel};
+use crate::builtins;
 use crate::diagnostic::Span;
 
 use super::calls::{CallOwner, CallSite, FunctionId};
@@ -143,6 +144,15 @@ fn build(
         let ExpressionKind::Identifier(callee) = &site.call.callee.kind else {
             continue;
         };
+        // The existing call analyzer resolves canonical built-ins independently
+        // of the user-function signature map. A same-named user definition must
+        // not become reachable merely because a built-in call uses that spelling.
+        if builtins::definitions()
+            .functions
+            .contains_key(callee.name.as_str())
+        {
+            continue;
+        }
         let Some(&target) = index_by_name.get(callee.name.as_str()) else {
             continue;
         };
@@ -286,6 +296,26 @@ mod tests {
         );
         assert!(!result.suppressed);
         assert!(names(&result).is_empty(), "{:?}", names(&result));
+    }
+
+    #[test]
+    fn canonical_builtin_calls_do_not_reach_same_named_user_functions() {
+        let result = graph(
+            "llSay() { }\ndefault { state_entry() { llSay(); } }\n",
+            LIMITS,
+        );
+        assert!(!result.suppressed);
+        assert_eq!(names(&result), vec!["llSay"]);
+    }
+
+    #[test]
+    fn calls_to_builtin_named_functions_do_not_reach_their_callees() {
+        let result = graph(
+            "helper() { }\nllSay() { helper(); }\ndefault { state_entry() { llSay(); } }\n",
+            LIMITS,
+        );
+        assert!(!result.suppressed);
+        assert_eq!(names(&result), vec!["helper", "llSay"]);
     }
 
     #[test]
