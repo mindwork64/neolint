@@ -21,7 +21,7 @@ fn assert_legacy_equal(left: &[RenderedDiagnostic], right: &[RenderedDiagnostic]
 
 #[test]
 fn selector_contract_is_exact() {
-    assert_eq!(AnalysisEngine::default(), AnalysisEngine::Legacy);
+    assert_eq!(AnalysisEngine::default(), AnalysisEngine::Ast);
     for (value, expected) in [
         ("legacy", AnalysisEngine::Legacy),
         ("ast", AnalysisEngine::Ast),
@@ -36,6 +36,18 @@ fn selector_contract_is_exact() {
     assert!(!AnalysisEngine::Legacy.requires_prepared_source());
     assert!(AnalysisEngine::Ast.requires_prepared_source());
     assert!(AnalysisEngine::Compare.requires_prepared_source());
+}
+
+#[test]
+fn legacy_parse_alias_is_identical_to_parse_legacy() {
+    for source in [
+        "integer g;\ndefault { state_entry() { llSay(0); } }",
+        "default { state_entry() { integer x = ; llSay(0); } }",
+        "#define WIDTH 2\ninteger x = WIDTH;\ndefault { state_entry() { } }\n",
+    ] {
+        let (tokens, _) = lex(source);
+        assert_eq!(neolint::parse(&tokens), parse_legacy(&tokens), "{source:?}");
+    }
 }
 
 #[test]

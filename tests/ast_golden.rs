@@ -32,12 +32,12 @@
 //!
 //! # Scope
 //!
-//! This slice pins only explicit AST selection. Both accepted spellings are
-//! covered against the same goldens: `--engine ast` and `--engine=ast`.
-//! [`run_cases`] accepts the engine arguments to insert before the positional
-//! inputs, so a later Phase 6H slice can add a default-invocation variant by
-//! calling `run_cases(&[])` once the CLI default becomes AST. That assertion is
-//! deliberately absent here because the default is still Legacy at this commit.
+//! Both accepted spellings are covered against the same goldens:
+//! `--engine ast` and `--engine=ast`. The default invocation (no `--engine`)
+//! now also selects AST, so [`run_cases`] is called with `&[]` as well. A
+//! separate byte-for-byte equivalence test asserts that the default invocation
+//! and explicit `--engine ast` produce identical stdout, stderr, and exit
+//! status for every case.
 //!
 //! The Firestorm fixture uses a `switch` statement: the AST engine accepts it
 //! in the Firestorm dialect and reports no diagnostics (exit 0), while the
@@ -384,17 +384,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-fn run_case(case: &AstGoldenCase, engine_args: &[&str]) {
+fn run_case_output(case: &AstGoldenCase, engine_args: &[&str]) -> std::process::Output {
     let directory = fixture_directory(case.name);
-    let golden = golden_directory(case.name);
-    assert_golden_digests(&golden, case);
     let mut command = Command::new(env!("CARGO_BIN_EXE_neolint"));
     command.current_dir(&directory);
     command.args(engine_args);
     command.args(case.args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = if let Some(stdin_name) = case.stdin {
+    if let Some(stdin_name) = case.stdin {
         let input = fs::read(directory.join(stdin_name)).unwrap_or_else(|error| {
             panic!(
                 "{}: cannot read stdin fixture {stdin_name}: {error}",
@@ -419,7 +417,13 @@ fn run_case(case: &AstGoldenCase, engine_args: &[&str]) {
             .stdin(Stdio::null())
             .output()
             .unwrap_or_else(|error| panic!("{}: cannot run neolint: {error}", case.name))
-    };
+    }
+}
+
+fn run_case(case: &AstGoldenCase, engine_args: &[&str]) {
+    let golden = golden_directory(case.name);
+    assert_golden_digests(&golden, case);
+    let output = run_case_output(case, engine_args);
 
     let expected_exit = read_golden(&golden, case, "exit.txt");
     let status = output
@@ -454,7 +458,7 @@ fn run_case(case: &AstGoldenCase, engine_args: &[&str]) {
 }
 
 /// Run the full AST matrix with `engine_args` inserted before each case's
-/// positional inputs. A future default-invocation test calls this with `&[]`.
+/// positional inputs. The default-invocation test calls this with `&[]`.
 fn run_cases(engine_args: &[&str]) {
     for case in CASES {
         run_case(case, engine_args);
@@ -469,6 +473,36 @@ fn ast_engine_space_form_matches_captured_goldens() {
 #[test]
 fn ast_engine_equals_form_matches_captured_goldens() {
     run_cases(&["--engine=ast"]);
+}
+
+#[test]
+fn default_invocation_matches_ast_goldens() {
+    run_cases(&[]);
+}
+
+/// The no-option default must be byte-for-byte the explicit AST invocation.
+#[test]
+fn default_invocation_is_identical_to_explicit_ast() {
+    for case in CASES {
+        let default = run_case_output(case, &[]);
+        let explicit = run_case_output(case, &["--engine", "ast"]);
+        assert_eq!(
+            default.status.code(),
+            explicit.status.code(),
+            "{}: default and explicit AST exit statuses differ",
+            case.name
+        );
+        assert_eq!(
+            default.stdout, explicit.stdout,
+            "{}: default and explicit AST stdout differ",
+            case.name
+        );
+        assert_eq!(
+            default.stderr, explicit.stderr,
+            "{}: default and explicit AST stderr differ",
+            case.name
+        );
+    }
 }
 
 #[test]

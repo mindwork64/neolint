@@ -135,6 +135,51 @@ fn configured_disabled_unresolved_variable_flood_does_not_trigger_pre039() {
 }
 
 #[test]
+fn default_ast_enabled_flood_is_capped_with_terminal_pre039() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let output = run_with_stdin(&["--format", "json", "-"], source.as_bytes());
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.matches("\"code\":\"").count(), limit);
+    assert_eq!(json_code_count(&stdout, "SEM012"), limit - 1);
+    assert_eq!(json_code_count(&stdout, "PRE039"), 1);
+    assert_eq!(json_last_code(&stdout), Some("PRE039"));
+}
+
+#[test]
+fn default_ast_disabled_flood_does_not_trigger_pre039() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let output = run_with_stdin(
+        &["--format", "json", "--disable", "SEM012", "-"],
+        source.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.trim(), "[]");
+    assert_eq!(json_code_count(&stdout, "SEM012"), 0);
+    assert_eq!(json_code_count(&stdout, "PRE039"), 0);
+}
+
+#[test]
+fn explicit_legacy_direct_flood_remains_uncapped() {
+    let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
+    let source = unresolved_variable_flood(limit + 2);
+    let output = run_with_stdin(
+        &["--engine", "legacy", "--format", "json", "-"],
+        source.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(json_code_count(&stdout, "SEM012"), limit + 2);
+    assert_eq!(json_code_count(&stdout, "PRE039"), 0);
+}
+
+#[test]
 fn suppression_does_not_mask_overflow_from_other_rules() {
     let limit = neolint::preprocessor::diagnostics::MAX_TOTAL_DIAGNOSTICS;
     let mut source = "integer duplicate;\n".repeat(limit + 2);

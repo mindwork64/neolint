@@ -1,9 +1,13 @@
 //! Engine-aware analysis selection and result envelopes.
 //!
-//! The module is additive: [`AnalysisUnit::analyze`](crate::source::AnalysisUnit::analyze)
-//! and [`AnalysisRun::analyze`](crate::pipeline::AnalysisRun::analyze) keep their
-//! frozen Legacy behavior, while the engine API can additionally run the
-//! independent AST analyzer or compare both semantic streams.
+//! On the experimental Phase 6H branch [`AnalysisEngine::Ast`] is the default
+//! engine; [`AnalysisEngine::Legacy`] remains available as the explicit
+//! rollback engine, and [`AnalysisEngine::Compare`] stays opt-in. The frozen
+//! [`AnalysisUnit::analyze`](crate::source::AnalysisUnit::analyze) and
+//! [`AnalysisRun::analyze`](crate::pipeline::AnalysisRun::analyze) entry points
+//! keep their Legacy behavior regardless of the selector default, while the
+//! engine API can additionally run the independent AST analyzer or compare
+//! both semantic streams.
 //!
 //! Comparison fingerprints always carry raw prepared coordinates. Rendering into
 //! original source coordinates happens only for the displayed diagnostic stream.
@@ -25,12 +29,21 @@ pub use compare::{
 };
 
 /// Which semantic analyzer the engine API runs.
+///
+/// The default is [`AnalysisEngine::Ast`] on the experimental Phase 6H branch.
+/// [`AnalysisEngine::Legacy`] is the explicit rollback engine, and
+/// [`AnalysisEngine::Compare`] remains opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnalysisEngine {
     /// Frozen Legacy lexer/parser/semantic pipeline.
-    #[default]
+    ///
+    /// Select explicitly with `--engine legacy` or `engine = legacy`. It is no
+    /// longer the default but keeps the direct plain-Legacy execution path.
     Legacy,
     /// Independent typed-AST semantic analyzer.
+    ///
+    /// This is the default engine on the experimental Phase 6H branch.
+    #[default]
     Ast,
     /// Run both analyzers and report their raw semantic streams.
     Compare,
@@ -272,8 +285,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_legacy() {
-        assert_eq!(AnalysisEngine::default(), AnalysisEngine::Legacy);
+    fn default_is_ast() {
+        assert_eq!(AnalysisEngine::default(), AnalysisEngine::Ast);
+        assert_eq!(AnalysisEngine::default().as_str(), "ast");
     }
 
     #[test]

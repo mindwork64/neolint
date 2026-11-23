@@ -287,6 +287,9 @@ fn parse_output(stdout: &str) -> BTreeMap<DiagnosticKey, usize> {
 const FIXTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Every CLI corpus run is checked under both the AST default and explicit Legacy.
+const ENGINE_VARIANTS: &[&[&str]] = &[&[], &["--engine", "legacy"]];
+
 #[derive(Debug)]
 struct CommandResult {
     stdout: String,
@@ -421,36 +424,44 @@ fn every_fixture_matches_manifest_through_cli() {
     let fixtures = parse_manifest().expect("valid manifest");
     let root = corpus_root();
 
-    for fixture in &fixtures {
-        let path = root.join(&fixture.path);
-        let mut command = neolint();
-        command.arg(&path);
-        let output = run_with_timeout(
-            command,
-            FIXTURE_TIMEOUT,
-            &format!("fixture {} ({})", fixture.id, path.display()),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let stdout = output.stdout;
-        let actual = parse_output(&stdout);
-        assert_eq!(
-            actual, fixture.expected,
-            "{} ({}) diagnostics mismatch\nstdout:\n{stdout}",
-            fixture.id, fixture.path
-        );
-        assert_eq!(
-            output.status, fixture.exit,
-            "{} ({}) exit mismatch\nstdout:\n{stdout}\nstderr:\n{}",
-            fixture.id, fixture.path, output.stderr
-        );
-        let has_syntax_error = actual
-            .keys()
-            .any(|key| key.code.starts_with("PAR") || key.code.starts_with("LEX"));
-        assert_eq!(
-            has_syntax_error, !fixture.syntax_valid,
-            "{} ({}) syntax classification mismatch",
-            fixture.id, fixture.path
-        );
+    for &engine_args in ENGINE_VARIANTS {
+        for fixture in &fixtures {
+            let path = root.join(&fixture.path);
+            let mut command = neolint();
+            command.args(engine_args);
+            command.arg(&path);
+            let output = run_with_timeout(
+                command,
+                FIXTURE_TIMEOUT,
+                &format!(
+                    "fixture {} ({}) under {:?}",
+                    fixture.id,
+                    path.display(),
+                    engine_args
+                ),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            let stdout = output.stdout;
+            let actual = parse_output(&stdout);
+            assert_eq!(
+                actual, fixture.expected,
+                "{} ({}) diagnostics mismatch under {:?}\nstdout:\n{stdout}",
+                fixture.id, fixture.path, engine_args
+            );
+            assert_eq!(
+                output.status, fixture.exit,
+                "{} ({}) exit mismatch under {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+                fixture.id, fixture.path, engine_args, output.stderr
+            );
+            let has_syntax_error = actual
+                .keys()
+                .any(|key| key.code.starts_with("PAR") || key.code.starts_with("LEX"));
+            assert_eq!(
+                has_syntax_error, !fixture.syntax_valid,
+                "{} ({}) syntax classification mismatch under {:?}",
+                fixture.id, fixture.path, engine_args
+            );
+        }
     }
 }
 
@@ -458,40 +469,50 @@ fn every_fixture_matches_manifest_through_cli() {
 fn recursive_directory_run_matches_manifest_aggregate() {
     let fixtures = parse_manifest().expect("valid manifest");
     let root = corpus_root();
-    let mut command = neolint();
-    command.arg(&root);
-    let output = run_with_timeout(
-        command,
-        DIRECTORY_TIMEOUT,
-        &format!("corpus directory ({})", root.display()),
-    )
-    .expect("run corpus directory");
-    let stdout = output.stdout;
-    let actual = parse_output(&stdout);
-
     let mut expected = BTreeMap::new();
     for fixture in &fixtures {
         for (key, count) in &fixture.expected {
             *expected.entry(key.clone()).or_insert(0) += count;
         }
     }
-    assert_eq!(
-        actual, expected,
-        "recursive corpus diagnostics mismatch\nstdout:\n{stdout}"
-    );
-    assert_eq!(output.status, 1, "corpus contains error fixtures");
-    for fixture in &fixtures {
-        let path = root.join(&fixture.path);
+
+    for &engine_args in ENGINE_VARIANTS {
+        let mut command = neolint();
+        command.args(engine_args);
+        command.arg(&root);
+        let output = run_with_timeout(
+            command,
+            DIRECTORY_TIMEOUT,
+            &format!(
+                "corpus directory ({}) under {engine_args:?}",
+                root.display()
+            ),
+        )
+        .expect("run corpus directory");
+        let stdout = output.stdout;
+        let actual = parse_output(&stdout);
+
+        assert_eq!(
+            actual, expected,
+            "recursive corpus diagnostics mismatch under {engine_args:?}\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            output.status, 1,
+            "corpus contains error fixtures under {engine_args:?}"
+        );
+        for fixture in &fixtures {
+            let path = root.join(&fixture.path);
+            assert!(
+                stdout.contains(&path.to_string_lossy().to_string()),
+                "{} ({}) was not processed by directory traversal under {engine_args:?}",
+                fixture.id,
+                fixture.path
+            );
+        }
         assert!(
-            stdout.contains(&path.to_string_lossy().to_string()),
-            "{} ({}) was not processed by directory traversal",
-            fixture.id,
-            fixture.path
+            output.elapsed < DIRECTORY_TIMEOUT,
+            "corpus directory run exceeded smoke budget under {engine_args:?}: {:?}",
+            output.elapsed
         );
     }
-    assert!(
-        output.elapsed < DIRECTORY_TIMEOUT,
-        "corpus directory run exceeded smoke budget: {:?}",
-        output.elapsed
-    );
 }

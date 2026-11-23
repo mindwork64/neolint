@@ -35,7 +35,8 @@ impl LintConfig {
     /// Blank lines and comments are ignored. Supported settings are
     /// `disable = RULE[, RULE...]`, `severity.RULE = error|warning|info`,
     /// `preprocess = true|false`, `dialect = lsl|firestorm`,
-    /// `include_dir = PATH`, and `engine = legacy|ast|compare`.
+    /// `include_dir = PATH`, and `engine = legacy|ast|compare`. A configuration
+    /// without an `engine` setting selects [`AnalysisEngine::Ast`].
     ///
     /// # Errors
     ///
@@ -174,7 +175,11 @@ impl LintConfig {
         &self.include_dirs
     }
 
-    /// Configured analysis engine, defaulting to [`AnalysisEngine::Legacy`].
+    /// Configured analysis engine, defaulting to [`AnalysisEngine::Ast`].
+    ///
+    /// On the experimental Phase 6H branch a configuration without an `engine`
+    /// setting selects AST. [`AnalysisEngine::Legacy`] must be selected
+    /// explicitly to restore the Legacy pipeline.
     pub fn engine(&self) -> AnalysisEngine {
         self.engine
     }
@@ -375,11 +380,11 @@ mod engine_config_tests {
     use super::*;
 
     #[test]
-    fn default_engine_is_legacy() {
-        assert_eq!(LintConfig::default().engine(), AnalysisEngine::Legacy);
+    fn default_engine_is_ast() {
+        assert_eq!(LintConfig::default().engine(), AnalysisEngine::Ast);
         assert_eq!(
             LintConfig::parse("# no engine setting\n").unwrap().engine(),
-            AnalysisEngine::Legacy
+            AnalysisEngine::Ast
         );
     }
 
@@ -411,9 +416,9 @@ mod engine_config_tests {
     }
 
     #[test]
-    fn old_config_without_engine_still_parses_as_legacy() {
+    fn old_config_without_engine_parses_as_ast() {
         let config = LintConfig::parse("disable = SEM001\nseverity.SEM004 = warning\n").unwrap();
-        assert_eq!(config.engine(), AnalysisEngine::Legacy);
+        assert_eq!(config.engine(), AnalysisEngine::Ast);
     }
 
     #[test]

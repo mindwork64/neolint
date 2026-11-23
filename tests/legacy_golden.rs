@@ -45,9 +45,10 @@
 //! Firestorm extension latch, so the dialect's preprocessing path is exercised.
 //!
 //! `run_cases` takes extra argv that is inserted before the positional inputs.
-//! The default test and the explicit `--engine legacy` test both assert the same
-//! pre-change goldens, so selecting Legacy through the new flag is byte-for-byte
-//! identical to the unmodified base.
+//! The Legacy goldens are asserted through explicit `--engine legacy`,
+//! `--engine=legacy`, and a configuration file selecting `engine = legacy`.
+//! The no-option invocation is deliberately not asserted here: since Phase 6H
+//! it selects AST, whose independent goldens live under `tests/golden/ast/`.
 //!
 //! These fixtures are LF-only and CI is Linux; path rendering uses `/`. The
 //! `directory` case pins recursive collection order (`a.lsl` before
@@ -205,11 +206,23 @@ fn run_cases(extra_args: &[&str]) {
 }
 
 #[test]
-fn default_invocation_matches_pre_change_goldens() {
-    run_cases(&[]);
+fn explicit_legacy_engine_matches_pre_change_goldens() {
+    run_cases(&["--engine", "legacy"]);
 }
 
 #[test]
-fn explicit_legacy_engine_matches_pre_change_goldens() {
-    run_cases(&["--engine", "legacy"]);
+fn explicit_legacy_equals_form_matches_pre_change_goldens() {
+    run_cases(&["--engine=legacy"]);
+}
+
+#[test]
+fn configured_legacy_engine_matches_pre_change_goldens() {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("legacy-engine.conf");
+    let config = config
+        .to_str()
+        .expect("legacy-engine.conf path is valid UTF-8");
+    run_cases(&["--config", config]);
 }
