@@ -1,0 +1,2 @@
+plain.lsl:3:25: error[PAR006]: expected an expression
+plain.lsl:4:20: warning[SEM012]: variable 'missing_name' is not declared in the current script; verify that it is provided by the scripting environment
