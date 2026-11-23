@@ -201,3 +201,27 @@ No SEM rule remains Legacy-only in the current matrix.
 - SEM023 suppresses statement-local syntax diagnostics, Error descendants, and
   any nested call, assignment or increment side effect. Its primary span is the
   exact comparison operator span.
+
+## Phase 7 AST-only rules (SEM024–SEM026)
+
+Phase 7 adds `SEM024` (unused variable), `SEM025` (unused parameter), and
+`SEM026` (unreachable function) as new AST-native rules. They are **outside**
+the SEM001–SEM023 differential parity contract: the matrix above records the
+migration of the 23 pre-existing Legacy diagnostics, and these three rules have
+no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
+
+- The raw comparator still covers exactly `SEM001`–`SEM023`. The new codes are
+  never counted as parity mismatches, never enter the Legacy display stream, and
+  never appear in the Compare report.
+- `--engine ast` and the AST default emit them. Explicit `--engine legacy` emits
+  none of them, and `--engine compare` stays the SEM001–SEM023 parity diagnostic
+  mode.
+- Their boundaries are independent of the parity matrix. `SEM024`/`SEM025` are
+  syntactic read/use analyses over `(ScopeId, name-span start)` declaration
+  identity, not runtime liveness. `SEM025` covers only user-function and
+  canonical-event parameters. `SEM026` is iterative function reachability from
+  event handlers and global initializers, not statement reachability or
+  whole-program runtime reachability.
+- All three fail closed on malformed units. `SEM026` also suppresses the whole
+  rule when its call-graph node, edge, or work budget overflows, rather than
+  reporting a partial reachability result.

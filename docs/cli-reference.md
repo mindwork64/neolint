@@ -44,6 +44,11 @@ historical engine add `engine = legacy` to the configuration file or pass
 | `legacy` | Explicit rollback engine. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from previous releases. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
+`SEM024`, `SEM025`, and `SEM026` are AST-only lint diagnostics. They appear in
+default and explicit `--engine ast` output, are never emitted by explicit
+`--engine legacy`, and are not part of the Compare parity report, which covers
+only `SEM001`–`SEM023`.
+
 Without `--preprocess`, `ast` (the default) and `compare` use identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map. Identity preparation is not preprocessing; macros and includes are not expanded. With `--preprocess` (or `--dialect firestorm`), every engine uses the full preprocessor and dialect.
 
 Engine-visible differences on the same input:

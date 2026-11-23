@@ -3568,6 +3568,138 @@ golden artifact byte. They do not change SEM rules, the parser, the lexer, the
 preprocessor, `SourceMap`, the comparator, or exit-code semantics; they add no
 dependencies and no production `unwrap`/`expect`/panic. MSRV remains Rust 1.75.
 
+#### Phase 7 implementation record
+
+**Status:** implemented on the experimental integration branch only. Slice 1
+(`ea3d42f910e5c330266861aa97fd1901745a92f2`) added the shared identifier-use
+model and `SEM024`; Slice 2 (`a246d27d4203225d903e611078e49f32f2849e17`) added
+`SEM025`, `SEM026`, call-site ownership and the bounded call graph; Slice 3
+(`28c87ce8dde541caa88bc9bb2713a4f6ba059c5a`) added the documentation contract,
+this record, analysis-unit isolation and ordering regressions, and
+documentation validation. Phase 7b (this change) closes the post-audit findings:
+the environment-reliability gate, source-ordered SEM024/SEM025 output, and the
+contract-shape regression matrix. Stable `main` and the published v1.0.0 release
+are untouched.
+
+**Objective.** Add three conservative AST-native lint diagnostics — `SEM024`
+(variable is never read), `SEM025` (parameter is never read) and `SEM026`
+(user-defined function is unreachable) — without changing SEM001–SEM023, the
+Legacy engine, Compare, engine selection, or the frozen compatibility APIs. All
+three are warnings with `DiagnosticKind::Lint` and participate in `--disable`,
+config `disable` and `severity.CODE=...`.
+
+**Usage model and declaration identity.** `src/ast_semantic/usage.rs` defines
+`SymbolKey = (ScopeId, declaration name-span start)`, so declaration identity is
+lexical scope plus the exact name span rather than a spelling. Keys are valid
+only inside one analysis unit's immutable scope tree and are never persisted.
+`src/ast_semantic/expressions.rs` threads
+`UseContext::{Read, Write, ReadWrite, Callee}` through the single iterative
+expression traversal and emits `IdentifierUse` facts in source order.
+`used_symbols` resolves each use through `ScopeTree::lookup_value_at` at its
+source offset and records only `Read`/`ReadWrite`, preserving declaration-order
+visibility and shadowing. Plain assignment targets and direct call callees are
+not reads; compound assignment targets, `++`/`--`, component reads, initializer
+expressions, loop clauses and switch/lazy-list expressions are. The rules render
+one finding per unread symbol in source order (sorted by declaration name-span
+start) at the declaration name span.
+
+**Call ownership and call graph.** `src/ast_semantic/calls.rs` visits every call
+exactly once and assigns `CallSite.owner ∈ {GlobalInitializer, EventHandler,
+Function(FunctionId)}`. `FunctionId` is the declaration name-span start, the
+same identity used by the first-definition policy, so ownership and signature
+lookup cannot disagree. `src/ast_semantic/callgraph.rs` builds nodes from
+complete user-function declarations (body present, non-empty name, first
+declaration only), roots from matched direct identifier calls in event bodies in
+every state (including extension events) and global initializers, and edges from
+matched direct identifier calls in user-function bodies. Built-in callees,
+indirect calls and calls without a real closing parenthesis create no edge or
+root. Reachability is an iterative, cycle-safe worklist with deduplicated edges,
+and unreachable nodes are reported in declaration order.
+
+**Fail-closed policy.** `src/source/unit.rs::analyze_prepared` sets the
+environment flag false when the unit has an error-severity preprocessor
+diagnostic (for example a missing include or `#error`) or an error-severity
+lexical diagnostic, because source may have been dropped before the AST was
+built or not tokenized. It passes that flag for both the AST and Compare AST
+semantic calls. The additive public entry point
+`ast_semantic::analyze_ast_with_environment` threads it into
+`unit_is_reliable`, while the existing `analyze_ast` delegates with `true`.
+`unit_is_reliable` also returns false when parser diagnostics exist, recovered
+function signatures exist, a top-level `Error` or any `ExpressionKind::Error`
+exists, or any function/event/state body is missing, unclosed or contains an
+`Error` statement. All three rules then emit nothing. The gate is deliberately
+unit-wide because a hidden read or call could live in any malformed or dropped
+region; a partial optimistic result is not reported.
+
+**Resource limits.** The call graph is bounded at 4,096 nodes, 8,192 unique
+edges and 16,384 checked work steps. Any overflow returns a suppressed
+reachability result, and `SEM026` emits nothing rather than reporting the
+remainder of an incomplete graph as unreachable.
+
+**AST-only, Compare and Legacy boundary.** The default AST run and explicit
+`--engine ast` emit SEM024–SEM026. Explicit `--engine legacy` emits none of them
+and its direct plain-Legacy bytes are unchanged. Compare's raw comparator still
+covers exactly `SEM001`–`SEM023`: the new codes are not fingerprints, cannot be
+missing/extra parity findings, cannot change `matched`, and never enter the
+Legacy display stream. `docs/diagnostics.md`, `docs/language-support.md`,
+`docs/cli-reference.md` and `src/ast_semantic/rule-ownership.md` record this
+boundary.
+
+**Blast radius.** No lexer, parser, preprocessor, `SourceMap`, comparator,
+engine-selection, exit-code logic or frozen-API change. `tests/golden/**` is
+untouched: the diff from the Phase 6H base `967a83d2dca151dbc4a13b1f1e24247d9c5e308c`
+to this slice contains no golden path. `corpus/manifest.txt` keeps all 29
+fixtures and 31 lines; its 12 changed rows add AST-only expected diagnostics to
+existing rows, and `tests/corpus.rs` filters those codes only for explicit
+Legacy runs. No new fixture, dependency or manifest row was added. Existing AST
+parity expectations gained the accompanying new warnings where a fixture now
+produces them; no SEM001–SEM023 message, span, severity, kind or ordering
+changed. MSRV remains Rust 1.75 and production code adds no
+`unwrap`/`expect`/panic. Phase 7b adds the additive
+`analyze_ast_with_environment` entry point, the environment flag in
+`src/source/unit.rs::analyze_prepared`, and source-order sorting in the two
+unused-declaration rules; it does not change Legacy, display composition, the
+comparator, engine selection, SEM001–SEM023 behavior or any existing frozen API.
+One narrow exit-status exception follows from fail-closed gating: when the
+error-severity preprocessor or lexical diagnostic that makes a unit unreliable
+is itself display-suppressed (for example `disable = PRE032`) and a Phase 7
+finding is escalated with `severity.SEM024 = error`, that escalated finding is
+still absent, so the run can exit 0 where it previously exited 1. SEM001–SEM023,
+Legacy and Compare exit behavior are unchanged, and fail-closed takes priority
+over exit-status parity for a suppressed diagnostic.
+
+**Validation evidence (final working-tree run).**
+
+- `cargo fmt --all -- --check` → exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0.
+- `cargo test --all-targets --all-features` → exit 0, 944 passed, 0 failed
+  (923 before Phase 7b plus twenty-one audit regressions).
+- `cargo test --release --all-targets --all-features` → exit 0, 944 passed.
+- `cargo +1.75.0 test --all-targets --all-features` → exit 0, 944 passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` → exit 0.
+- `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`
+  → 10 tests OK.
+- `python3 scripts/test_documentation.py` → 7 tests OK.
+- `git diff --check` → exit 0.
+- Focused: `--test ast_semantic_rules` 71 passed, `--test cli` 69 passed,
+  `--test corpus` 5 passed, `--test ast_golden` 6 passed, `--test legacy_golden`
+  3 passed, `--test analysis_engine_compare` 25 passed; 0 failed in every
+  target.
+
+**Roadmap checklist.**
+
+- [x] Phase 0 — experimental branch, CI, architecture contracts.
+- [x] Phase 1 — Source Manager, Source Map, identity preprocessor.
+- [x] Phase 2 — preprocessor core.
+- [x] Phase 3 — includes, advanced macros, Firestorm built-ins and CLI integration.
+- [x] Phase 4 — typed AST parser and recovery.
+- [x] Phase 5 — Firestorm AST extensions.
+- [x] Phase 6A–6F — AST implementations for SEM001–SEM023.
+- [x] Phase 6G — engine selection, bounded Compare, CLI wiring.
+- [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
+- [x] **Phase 7 (this Issue)** — implementation record complete on the experimental branch: SEM024–SEM026 are implemented, documented, and regression-tested.
+- [ ] **After Phase 7** — review the full AST-first stabilization evidence, performance claims and remaining limitations; create separately scoped follow-up Issues for any gaps. Phase 7 is not permission to remove Legacy or change stable `main`.
+
 ---
 
 ## 16. Module structure (proposed, not created in Phase 0)

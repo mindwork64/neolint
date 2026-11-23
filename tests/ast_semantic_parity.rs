@@ -205,6 +205,26 @@ fn expected(
     }
 }
 
+fn unused_variable(source: &str, start: usize, name: &str) -> Diagnostic {
+    Diagnostic {
+        code: "SEM024",
+        severity: neolint::Severity::Warning,
+        kind: neolint::DiagnosticKind::Lint,
+        message: format!("variable '{name}' is declared but never read"),
+        span: span(source, start, name.len()),
+    }
+}
+
+fn unreachable_function(source: &str, start: usize, name: &str) -> Diagnostic {
+    Diagnostic {
+        code: "SEM026",
+        severity: neolint::Severity::Warning,
+        kind: neolint::DiagnosticKind::Lint,
+        message: format!("function '{name}' is never called"),
+        span: span(source, start, name.len()),
+    }
+}
+
 fn migrated(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
     diagnostics
         .iter()
@@ -249,16 +269,20 @@ fn sem007_exact_messages_spans_and_shadowing() {
     let first_span = span(source, first, "value".len());
     assert_eq!(
         semantic(source),
-        vec![expected(
-            "SEM007",
-            format!(
-                "duplicate variable 'value' in the same scope; first declared at {}:{}",
-                first_span.line, first_span.column
+        vec![
+            expected(
+                "SEM007",
+                format!(
+                    "duplicate variable 'value' in the same scope; first declared at {}:{}",
+                    first_span.line, first_span.column
+                ),
+                source,
+                second,
+                "value".len()
             ),
-            source,
-            second,
-            "value".len()
-        )]
+            unused_variable(source, first, "value"),
+            unused_variable(source, second, "value"),
+        ]
     );
 
     let source = "integer process(integer value) { integer value; return value; }";
@@ -335,29 +359,37 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
     );
 
     let source = "integer running; default { } state running { }";
+    let global_start = source.find("running").unwrap();
     let start = source.rfind("running").unwrap();
     assert_eq!(
         semantic(source),
-        vec![expected(
-            "SEM021",
-            "state 'running' conflicts with a global variable declared at 1:9".to_owned(),
-            source,
-            start,
-            "running".len()
-        )]
+        vec![
+            expected(
+                "SEM021",
+                "state 'running' conflicts with a global variable declared at 1:9".to_owned(),
+                source,
+                start,
+                "running".len()
+            ),
+            unused_variable(source, global_start, "running"),
+        ]
     );
 
     let source = "integer idle() { return 1; } default { } state idle { }";
     let start = source.rfind("idle").unwrap();
+    let function_start = source.find("idle").unwrap();
     assert_eq!(
         semantic(source),
-        vec![expected(
-            "SEM021",
-            "state 'idle' conflicts with a function declared at 1:9".to_owned(),
-            source,
-            start,
-            "idle".len()
-        )]
+        vec![
+            expected(
+                "SEM021",
+                "state 'idle' conflicts with a function declared at 1:9".to_owned(),
+                source,
+                start,
+                "idle".len()
+            ),
+            unreachable_function(source, function_start, "idle"),
+        ]
     );
 
     let source = "default { } state llOwnerSay { }";

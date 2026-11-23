@@ -28,7 +28,7 @@ pub mod semantic;
 pub mod source;
 
 pub use ast::{parse_ast, parse_ast_with_options, Ast, AstParseOptions};
-pub use ast_semantic::analyze_ast;
+pub use ast_semantic::{analyze_ast, analyze_ast_with_environment};
 pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };
