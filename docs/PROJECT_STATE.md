@@ -9,8 +9,8 @@ records verified state.
 - **Phase 8 (Issue #107, AST-first stabilization) is merged** into the experimental
   integration branch through [PR #112](https://github.com/mindwork64/neolint/pull/112).
 - Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
-- Integration branch HEAD: `e4732b300013e26edc60b54af3a6743f93933c08`
-  (squash merge of PR #112; parent was Phase 7 base
+- Phase 8 squash merge commit: `e4732b300013e26edc60b54af3a6743f93933c08`
+  (parent was Phase 7 base
   `66936b0e175d51cba8d83377061229869ef64e96`).
 - Benchmark evidence artifact snapshot: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
 - Benchmark harness capture source: `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`
