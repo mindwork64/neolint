@@ -1,8 +1,7 @@
 # SEM rule ownership matrix
 
-Phase 6 is incremental. Phases 6A–6E migrate the rules below; only SEM022 and
-SEM023 remain owned by the Legacy token analyzer and are not yet implemented in
-the AST engine.
+Phases 6A–6F migrate all existing SEM001–SEM023 diagnostics to the AST engine.
+No SEM rule remains Legacy-only in the current matrix.
 
 | Rule | Legacy owner | AST owner | Status | Parity | Known differences | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -27,8 +26,8 @@ the AST engine.
 | SEM019 | `analyze_component_reads` | `ast_semantic::rules::components` | migrated in 6D | exact | none | `sem019_exact_read_message_and_component_span`, full corpus |
 | SEM020 | `analyze_state_topology` | `ast_semantic::rules::duplicate_events` | migrated in 6A | exact | none | `sem020_exact_message_and_scope_boundary`, full corpus |
 | SEM021 | `analyze_state_topology` | `ast_semantic::rules::state_namespace` | migrated in 6A | exact | none | `sem021_exact_duplicate_and_namespace_collisions`, full corpus |
-| SEM022 | `analyze_state_topology` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
-| SEM023 | `analyze_discarded_comparison_expressions` | not implemented yet | Legacy-only | n/a | none in 6A | existing Legacy tests |
+| SEM022 | `analyze_state_topology` | `ast_semantic::rules::state_targets` | migrated in 6F | exact | none | `sem022_exact_message_and_target_span`, full corpus |
+| SEM023 | `analyze_discarded_comparison_expressions` | `ast_semantic::rules::discarded_comparisons` | migrated in 6F | exact | none | `sem023_exact_warning_operator_span`, full corpus |
 
 ## AST scope semantics
 
@@ -166,3 +165,18 @@ the AST engine.
   without creating an argument suppression range. Malformed event parameter
   identifiers are likewise retained as recovered references, without treating
   them as declared parameters.
+
+## Phase 6F state-target and discarded-comparison rules
+
+- SEM022 builds its known-state set only from complete AST state declarations,
+  then scans state changes only inside complete canonical event bodies. Unknown
+  extension events, ordinary functions, incomplete states/events and `state
+  default;` are outside the rule. Targets are checked against all states before
+  reporting, so later declarations are valid.
+- SEM023 checks only statement-owned expression roots that reduce through
+  parentheses to a comparison. A shared iterative statement walker covers
+  functions, canonical/unknown event bodies, nested blocks, unbraced control
+  bodies and switch arms, while control conditions are not candidates.
+- SEM023 suppresses statement-local syntax diagnostics, Error descendants, and
+  any nested call, assignment or increment side effect. Its primary span is the
+  exact comparison operator span.

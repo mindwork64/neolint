@@ -1,8 +1,8 @@
-//! Independent structural semantic analysis over the typed AST.
+//! Independent semantic analysis over the typed AST.
 //!
-//! Phase 6A migrates only SEM001, SEM007, SEM020 and SEM021. The module is not
-//! wired into the CLI or pipeline and does not import preprocessor or SourceMap
-//! internals.
+//! Phases 6A–6F implement all existing SEM001–SEM023 diagnostics without token
+//! scanning. The module is not wired into the CLI or pipeline and does not import
+//! preprocessor or SourceMap internals.
 
 pub mod scopes;
 
@@ -10,6 +10,7 @@ pub(crate) mod calls;
 pub(crate) mod expressions;
 pub(crate) mod flow;
 pub(crate) mod rules;
+pub(crate) mod statements;
 pub(crate) mod types;
 
 use crate::ast::Ast;
@@ -71,6 +72,8 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
         &functions,
     ));
     diagnostics.extend(rules::deprecated_calls::check(&calls, &functions));
+    diagnostics.extend(rules::state_targets::check(ast));
+    diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);
