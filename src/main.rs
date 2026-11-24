@@ -582,9 +582,7 @@ fn run_units(
             if Some(source) != root && diagnostics.is_empty() {
                 continue;
             }
-            diagnostics.retain_mut(|item| {
-                config.apply_to_diagnostic(&mut item.diagnostic)
-            });
+            diagnostics.retain_mut(|item| config.apply_to_diagnostic(&mut item.diagnostic));
             results.push(FileResult {
                 path,
                 tokens: if Some(source) == root {
@@ -596,9 +594,7 @@ fn run_units(
             });
         }
         for (source, mut diagnostics) in groups {
-            diagnostics.retain_mut(|item| {
-                config.apply_to_diagnostic(&mut item.diagnostic)
-            });
+            diagnostics.retain_mut(|item| config.apply_to_diagnostic(&mut item.diagnostic));
             let path = unit
                 .source_map()
                 .and_then(|map| map.file(source))

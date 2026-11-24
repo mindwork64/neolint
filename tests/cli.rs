@@ -1134,7 +1134,10 @@ fn json_preprocessor_diagnostics_expose_origin_and_related_locations() {
         .and_then(|(_, tail)| tail.split_once(']').map(|(array, _)| array))
         .expect("PRE005 must expose the previous definition as a related location");
     assert!(related.contains("\"file\":\""), "{related}");
-    assert!(related.contains("\"label\":\"previous macro definition\""), "{related}");
+    assert!(
+        related.contains("\"label\":\"previous macro definition\""),
+        "{related}"
+    );
     assert!(related.contains("\"line\":1"), "{related}");
     for field in ["column", "end_line", "end_column", "start", "end"] {
         assert!(related.contains(&format!("\"{field}\":")), "{related}");
