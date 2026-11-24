@@ -7,3 +7,6 @@ bench/results/**/raw.jsonl
 
 # Python bytecode from the benchmark harness
 bench/__pycache__/
+
+# Boost.Wave compatibility probe build output
+tools/compat/boost-wave-1.90-pragma-once/probe
