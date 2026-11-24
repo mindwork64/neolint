@@ -62,11 +62,15 @@ harness.
 
 ## Preprocessor diagnostics
 
-All preprocessor diagnostics have kind **syntax**. `PRE037` is informational;
-the rest default to **error**. Their `primary` and `related` locations are original-file
-`SourceSpan`s in the diagnostic's own `AnalysisUnit`; they never pass through
-the prepared-span map. Related locations identify the relevant macro
-definition, previous definition, outer invocation, conditional opening, or EOF.
+All preprocessor diagnostics keep kind **syntax** for compatibility. In JSON v1
+they additionally carry `"origin":"preprocessor"`; this distinguishes the
+preprocessing stage without extending the existing `kind` values. `PRE037` is
+informational; the rest default to **error**. Their `primary` and `related`
+locations are original-file `SourceSpan`s in the diagnostic's own
+`AnalysisUnit`; they never pass through the prepared-span map. Related
+locations identify the relevant macro definition, previous definition, outer
+invocation, conditional opening, or EOF, and are exposed in the JSON `related`
+array with their file, label, byte range and line/column positions.
 
 | Code | Meaning | Related/notes |
 | --- | --- | --- |

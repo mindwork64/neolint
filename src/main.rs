@@ -43,10 +43,21 @@ enum OutputFormat {
     Json,
 }
 
+struct JsonRelatedLocation {
+    file: String,
+    label: String,
+    span: neolint::Span,
+}
+
+struct OutputDiagnostic {
+    diagnostic: Diagnostic,
+    related: Vec<JsonRelatedLocation>,
+}
+
 struct FileResult {
     path: String,
     tokens: Vec<neolint::Token>,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<OutputDiagnostic>,
 }
 
 /// How a unit-based run constructs its prepared source.
@@ -374,6 +385,13 @@ fn run() -> i32 {
         ));
         config.apply(&mut diagnostics);
 
+        let diagnostics = diagnostics
+            .into_iter()
+            .map(|diagnostic| OutputDiagnostic {
+                diagnostic,
+                related: Vec::new(),
+            })
+            .collect();
         results.push(FileResult {
             path,
             tokens,
@@ -389,7 +407,7 @@ fn run() -> i32 {
     let has_errors = results
         .iter()
         .flat_map(|result| &result.diagnostics)
-        .any(|diagnostic| diagnostic.severity == Severity::Error);
+        .any(|item| item.diagnostic.severity == Severity::Error);
 
     if input_failed {
         2
@@ -524,13 +542,25 @@ fn run_units(
             }
         }
 
-        let mut groups: Vec<(neolint::SourceId, Vec<Diagnostic>)> = Vec::new();
+        let mut groups: Vec<(neolint::SourceId, Vec<OutputDiagnostic>)> = Vec::new();
         for diagnostic in analysis.diagnostics() {
+            let related = match json_related_locations(unit, diagnostic.related()) {
+                Ok(related) => related,
+                Err(error) => {
+                    eprintln!("neolint: cannot render related locations for unit {index}: {error}");
+                    input_failed = true;
+                    continue;
+                }
+            };
+            let output = OutputDiagnostic {
+                diagnostic: diagnostic.diagnostic().clone(),
+                related,
+            };
             let source = diagnostic.source();
             if let Some((_, items)) = groups.iter_mut().find(|(id, _)| *id == source) {
-                items.push(diagnostic.diagnostic().clone());
+                items.push(output);
             } else {
-                groups.push((source, vec![diagnostic.diagnostic().clone()]));
+                groups.push((source, vec![output]));
             }
         }
         let root = unit.root();
@@ -552,7 +582,9 @@ fn run_units(
             if Some(source) != root && diagnostics.is_empty() {
                 continue;
             }
-            config.apply(&mut diagnostics);
+            diagnostics.retain_mut(|item| {
+                config.apply_to_diagnostic(&mut item.diagnostic)
+            });
             results.push(FileResult {
                 path,
                 tokens: if Some(source) == root {
@@ -564,7 +596,9 @@ fn run_units(
             });
         }
         for (source, mut diagnostics) in groups {
-            config.apply(&mut diagnostics);
+            diagnostics.retain_mut(|item| {
+                config.apply_to_diagnostic(&mut item.diagnostic)
+            });
             let path = unit
                 .source_map()
                 .and_then(|map| map.file(source))
@@ -586,26 +620,29 @@ fn run_units(
             // The CLI-level overflow must leave exactly one terminal diagnostic.
             result
                 .diagnostics
-                .retain(|diagnostic| diagnostic.code != "PRE039");
+                .retain(|item| item.diagnostic.code != "PRE039");
             if result.diagnostics.len() > remaining {
                 result.diagnostics.truncate(remaining);
             }
             remaining -= result.diagnostics.len();
         }
         if let Some(first) = results.first_mut() {
-            first.diagnostics.push(Diagnostic {
-                code: "PRE039",
-                severity: Severity::Error,
-                kind: neolint::DiagnosticKind::Syntax,
-                message: "total diagnostic limit (10000) reached".to_owned(),
-                span: neolint::Span {
-                    start: 0,
-                    end: 0,
-                    line: 1,
-                    column: 1,
-                    end_line: 1,
-                    end_column: 1,
+            first.diagnostics.push(OutputDiagnostic {
+                diagnostic: Diagnostic {
+                    code: "PRE039",
+                    severity: Severity::Error,
+                    kind: neolint::DiagnosticKind::Syntax,
+                    message: "total diagnostic limit (10000) reached".to_owned(),
+                    span: neolint::Span {
+                        start: 0,
+                        end: 0,
+                        line: 1,
+                        column: 1,
+                        end_line: 1,
+                        end_column: 1,
+                    },
                 },
+                related: Vec::new(),
             });
         }
     }
@@ -625,7 +662,7 @@ fn run_units(
     let has_errors = results
         .iter()
         .flat_map(|result| &result.diagnostics)
-        .any(|diagnostic| diagnostic.severity == Severity::Error);
+        .any(|item| item.diagnostic.severity == Severity::Error);
     if input_failed {
         2
     } else if engine == AnalysisEngine::Compare && !all_matched {
@@ -1035,7 +1072,8 @@ fn print_human(results: &[FileResult], show_tokens: bool) {
                 println!("{}: no diagnostics", result.path);
             }
         } else {
-            for diagnostic in &result.diagnostics {
+            for item in &result.diagnostics {
+                let diagnostic = &item.diagnostic;
                 println!(
                     "{}:{}:{}: {}[{}]: {}",
                     result.path,
@@ -1055,13 +1093,14 @@ fn print_json(results: &[FileResult]) {
     let mut first = true;
     print!("[");
     for result in results {
-        for diagnostic in &result.diagnostics {
+        for item in &result.diagnostics {
             if !first {
                 print!(",");
             }
             first = false;
+            let diagnostic = &item.diagnostic;
             print!(
-                "{{\"file\":\"{}\",\"code\":\"{}\",\"severity\":\"{}\",\"kind\":\"{}\",\"message\":\"{}\",\"line\":{},\"column\":{},\"end_line\":{},\"end_column\":{},\"start\":{},\"end\":{}}}",
+                "{{\"file\":\"{}\",\"code\":\"{}\",\"severity\":\"{}\",\"kind\":\"{}\",\"message\":\"{}\",\"line\":{},\"column\":{},\"end_line\":{},\"end_column\":{},\"start\":{},\"end\":{}",
                 json_escape(&result.path),
                 diagnostic.code,
                 diagnostic.severity.as_str(),
@@ -1074,9 +1113,62 @@ fn print_json(results: &[FileResult]) {
                 diagnostic.span.start,
                 diagnostic.span.end
             );
+            // Preserve the existing kind vocabulary for JSON v1 consumers.
+            if diagnostic.code.starts_with("PRE") {
+                print!(",\"origin\":\"preprocessor\"");
+            }
+            if !item.related.is_empty() {
+                print!(",\"related\":[");
+                for (index, related) in item.related.iter().enumerate() {
+                    if index > 0 {
+                        print!(",");
+                    }
+                    print!(
+                        "{{\"file\":\"{}\",\"label\":\"{}\",\"line\":{},\"column\":{},\"end_line\":{},\"end_column\":{},\"start\":{},\"end\":{}}}",
+                        json_escape(&related.file),
+                        json_escape(&related.label),
+                        related.span.line,
+                        related.span.column,
+                        related.span.end_line,
+                        related.span.end_column,
+                        related.span.start,
+                        related.span.end
+                    );
+                }
+                print!("]");
+            }
+            print!("}}");
         }
     }
     println!("]");
+}
+
+fn json_related_locations(
+    unit: &neolint::AnalysisUnit,
+    related: &[neolint::RelatedLocation],
+) -> Result<Vec<JsonRelatedLocation>, String> {
+    if related.is_empty() {
+        return Ok(Vec::new());
+    }
+    let map = unit
+        .source_map()
+        .ok_or_else(|| "analysis unit has no source map".to_owned())?;
+    let mut output = Vec::with_capacity(related.len());
+    for location in related {
+        let file = unit
+            .manager()
+            .file(location.span.source())
+            .ok_or_else(|| "related location references an unknown source file".to_owned())?;
+        let span = map
+            .render_span(location.span)
+            .map_err(|error| format!("cannot resolve related source span: {error}"))?;
+        output.push(JsonRelatedLocation {
+            file: file.display_name().to_owned(),
+            label: location.label.clone(),
+            span,
+        });
+    }
+    Ok(output)
 }
 
 fn json_escape(value: &str) -> String {
