@@ -4,11 +4,11 @@ compiler=13.3.0
 
 === 01_positive_control
   description: single include of a #pragma once header
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/01_positive_control
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/01_positive_control
   passes: 2, restarts: 1
   pass 1 calls=[once.lsl] deferred=[once.lsl] inventory_misses=[-]
   pass 2 calls=[once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/01_positive_control/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/01_positive_control/lslpreproc/once.lsl"
 ONCE
 
   count(ONCE): expected 1, actual 1
@@ -16,13 +16,13 @@ ONCE
 
 === 02_negative_control_no_pragma
   description: header without #pragma once included twice
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/02_negative_control_no_pragma
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/02_negative_control_no_pragma
   passes: 2, restarts: 1
   pass 1 calls=[plain.lsl,plain.lsl] deferred=[plain.lsl] inventory_misses=[-]
   pass 2 calls=[plain.lsl,plain.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 1 "/tmp/neolint-wave-probe-QJtSNY/02_negative_control_no_pragma/lslpreproc/plain.lsl"
+  output: #line 1 "/tmp/neolint-wave-probe-6y6bbO/02_negative_control_no_pragma/lslpreproc/plain.lsl"
 PLAIN
-#line 1 "/tmp/neolint-wave-probe-QJtSNY/02_negative_control_no_pragma/lslpreproc/plain.lsl"
+#line 1 "/tmp/neolint-wave-probe-6y6bbO/02_negative_control_no_pragma/lslpreproc/plain.lsl"
 PLAIN
 
   count(PLAIN): expected 2, actual 2
@@ -30,11 +30,11 @@ PLAIN
 
 === 03_direct_repeat
   description: same #pragma once header included twice
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/03_direct_repeat
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/03_direct_repeat
   passes: 2, restarts: 1
   pass 1 calls=[once.lsl,once.lsl] deferred=[once.lsl] inventory_misses=[-]
   pass 2 calls=[once.lsl,once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/03_direct_repeat/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/03_direct_repeat/lslpreproc/once.lsl"
 ONCE
 
   count(ONCE): expected 1, actual 1
@@ -42,14 +42,14 @@ ONCE
 
 === 04_nested
   description: #pragma once header included from a parent that is included by root
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/04_nested
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/04_nested
   passes: 3, restarts: 2
   pass 1 calls=[parent.lsl] deferred=[parent.lsl] inventory_misses=[-]
   pass 2 calls=[parent.lsl,once.lsl] deferred=[once.lsl] inventory_misses=[-]
   pass 3 calls=[parent.lsl,once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/04_nested/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/04_nested/lslpreproc/once.lsl"
 ONCE
-#line 2 "/tmp/neolint-wave-probe-QJtSNY/04_nested/lslpreproc/parent.lsl"
+#line 2 "/tmp/neolint-wave-probe-6y6bbO/04_nested/lslpreproc/parent.lsl"
 PARENT
 
   count(ONCE): expected 1, actual 1
@@ -58,16 +58,16 @@ PARENT
 
 === 05_diamond
   description: two branches include the same #pragma once header
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/05_diamond
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/05_diamond
   passes: 3, restarts: 2
   pass 1 calls=[left.lsl,right.lsl] deferred=[left.lsl,right.lsl] inventory_misses=[-]
   pass 2 calls=[left.lsl,once.lsl,right.lsl,once.lsl] deferred=[once.lsl] inventory_misses=[-]
   pass 3 calls=[left.lsl,once.lsl,right.lsl,once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/05_diamond/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/05_diamond/lslpreproc/once.lsl"
 ONCE
-#line 2 "/tmp/neolint-wave-probe-QJtSNY/05_diamond/lslpreproc/left.lsl"
+#line 2 "/tmp/neolint-wave-probe-6y6bbO/05_diamond/lslpreproc/left.lsl"
 LEFT
-#line 2 "/tmp/neolint-wave-probe-QJtSNY/05_diamond/lslpreproc/right.lsl"
+#line 2 "/tmp/neolint-wave-probe-6y6bbO/05_diamond/lslpreproc/right.lsl"
 RIGHT
 
   count(LEFT): expected 1, actual 1
@@ -77,13 +77,13 @@ RIGHT
 
 === 06_reentry
   description: include, other include, then include the same header again
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/06_reentry
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/06_reentry
   passes: 2, restarts: 1
   pass 1 calls=[once.lsl,other.lsl,once.lsl] deferred=[once.lsl,other.lsl] inventory_misses=[-]
   pass 2 calls=[once.lsl,other.lsl,once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/06_reentry/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/06_reentry/lslpreproc/once.lsl"
 ONCE
-#line 1 "/tmp/neolint-wave-probe-QJtSNY/06_reentry/lslpreproc/other.lsl"
+#line 1 "/tmp/neolint-wave-probe-6y6bbO/06_reentry/lslpreproc/other.lsl"
 OTHER
 
   count(ONCE): expected 1, actual 1
@@ -92,13 +92,13 @@ OTHER
 
 === 07_distinct_headers
   description: two different #pragma once headers keep their own bodies
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/07_distinct_headers
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/07_distinct_headers
   passes: 2, restarts: 1
   pass 1 calls=[alpha.lsl,beta.lsl,alpha.lsl] deferred=[alpha.lsl,beta.lsl] inventory_misses=[-]
   pass 2 calls=[alpha.lsl,beta.lsl,alpha.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/07_distinct_headers/lslpreproc/alpha.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/07_distinct_headers/lslpreproc/alpha.lsl"
 ALPHA
-#line 2 "/tmp/neolint-wave-probe-QJtSNY/07_distinct_headers/lslpreproc/beta.lsl"
+#line 2 "/tmp/neolint-wave-probe-6y6bbO/07_distinct_headers/lslpreproc/beta.lsl"
 BETA
 
   count(ALPHA): expected 1, actual 1
@@ -107,11 +107,11 @@ BETA
 
 === 08_cache_miss_lifecycle
   description: uncached inventory item is deferred, materialised, then opened
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/08_cache_miss_lifecycle
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/08_cache_miss_lifecycle
   passes: 2, restarts: 1
   pass 1 calls=[once.lsl] deferred=[once.lsl] inventory_misses=[-]
   pass 2 calls=[once.lsl] deferred=[-] inventory_misses=[-]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/08_cache_miss_lifecycle/lslpreproc/once.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/08_cache_miss_lifecycle/lslpreproc/once.lsl"
 ONCE
 
   count(ONCE): expected 1, actual 1
@@ -120,10 +120,10 @@ ONCE
 
 === 09a_dot_segment_warm_cache
   description: warm cache: plain spelling then ./ spelling, with the item already cached
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/09a_dot_segment_warm_cache
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/09a_dot_segment_warm_cache
   passes: 1, restarts: 0
   pass 1 calls=[name.lsl,./name.lsl] deferred=[-] inventory_misses=[./name.lsl]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/09a_dot_segment_warm_cache/lslpreproc/name.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/09a_dot_segment_warm_cache/lslpreproc/name.lsl"
 NAME
 
   count(NAME): expected 1, actual 1
@@ -132,22 +132,22 @@ NAME
 
 === 09b_dot_segment_uncached
   description: ./ spelling of an item that has never been cached
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/09b_dot_segment_uncached
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/09b_dot_segment_uncached
   passes: 1, restarts: 0
   pass 1 calls=[./name.lsl] deferred=[-] inventory_misses=[./name.lsl]
   wave_error: boost::wave::preprocess_exception
-  output: 
+  output: <empty>
   note: inventory requires the exact item name; no file exists yet
   RESULT: PASS
 
 === 10_symlink_alias
   description: two spellings of one physical file through a symlink
-  unit_dir: /tmp/neolint-wave-probe-QJtSNY/10_symlink_alias
+  unit_dir: /tmp/neolint-wave-probe-6y6bbO/10_symlink_alias
   passes: 1, restarts: 0
   pass 1 calls=[real.lsl,alias.lsl] deferred=[-] inventory_misses=[real.lsl,alias.lsl]
-  output: #line 2 "/tmp/neolint-wave-probe-QJtSNY/10_symlink_alias/lslpreproc/real.lsl"
+  output: #line 2 "/tmp/neolint-wave-probe-6y6bbO/10_symlink_alias/lslpreproc/real.lsl"
 REAL
-#line 2 "/tmp/neolint-wave-probe-QJtSNY/10_symlink_alias/lslpreproc/alias.lsl"
+#line 2 "/tmp/neolint-wave-probe-6y6bbO/10_symlink_alias/lslpreproc/alias.lsl"
 REAL
 
   count(REAL): expected 2, actual 2

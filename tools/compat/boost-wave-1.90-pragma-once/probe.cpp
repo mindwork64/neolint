@@ -220,7 +220,7 @@ void report(Scenario const& scenario, RunResult const& run, fs::path const& unit
     if (run.error) {
         std::cout << "  wave_error: " << run.error_message << "\n";
     }
-    std::cout << "  output: " << run.output << "\n";
+    std::cout << "  output: " << (run.output.empty() ? "<empty>" : run.output) << "\n";
     bool ok = true;
     if (scenario.expect_error != run.error) {
         ok = false;
