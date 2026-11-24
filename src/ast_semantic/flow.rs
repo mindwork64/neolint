@@ -885,3 +885,48 @@ fn canonical_integer(name: &str) -> Option<i32> {
         value
     })
 }
+
+#[cfg(test)]
+mod limit_parity_tests {
+    use super::{
+        MAX_CFG_DEPTH, MAX_CFG_EDGES, MAX_CFG_NODES, MAX_CFG_WORK, MAX_CONSTANT_DEPTH,
+        MAX_CONSTANT_NODES,
+    };
+
+    #[test]
+    fn ast_and_legacy_analysis_budgets_remain_numerically_aligned() {
+        // These assertions enforce policy parity, not identical algorithms or
+        // units: AST counts CFG work / expression nodes, while Legacy counts
+        // function / expression tokens.
+        assert_eq!(
+            MAX_CFG_NODES,
+            crate::semantic::MAX_CFG_NODES,
+            "AST and Legacy CFG node budgets must stay aligned"
+        );
+        assert_eq!(
+            MAX_CFG_EDGES,
+            crate::semantic::MAX_CFG_EDGES,
+            "AST and Legacy CFG edge budgets must stay aligned"
+        );
+        assert_eq!(
+            MAX_CFG_DEPTH,
+            crate::semantic::MAX_CFG_DEPTH,
+            "AST and Legacy CFG depth budgets must stay aligned"
+        );
+        assert_eq!(
+            MAX_CFG_WORK,
+            crate::semantic::MAX_CFG_TOKENS_PER_FUNCTION,
+            "AST CFG work and Legacy per-function token budgets must stay numerically aligned"
+        );
+        assert_eq!(
+            MAX_CONSTANT_NODES,
+            crate::semantic::MAX_CONSTANT_EXPRESSION_TOKENS,
+            "AST constant nodes and Legacy constant-expression tokens must stay numerically aligned"
+        );
+        assert_eq!(
+            MAX_CONSTANT_DEPTH,
+            crate::semantic::MAX_CONSTANT_EXPRESSION_DEPTH,
+            "AST and Legacy constant-evaluation depth budgets must stay aligned"
+        );
+    }
+}

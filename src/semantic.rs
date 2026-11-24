@@ -1681,10 +1681,11 @@ fn analyze_jump_labels(tokens: &[Token], scopes: &ScopeModel, diagnostics: &mut 
     }
 }
 
-const MAX_CFG_TOKENS_PER_FUNCTION: usize = 16_384;
-const MAX_CFG_NODES: usize = 4_096;
-const MAX_CFG_EDGES: usize = 8_192;
-const MAX_CFG_DEPTH: usize = 128;
+// Crate-visible for the AST-side regression that guards numeric policy parity.
+pub(crate) const MAX_CFG_TOKENS_PER_FUNCTION: usize = 16_384;
+pub(crate) const MAX_CFG_NODES: usize = 4_096;
+pub(crate) const MAX_CFG_EDGES: usize = 8_192;
+pub(crate) const MAX_CFG_DEPTH: usize = 128;
 
 /// Bounded token-derived control-flow graph used only by SEM011.
 ///
@@ -1813,8 +1814,8 @@ fn canonical_integer_constant(name: &str) -> Option<i32> {
 /// Evaluate a condition expression to a provable 32-bit integer constant.
 /// Unknown identifiers, calls, unsupported syntax, and division/remainder by
 /// zero return None so SEM011 keeps both control-flow outcomes.
-const MAX_CONSTANT_EXPRESSION_TOKENS: usize = 128;
-const MAX_CONSTANT_EXPRESSION_DEPTH: usize = 64;
+pub(crate) const MAX_CONSTANT_EXPRESSION_TOKENS: usize = 128;
+pub(crate) const MAX_CONSTANT_EXPRESSION_DEPTH: usize = 64;
 
 fn evaluate_constant_integer_expression(
     tokens: &[Token],
