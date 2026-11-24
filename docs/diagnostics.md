@@ -63,8 +63,10 @@ harness.
 ## Preprocessor diagnostics
 
 All preprocessor diagnostics keep kind **syntax** for compatibility. In JSON v1
-they additionally carry `"origin":"preprocessor"`; this distinguishes the
-preprocessing stage without extending the existing `kind` values. `PRE037` is
+preprocessor-origin PRE diagnostics additionally carry
+`"origin":"preprocessor"`; the CLI-generated `PRE039` aggregate-cap marker
+does not. This distinguishes actual preprocessor findings without extending
+the existing `kind` values. `PRE037` is
 informational; the rest default to **error**. Their `primary` and `related`
 locations are original-file `SourceSpan`s in the diagnostic's own
 `AnalysisUnit`; they never pass through the prepared-span map. Related

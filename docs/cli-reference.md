@@ -135,7 +135,7 @@ Each diagnostic object has these fields:
 | `end_column` | One-based end column. |
 | `start` | Zero-based UTF-8 byte offset of the span start. |
 | `end` | Zero-based UTF-8 byte offset of the span end. |
-| `origin` | Optional. Present as `"preprocessor"` for `PRE` diagnostics; omitted for other diagnostics. |
+| `origin` | Optional. Present as `"preprocessor"` for preprocessor-origin `PRE` diagnostics; omitted for non-preprocessor diagnostics and the CLI-generated `PRE039` aggregate-cap marker. |
 | `related` | Optional non-empty array of secondary source locations; omitted when empty. |
 
 A `related` item contains these fields:
