@@ -1124,20 +1124,20 @@ fn json_preprocessor_diagnostics_expose_origin_and_related_locations() {
     assert_eq!(output.status.code(), Some(1), "{:?}", output);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(json_array_is_structurally_valid(&stdout), "{stdout}");
-    assert!(stdout.contains("\\"code\\":\\"PRE005\\""), "{stdout}");
+    assert!(stdout.contains("\"code\":\"PRE005\""), "{stdout}");
     // v1 keeps the existing kind value; origin disambiguates the PRE stage.
-    assert!(stdout.contains("\\"kind\\":\\"syntax\\""), "{stdout}");
-    assert!(stdout.contains("\\"origin\\":\\"preprocessor\\""), "{stdout}");
+    assert!(stdout.contains("\"kind\":\"syntax\""), "{stdout}");
+    assert!(stdout.contains("\"origin\":\"preprocessor\""), "{stdout}");
 
     let related = stdout
-        .split_once("\\"related\\":[")
+        .split_once("\"related\":[")
         .and_then(|(_, tail)| tail.split_once(']').map(|(array, _)| array))
         .expect("PRE005 must expose the previous definition as a related location");
-    assert!(related.contains("\\"file\\":\\""), "{related}");
-    assert!(related.contains("\\"label\\":\\"previous macro definition\\""), "{related}");
-    assert!(related.contains("\\"line\\":1"), "{related}");
+    assert!(related.contains("\"file\":\""), "{related}");
+    assert!(related.contains("\"label\":\"previous macro definition\""), "{related}");
+    assert!(related.contains("\"line\":1"), "{related}");
     for field in ["column", "end_line", "end_column", "start", "end"] {
-        assert!(related.contains(&format!("\\"{field}\\":")), "{related}");
+        assert!(related.contains(&format!("\"{field}\":")), "{related}");
     }
 
     fs::remove_dir_all(directory).unwrap();
@@ -1156,10 +1156,10 @@ fn json_non_preprocessor_diagnostics_keep_the_existing_v1_shape() {
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(json_array_is_structurally_valid(&stdout), "{stdout}");
-    assert!(stdout.contains("\\"code\\":\\"SEM004\\""), "{stdout}");
-    assert!(stdout.contains("\\"kind\\":\\"semantic\\""), "{stdout}");
-    assert!(!stdout.contains("\\"origin\\""), "{stdout}");
-    assert!(!stdout.contains("\\"related\\""), "{stdout}");
+    assert!(stdout.contains("\"code\":\"SEM004\""), "{stdout}");
+    assert!(stdout.contains("\"kind\":\"semantic\""), "{stdout}");
+    assert!(!stdout.contains("\"origin\""), "{stdout}");
+    assert!(!stdout.contains("\"related\""), "{stdout}");
     fs::remove_dir_all(directory).unwrap();
 }
 
