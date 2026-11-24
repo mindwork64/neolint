@@ -2235,11 +2235,19 @@ Requirements:
   the unit/file-index/RunId capacity is an input error (exit 2), never a wrap,
   re-use, or `panic`. `RunId` is process-local and never emitted.
 - No limit may depend on machine memory size.
-- The CFG limit constants exist twice, in `src/ast_semantic/flow.rs` and
-  `src/semantic.rs`, because the two engines keep independent budgeting code.
-  The values are identical today; consolidating them would couple the Legacy
-  and AST engines and is tracked as a separate follow-up rather than changed
-  inside a stabilization phase.
+- The CFG and constant-evaluation limits remain declared independently in
+  `src/ast_semantic/flow.rs` and `src/semantic.rs` so the AST and Legacy engines
+  keep independent budgeting implementations. Their numeric policies are
+  intentionally aligned and covered by
+  `ast_and_legacy_analysis_budgets_remain_numerically_aligned` in
+  `src/ast_semantic/flow.rs`. The paired values are:
+  CFG nodes 4,096, edges 8,192, and depth 128; AST CFG work 16,384 is numerically
+  aligned with Legacy per-function tokens 16,384; constant-evaluation depth is
+  64 in both engines; AST constant nodes 128 is numerically aligned with Legacy
+  expression tokens 128. The work/token and node/token pairs count different
+  units, so this is a policy-parity guard, not a claim that the algorithms or
+  measured work are identical. Keep the values aligned unless a separately
+  reviewed behavior change intentionally revises the policy.
 
 ---
 
