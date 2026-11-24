@@ -15,9 +15,9 @@ is **not** the Firestorm viewer.
 | 3p-vs-upstream headers | **byte-identical** for every Wave header used by the probe (table below) |
 | Compiler | g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, `__VERSION__` 13.3.0 |
 | OS / arch | Linux 7.0.0-43-generic, x86_64 |
-| Probe source | `probe.cpp` sha256 `242da2fa0636a48c`, `run.sh` sha256 `020b2e205de92523`, `safety_check.sh` sha256 `6702c3c1d6e87ffb` |
+| Probe source | SHA-256 prefixes (first 16 hex): `probe.cpp` `242da2fa0636a48c`, `run.sh` `020b2e205de92523`, `safety_check.sh` `6702c3c1d6e87ffb` |
 | Build | `run.sh` (g++ 13.3.0, `-std=c++17 -O2 -Wall -Wextra`, Boost headers via `-isystem`) |
-| Boost.Wave library built | `stage/lib/libboost_wave.a`, sha256 `c6cd8c1a1ed93b8b` |
+| Boost.Wave library built | `stage/lib/libboost_wave.a`, SHA-256 prefix (first 16 hex) `c6cd8c1a1ed93b8b` |
 | Probe binary reproducibility | not byte-reproducible across builds (GCC 13 embeds a filename-derived seed byte; two builds differed in one byte), so reproducibility is anchored on the source/header hashes and the captured output, not a binary hash |
 | Captured stdout | [`captured-output.txt`](captured-output.txt) (this run; trailing whitespace trimmed for diff hygiene) |
 
