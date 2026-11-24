@@ -1818,9 +1818,15 @@ Rules:
   the frozen `Span` shape in original coordinates and `source` is the original
   file (with its `AnalysisUnitId`) for CLI grouping. The existing `Diagnostic`
   type is not changed.
-- JSON keeps the existing object shape for the primary location. Related
-  locations are added as an optional `related` array in Phase 3 with a
-  documented schema note; existing fields never change meaning.
+- JSON v1 keeps the existing primary-location fields and their meanings.
+  Preprocessor diagnostics retain `kind: "syntax"` and add optional
+  `origin: "preprocessor"` (except the CLI-generated aggregate-cap marker
+  `PRE039`). Non-empty secondary locations are emitted in the optional
+  `related` array with original file paths, labels, line/column positions, and
+  UTF-8 byte offsets. The complete additive schema and v2 compatibility rule
+  are documented in `docs/cli-reference.md` and were implemented in
+  [Issue #108 / PR #116](https://github.com/mindwork64/neolint/pull/116).
+  Existing primary fields never change meaning.
 - An `Err` from bridging, foreign-identity checking, or resolution follows
   §7.3.1: fail-fast within the unit (`EngineAnalysisError::Span`); the CLI
   reports `neolint: cannot analyze unit N` and exits 2. There is no partial
@@ -1909,10 +1915,13 @@ Rules:
 - User input is untrusted data. Indexing user-controlled offsets must go through
   checked accessors; arithmetic on offsets uses checked or saturating operations.
 - `PreprocessDiagnostic` uses the existing `DiagnosticKind::Syntax` and the
-  `PRE` code family. A dedicated `DiagnosticKind` is deliberately deferred:
-  adding a value to that public enum changes the documented JSON `kind` domain
-  and needs its own compatibility decision (Phase 3, recorded here when
-  decided).
+  `PRE` code family. JSON v1 deliberately does not add a public
+  `DiagnosticKind` variant: the existing `kind` domain stays frozen, while
+  the additive `origin: "preprocessor"` field identifies preprocessor-origin
+  findings. This compatibility decision and related-location schema are
+  implemented by [Issue #108 / PR #116](https://github.com/mindwork64/neolint/pull/116).
+  A future breaking change to the `kind` domain requires a separately selected
+  JSON v2 rather than silently extending v1.
 - Keep three failure categories separate:
   - **valid EOF/zero-length** — normal `Ok` resolution, including `PAR013` on an
     empty prepared buffer;
@@ -3934,19 +3943,23 @@ Risks tracked from the baseline analysis:
     cross-invocation coordinates at runtime; it is process-local and must be
     excluded from output and ordering.
 
-Open questions to resolve during implementation (with an update to this
-document):
+Decisions and remaining open questions:
 
-- Should `PRE` diagnostics get a dedicated `DiagnosticKind`, and how does that
-  affect the documented JSON `kind` values?
-- Are related locations exposed in JSON in Phase 3, and under which schema
-  versioning rule?
-- Exact CLI spelling for dialect/preprocessor/extension flags.
+- **JSON v1 diagnostic metadata — resolved by Issue #108 / PR #116.** Keep the
+  existing `DiagnosticKind` values, retain `kind: "syntax"` for preprocessor
+  findings, add optional `origin: "preprocessor"` (excluding synthetic
+  `PRE039`), and expose non-empty original-source related locations through
+  the optional `related` array. The additive schema is documented in
+  `docs/cli-reference.md`; breaking changes require a separately selected
+  JSON v2.
+- **CLI option spelling — resolved by Issue #111 / PR #114.** The implemented
+  preprocessing, dialect, and include-directory options are listed in
+  `neolint --help` and covered by a real-binary regression test.
 - Whether the prepared buffer is one concatenated string per AnalysisUnit
   (current plan) or one per file (rejected for now: a single buffer keeps token
   spans unambiguous). It is always per unit, never per CLI invocation.
-- MSRV verification belongs in the experimental workflow as an additional step;
-  it is not part of the required Phase 0 quality gate.
+- MSRV 1.75 is verified by the experimental CI workflow; it is an additional
+  gate beyond the frozen stable quality workflow.
 
 ---
 
