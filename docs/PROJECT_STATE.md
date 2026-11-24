@@ -90,7 +90,9 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 - #108 preprocessor `DiagnosticKind` and JSON related locations (policy).
 - #110 duplicated CFG/constant limit constants across AST and Legacy engines.
-- #111 `--help` omits `--preprocess`, `--dialect`, `-I`.
+- #111 `--help` omitted `--preprocess`, `--dialect`, `-I` — fixed on
+  `exp-preprocessor-ast-followup-111-help` (help text plus a real-binary
+  `tests/cli_help.rs` regression); PR open, not merged.
 - Measured limitations: single-host benchmark evidence, Linux-only RSS,
   sub-10 ms rows dominated by process startup, `MAX_TYPE_DEPTH` unreachable
   through the parser (defensive), pre-existing one-line difference between stable
@@ -99,8 +101,8 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 ## Next action
 
 Phase 8 and scoped follow-up #109 are integrated into `exp/preprocessor-ast`.
-The remaining follow-ups are #108 (diagnostic kind / JSON related locations),
-#110 (shared versus duplicated AST/Legacy limit constants), and #111 (`--help`
-discoverability). Next: address #111 as the contained CLI help regression. Any
-migration to stable `main`, v1.0.0 publication or Legacy retirement requires its
-own decision and Issue.
+#111 (`--help` discoverability) is implemented on
+`exp-preprocessor-ast-followup-111-help` and awaits review. The remaining
+follow-ups are #108 (diagnostic kind / JSON related locations) and #110 (shared
+versus duplicated AST/Legacy limit constants). Any migration to stable `main`,
+v1.0.0 publication or Legacy retirement requires its own decision and Issue.
