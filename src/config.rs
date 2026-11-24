@@ -207,18 +207,26 @@ impl LintConfig {
         self.engine = engine;
     }
 
+    /// Apply disabled-rule filtering and severity overrides to one diagnostic.
+    ///
+    /// Returns `false` when the rule is disabled. Otherwise updates the
+    /// diagnostic's effective severity and returns `true`.
+    pub fn apply_to_diagnostic(&self, diagnostic: &mut Diagnostic) -> bool {
+        if self.disabled_rules.contains(diagnostic.code) {
+            return false;
+        }
+        if let Some(severity) = self.severity_overrides.get(diagnostic.code) {
+            diagnostic.severity = *severity;
+        }
+        true
+    }
+
     /// Apply disabled-rule filtering and severity overrides in place.
     ///
     /// Disabled diagnostics are removed; remaining diagnostics are updated in
     /// their original order.
     pub fn apply(&self, diagnostics: &mut Vec<Diagnostic>) {
-        diagnostics.retain(|diagnostic| !self.disabled_rules.contains(diagnostic.code));
-
-        for diagnostic in diagnostics {
-            if let Some(severity) = self.severity_overrides.get(diagnostic.code) {
-                diagnostic.severity = *severity;
-            }
-        }
+        diagnostics.retain_mut(|diagnostic| self.apply_to_diagnostic(diagnostic));
     }
 
     /// Disabled rule codes as display suppression.
@@ -296,6 +304,17 @@ mod tests {
             vec!["SEM002", "SEM004"]
         );
         assert_eq!(diagnostics[1].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn applies_one_diagnostic_and_reports_when_rule_is_disabled() {
+        let config = LintConfig::parse("disable = SEM001\nseverity.SEM002 = warning\n").unwrap();
+        let mut disabled = diagnostic("SEM001");
+        let mut downgraded = diagnostic("SEM002");
+
+        assert!(!config.apply_to_diagnostic(&mut disabled));
+        assert!(config.apply_to_diagnostic(&mut downgraded));
+        assert_eq!(downgraded.severity, Severity::Warning);
     }
 
     #[test]

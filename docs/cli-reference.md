@@ -116,7 +116,11 @@ The prefix is `path:line:column: severity[code]: message`. Lines and columns are
 
 ## JSON output
 
-The top-level value is always an array. A clean run produces `[]`. Each diagnostic object has these fields:
+The top-level value is always an array. A clean run produces `[]`. The existing fields and their meanings are the JSON v1 contract. The `kind` field remains one of `lexical`, `syntax`, `semantic`, or `lint`; preprocessor findings keep `kind: "syntax"` for compatibility and add `origin: "preprocessor"` instead of introducing a new `kind` value.
+
+JSON v1 permits additive optional object members. Consumers should ignore unknown members and treat `origin` and `related` as optional. Existing members, their meanings, the four `kind` values, diagnostic codes, and ordering are stable. Removing, renaming, or retyping an existing member, or changing the meaning/value set of `kind`, requires a separately selected breaking JSON schema (v2); the existing `--format json` output will not silently change versions.
+
+Each diagnostic object has these fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -131,6 +135,24 @@ The top-level value is always an array. A clean run produces `[]`. Each diagnost
 | `end_column` | One-based end column. |
 | `start` | Zero-based UTF-8 byte offset of the span start. |
 | `end` | Zero-based UTF-8 byte offset of the span end. |
+| `origin` | Optional. Present as `"preprocessor"` for preprocessor-origin `PRE` diagnostics; omitted for non-preprocessor diagnostics and the CLI-generated `PRE039` aggregate-cap marker. |
+| `related` | Optional non-empty array of secondary source locations; omitted when empty. |
+
+A `related` item contains these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `file` | Display path of the original source file containing the secondary location; it may differ from the primary diagnostic's file. |
+| `label` | Human-readable reason for the secondary location, such as `previous macro definition`. |
+| `line`, `column`, `end_line`, `end_column` | One-based positions in that original file. |
+| `start`, `end` | Zero-based UTF-8 byte offsets in that original file. |
+
+For example, a conflicting macro redefinition keeps its existing syntax kind
+while exposing the preprocessing origin and the first definition:
+
+```json
+[{"file":"macro-conflict.lsl","code":"PRE005","severity":"error","kind":"syntax","message":"conflicting macro redefinition","line":2,"column":9,"end_line":2,"end_column":13,"start":23,"end":27,"origin":"preprocessor","related":[{"file":"macro-conflict.lsl","label":"previous macro definition","line":1,"column":9,"end_line":1,"end_column":13,"start":8,"end":12}]}]
+```
 
 Example:
 
