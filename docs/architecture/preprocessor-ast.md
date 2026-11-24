@@ -2091,9 +2091,14 @@ classifications.
     `wave_config.hpp`. Firestorm does not define or override that macro.
   - However, Firestorm resolves includes through its own inventory-based
     `trace_include_files` hook, and there is no Firestorm end-to-end test or
-    documentation proving `#pragma once` behavior through that layer. Boost.Wave
-    keys pragma-once state by the filename it sees, which Firestorm supplies from
-    inventory names rather than filesystem paths.
+    documentation proving `#pragma once` behavior through that layer. Two stages
+    must be kept apart: Firestorm's hook matches the include spelling against
+    inventory item names exactly and caches each item under
+    `<LL_PATH_CACHE>/lslpreproc/<name>`; Boost.Wave then opens the cached file
+    through its ordinary include-path search and keys pragma-once state by the
+    normalised filesystem path it opened. A standalone Boost.Wave 1.90.0 probe
+    with a stubbed hook, and the reconstructed source trace, are recorded in
+    `docs/firestorm-preprocessor.md`; the viewer itself remains unverified.
   - Therefore neolint implements `#pragma once` as a documented, compatible
     addition. It is **not** part of the guaranteed Firestorm compatibility suite
     and must be tested separately from verified Firestorm behavior.
@@ -3874,6 +3879,18 @@ Risks tracked from the baseline analysis:
 15. `#pragma once` is supported by the pinned Boost.Wave but not proven
     end-to-end through Firestorm's inventory include layer; keep it in the
     separate compatibility bucket until evidence exists.
+    **Partially resolved (follow-up to Phase 8):** the upstream path is
+    reconstructed from pinned sources (Boost.Wave `boost-1.90.0` commit
+    `d7aa5a3…`, `util/cpp_iterator.hpp:415`/`:1598`,
+    `util/cpp_include_paths.hpp:339`/`:375`, `util/filesystem_compatibility.hpp:69-76`;
+    Firestorm commit `7e44160…`, `indra/newview/fslslpreproc.cpp:57-90`, `:559-754`,
+    `:1312`), and a standalone Boost.Wave 1.90.0 probe with a stubbed
+    inventory/cache hook confirms the library behaviour, including that dot
+    segments are normalised and symlink aliases are not. neolint's
+    Firestorm-profile behaviour has dedicated regression coverage. Real viewer
+    integration and the inventory/asset services remain unverified; see
+    `docs/firestorm-preprocessor.md` §"`#pragma once` through the Firestorm
+    include layer".
 16. `Span` has no namespace tag. In the preprocessed path every engine `Span`
     is prepared; in plain-LSL mode it is original. Any code that treats an
     engine span as original after preprocessing is a silent mislocation bug.
