@@ -26,6 +26,9 @@
 #include <boost/wave/cpplexer/cpp_lex_token.hpp>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -104,11 +107,22 @@ struct RunResult {
 };
 
 RunResult preprocess(Inventory const& inventory, std::string const& root_text, fs::path const& unit_dir,
-                     std::string const& root_name) {
+                     std::string const& root_name,
+                     std::map<std::string, std::string> const& warm_cache = {}) {
     RunResult result;
     fs::path cache_dir = unit_dir / "lslpreproc";
     fs::create_directories(cache_dir);
     CacheState cache;
+    // Firestorm only reaches the cached pass after its asynchronous asset
+    // callback has written the file, so a scenario that needs a warm cache
+    // pre-populates it here instead of relying on a synchronous write during the
+    // same pass.
+    for (auto const& item : warm_cache) {
+        std::ofstream out((cache_dir / item.first).string().c_str(), std::ios::binary);
+        out << item.second;
+        out.close();
+        cache.cached.insert(item.first);
+    }
     const int kMaxPasses = 8;
     for (int pass = 1; pass <= kMaxPasses; ++pass) {
         std::string input = root_text;  // fresh context per pass, like Firestorm's restart
@@ -187,10 +201,12 @@ struct Scenario {
     bool expect_error = false;
 };
 
-int failures = 0;
+int passed_count = 0;
+int skipped_count = 0;
+int failed_count = 0;
 
 void report(Scenario const& scenario, RunResult const& run, fs::path const& unit_dir,
-            std::string const& extra_note) {
+            std::string const& extra_note, bool extra_checks = true) {
     std::cout << "=== " << scenario.name << "\n";
     std::cout << "  description: " << scenario.description << "\n";
     std::cout << "  unit_dir: " << unit_dir.string() << "\n";
@@ -222,26 +238,42 @@ void report(Scenario const& scenario, RunResult const& run, fs::path const& unit
     if (!extra_note.empty()) {
         std::cout << "  note: " << extra_note << "\n";
     }
+    ok = ok && extra_checks;
     std::cout << "  RESULT: " << (ok ? "PASS" : "FAIL") << "\n\n";
-    if (!ok) {
-        ++failures;
+    if (ok) {
+        ++passed_count;
+    } else {
+        ++failed_count;
     }
 }
 
-fs::path fresh_unit_dir(fs::path const& base, std::string const& name) {
-    fs::path dir = base / name;
-    fs::remove_all(dir);
+void report_skip(std::string const& name, std::string const& reason) {
+    std::cout << "=== " << name << "\n  SKIPPED: " << reason << "\n  RESULT: SKIP\n\n";
+    ++skipped_count;
+}
+
+fs::path fresh_unit_dir(fs::path const& owned_root, std::string const& name) {
+    // The root itself was created by mkdtemp and is exclusively ours, so any
+    // removal below stays inside it.
+    fs::path dir = owned_root / name;
     fs::create_directories(dir);
     return dir;
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    std::string base_arg = argc > 1 ? argv[1] : "";
-    fs::path base = base_arg.empty() ? fs::temp_directory_path() / "wave-probe" : fs::path(base_arg);
-    fs::remove_all(base);
-    fs::create_directories(base);
+int main() {
+    // Create an exclusively owned temporary directory. No caller-supplied path is
+    // accepted, and nothing outside this directory is ever removed.
+    std::string pattern = (fs::temp_directory_path() / "neolint-wave-probe-XXXXXX").string();
+    std::vector<char> buffer(pattern.begin(), pattern.end());
+    buffer.push_back('\0');
+    char* created = mkdtemp(buffer.data());
+    if (created == nullptr) {
+        std::cerr << "cannot create a temporary directory: " << std::strerror(errno) << "\n";
+        return 2;
+    }
+    fs::path base(created);
 
     std::cout << "BOOST_VERSION=" << BOOST_VERSION << " BOOST_LIB_VERSION=" << BOOST_LIB_VERSION
               << "\n";
@@ -359,22 +391,21 @@ int main(int argc, char** argv) {
         std::string note = deferred_first && opened_second
                                ? "deferred on pass 1, opened on pass 2"
                                : "UNEXPECTED lifecycle";
-        report(s, run, dir, note);
-        if (!(deferred_first && opened_second)) {
-            ++failures;
-        }
+        report(s, run, dir, note, deferred_first && opened_second);
     }
 
     // 9a. Dot segments through Wave's filesystem lookup, cached item first.
     {
         Scenario s;
-        s.name = "09a_dot_segment_cached_then_alias";
-        s.description = "plain spelling caches the item, then ./ spelling is included";
+        s.name = "09a_dot_segment_warm_cache";
+        s.description =
+            "warm cache: plain spelling then ./ spelling, with the item already cached";
         s.inventory.items["name.lsl"] = "#pragma once\nNAME\n";
         s.root = "#include \"name.lsl\"\n#include \"./name.lsl\"\n";
         s.expected["NAME"] = 1;
         fs::path dir = fresh_unit_dir(base, s.name);
-        RunResult run = preprocess(s.inventory, s.root, dir, "root.lsl");
+        RunResult run = preprocess(s.inventory, s.root, dir, "root.lsl",
+                                   {{"name.lsl", s.inventory.items["name.lsl"]}});
         bool missed = !run.passes.empty() &&
                       std::find(run.passes.back().inventory_misses.begin(),
                                 run.passes.back().inventory_misses.end(),
@@ -382,10 +413,8 @@ int main(int argc, char** argv) {
         report(s, run, dir,
                missed ? "inventory lookup sees './name.lsl' as a miss; Wave then resolves it "
                         "lexically to the cached file"
-                      : "inventory lookup did not report a miss for './name.lsl'");
-        if (!missed) {
-            ++failures;
-        }
+                      : "inventory lookup did not report a miss for './name.lsl'",
+               missed);
     }
 
     // 9b. Dot-segment spelling without a prior plain include: the inventory hook
@@ -416,16 +445,18 @@ int main(int argc, char** argv) {
         boost::system::error_code error;
         fs::create_symlink(cache / "real.lsl", cache / "alias.lsl", error);
         if (error) {
-            std::cout << "=== " << s.name << "\n  SKIPPED: cannot create symlink: "
-                      << error.message() << "\n\n";
+            report_skip(s.name, "cannot create symlink: " + error.message());
         } else {
             report(s, preprocess(s.inventory, s.root, dir, "root.lsl"), dir,
                    "lexical normalisation keeps the two names distinct");
         }
     }
 
-    fs::remove_all(base);
-    std::cout << "summary: " << (failures == 0 ? "all scenarios passed" : "scenario failures")
-              << " (" << failures << ")\n";
-    return failures == 0 ? 0 : 1;
+    fs::remove_all(base);  // only the directory created by mkdtemp above
+    std::cout << "summary: passed=" << passed_count << " skipped=" << skipped_count
+              << " failed=" << failed_count << "\n";
+    if (skipped_count != 0) {
+        std::cout << "note: skipped scenarios did not execute; do not report them as passing\n";
+    }
+    return failed_count == 0 ? 0 : 1;
 }

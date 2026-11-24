@@ -15,9 +15,11 @@ is **not** the Firestorm viewer.
 | 3p-vs-upstream headers | **byte-identical** for every Wave header used by the probe (table below) |
 | Compiler | g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, `__VERSION__` 13.3.0 |
 | OS / arch | Linux 7.0.0-43-generic, x86_64 |
-| Probe binary | built by `run.sh`; byte-identical rebuilds are not guaranteed (GCC 13 embeds a filename-derived seed byte, one byte differed between two builds here), so the build is anchored on the source/header hashes, compiler and command above |
+| Probe source | `probe.cpp` sha256 `833048da733125ab`, `run.sh` sha256 `020b2e205de92523`, `safety_check.sh` sha256 `6702c3c1d6e87ffb` |
+| Build | `run.sh` (g++ 13.3.0, `-std=c++17 -O2 -Wall -Wextra`, Boost headers via `-isystem`) |
 | Boost.Wave library built | `stage/lib/libboost_wave.a`, sha256 `c6cd8c1a1ed93b8b` |
-| Probe exit status | 0 (eleven scenarios passed) |
+| Probe binary reproducibility | not byte-reproducible across builds (GCC 13 embeds a filename-derived seed byte; two builds differed in one byte), so reproducibility is anchored on the source/header hashes and the captured output, not a binary hash |
+| Captured stdout | [`captured-output.txt`](captured-output.txt) (this run, verbatim) |
 
 Relevant header hashes (identical in upstream 1.90.0 and the Firestorm 3p package):
 
@@ -38,17 +40,20 @@ Relevant header hashes (identical in upstream 1.90.0 and the Firestorm 3p packag
 curl -L -o boost_1_90_0.tar.gz https://archives.boost.io/release/1.90.0/source/boost_1_90_0.tar.gz
 tar -xzf boost_1_90_0.tar.gz
 cd boost_1_90_0 && ./bootstrap.sh --with-libraries=filesystem,wave,thread
-./b2 --with-wave --with-filesystem --with-thread -j12 link=static runtime-link=static stage
+./b2 --with-wave --with-filesystem --with-thread -j"$(nproc)" link=static runtime-link=static stage
 
-# Probe
+# Probe and its safety regression
 export BOOST_ROOT=$PWD/boost_1_90_0
 tools/compat/boost-wave-1.90-pragma-once/run.sh
+tools/compat/boost-wave-1.90-pragma-once/safety_check.sh
 ```
 
 ## Scenario results
 
-All scenarios passed (exit status 0). Each scenario compares preprocessed output
-body occurrences, not just the exit status.
+This run: **11 passed, 0 skipped, 0 failed**, exit status 0. Each scenario
+compares preprocessed output body occurrences, not just the exit status. The
+three outcomes are reported separately; a skipped scenario (for example when the
+host cannot create a symlink) is counted as `SKIP` and is not reported as passing.
 
 | Scenario | Passes / restarts | Expected vs actual body counts | Result |
 | --- | --- | --- | --- |
@@ -60,32 +65,46 @@ body occurrences, not just the exit status.
 | `06_reentry` | 2, restarts: 1 | ONCE: expected 1, actual 1; OTHER: expected 1, actual 1 | PASS |
 | `07_distinct_headers` | 2, restarts: 1 | ALPHA: expected 1, actual 1; BETA: expected 1, actual 1 | PASS |
 | `08_cache_miss_lifecycle` | 2, restarts: 1 | ONCE: expected 1, actual 1 | PASS |
-| `09a_dot_segment_cached_then_alias` | 2, restarts: 1 | NAME: expected 1, actual 1 | PASS |
+| `09a_dot_segment_warm_cache` | 1, restarts: 0 | NAME: expected 1, actual 1 | PASS |
 | `09b_dot_segment_uncached` | 1, restarts: 0 | - | PASS |
 | `10_symlink_alias` | 1, restarts: 0 | REAL: expected 2, actual 2 | PASS |
 
 ## What the probe shows
 
-- `#pragma once` suppression works through the modelled include/cache flow:
-  direct repeat, nested include, diamond include, re-entry after returning, and
-  distinct headers keeping their own bodies (scenario 7).
+- `#pragma once` suppression works through the modelled include flow: direct
+  repeat, nested include, diamond include, re-entry after returning, and distinct
+  headers keeping their own bodies (scenario 7).
 - The cache-miss lifecycle is observable: the hook defers on pass 1, the driver
   materialises the item under `<cache>/lslpreproc/<name>`, and the pragma-once
   test happens on the pass that opens the cached file (scenario 8).
-- **Dot segments are normalised away by Wave's include locator.** For
-  `name.lsl` then `./name.lsl`, the inventory stage reports `./name.lsl` as a
-  miss (exact item-name matching), Wave then resolves it to the same cached file
-  and `#pragma once` suppresses the second body (scenario 9a). This refutes the
-  earlier claim that Wave keys `x.lsl` and `./x.lsl` separately.
-- A `./` spelling that was never cached is not an inventory item and no file
-  exists yet, so Wave raises a bad-include error (scenario 9b).
+- **Dot segments are normalised away by Wave's include locator.** Scenario 9a uses
+  a deliberately **warm** cache (the item is pre-written and marked cached before
+  the pass, as it would be after Firestorm's asynchronous callback), includes
+  `name.lsl` then `./name.lsl`, and gets one body. This refutes the earlier claim
+  that Wave keys `x.lsl` and `./x.lsl` separately. Scenario 9b shows that an
+  uncached `./name.lsl` is an inventory miss with no file, so Wave raises a
+  bad-include error.
 - **Lexical normalisation is not canonicalisation.** Two symlink spellings of one
   physical file keep distinct pragma-once keys, so the body appears twice
   (scenario 10). This is where neolint's canonical-path guard is stricter than
   Wave.
 
-## Limits
+## Model limits
 
-The probe validates the Wave library and the stubbed inventory/cache flow. It
-does not execute the Firestorm viewer, its inventory database, the asynchronous
-asset service or the UI, and it makes no claim about viewer-level behaviour.
+- The hook writes the cache file **synchronously** and then returns `true`.
+  Firestorm instead starts `getInvItemAsset` and writes from the asynchronous
+  callback before `start_process()`. The probe therefore does not reproduce the
+  asynchronous timing, in-flight duplicate requests or any cache invalidation
+  behaviour; scenario 9a uses a warm cache precisely so it does not depend on the
+  synchronous write.
+- The probe validates the Wave library and the stubbed include/cache flow. It does
+  not execute the Firestorm viewer, its inventory database, the asynchronous asset
+  service or the UI, and it makes no claim about viewer-level behaviour.
+
+## Safety
+
+`probe.cpp` no longer accepts a caller-supplied base path. It creates an
+exclusively owned directory with `mkdtemp` and removes only that directory.
+`safety_check.sh` proves that a pre-existing directory with nested sentinel files
+survives both a normal run and invocations that pass path arguments, and that no
+probe temporary directory is left behind.

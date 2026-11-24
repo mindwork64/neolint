@@ -77,8 +77,17 @@ preprocessing settings):
 `tools/compat/boost-wave-1.90-pragma-once/` builds the real Boost.Wave 1.90.0
 implementation and models Firestorm's inventory/cache hook (exact item-name
 lookup, cache-miss deferral, cache write under the item name, restart, then
-Wave's ordinary filesystem lookup). Recorded output and hashes are in
-[`RESULTS.md`](../tools/compat/boost-wave-1.90-pragma-once/RESULTS.md).
+Wave's ordinary filesystem lookup). Recorded output, source and header hashes are
+in
+[`RESULTS.md`](../tools/compat/boost-wave-1.90-pragma-once/RESULTS.md) and
+[`captured-output.txt`](../tools/compat/boost-wave-1.90-pragma-once/captured-output.txt).
+
+The recorded run executed all eleven scenarios (11 passed, 0 skipped, 0 failed).
+The hook writes the cache file synchronously, whereas Firestorm writes it from an
+asynchronous asset callback; the probe models the include/cache shape, not its
+timing, in-flight duplicate requests or cache invalidation. The dot-segment
+scenario deliberately uses a warm, pre-populated cache so it does not depend on
+that synchronous write.
 
 | Scenario | Result |
 | --- | --- |
@@ -88,7 +97,7 @@ Wave's ordinary filesystem lookup). Recorded output and hashes are in
 | re-entry after returning to the parent | body once |
 | two distinct `#pragma once` headers | each body once |
 | cache miss: pass 1 defers, pass 2 opens | pragma-once checked on the cached pass |
-| `name.lsl` then `./name.lsl` | inventory stage reports a miss for `./name.lsl`; Wave resolves it to the same cached file and suppresses the second body |
+| `name.lsl` then `./name.lsl` (warm cache) | inventory stage reports a miss for `./name.lsl`; Wave resolves it to the same cached file and suppresses the second body |
 | `./name.lsl` never cached | inventory miss and no file → Wave bad-include error |
 | symlink alias of one physical file | body twice |
 
@@ -144,8 +153,8 @@ Documented differences from neolint's policy:
 #### 4. Still unverified
 
 No Firestorm viewer was built or executed. The stub does not model the inventory
-service, the asynchronous asset backend, the UI, or Firestorm's exact cache
-directory lifetime. Viewer-level `#pragma once` behaviour therefore remains
+service, the asynchronous asset backend, its timing or in-flight duplicate
+requests, the UI, or Firestorm's exact cache directory lifetime. Viewer-level `#pragma once` behaviour therefore remains
 unverified, and Issue #109 stays open for that evidence.
 
 ## Switch and lazy-list syntax

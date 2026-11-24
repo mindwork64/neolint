@@ -16,6 +16,9 @@ part of the project test gate or CI.
 | cached item is opened from `<LL_PATH_CACHE>/lslpreproc/` (`:698`, `:1312`) | `ctx.add_include_path(<unit>/lslpreproc)` |
 
 The hook is deliberately small; it is not a copy of the Firestorm implementation.
+It writes the cache file synchronously, whereas Firestorm starts an asynchronous
+asset fetch; the probe therefore models the include/cache shape, not its timing or
+in-flight duplicate behaviour.
 
 ## Prerequisites
 
@@ -38,11 +41,20 @@ cd -
 ```bash
 export BOOST_ROOT=/path/to/boost_1_90_0
 tools/compat/boost-wave-1.90-pragma-once/run.sh
+
+# Safety regression: proves pre-existing directories are not removed
+tools/compat/boost-wave-1.90-pragma-once/safety_check.sh
 ```
 
+The probe accepts no arguments. It creates an exclusively owned temporary
+directory with `mkdtemp` and removes only that directory; `safety_check.sh`
+verifies that a pre-existing directory with sentinel files survives normal and
+argument-bearing invocations.
+
 The program prints one block per scenario with pass/restart counts, the hook call
-sequence, body-occurrence counts and `PASS`/`FAIL`, then a summary line. It exits
-non-zero if any scenario fails. Recorded output and provenance are in
+sequence, body-occurrence counts and `PASS`/`SKIP`/`FAIL`, then a summary line
+`passed=N skipped=N failed=N`. A skipped scenario did not execute and is never
+reported as passing. The exit status is non-zero only when a scenario fails. Recorded output and provenance are in
 [`RESULTS.md`](RESULTS.md).
 
 ## Scope
