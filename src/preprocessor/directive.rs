@@ -3533,11 +3533,14 @@ mod phase3_include_advanced_tests {
     }
 
     #[test]
-    fn firestorm_profile_pragma_once_covers_spelling_variants_through_canonical_paths() {
-        // Documented deviation from Boost.Wave: Wave keys `#pragma once` on the
-        // path string it opened, so `./x.lsl` and `x.lsl` are different keys.
-        // neolint canonicalises the resolved file, so both spellings share one
-        // guard. This test pins the stricter neolint behaviour explicitly.
+    fn firestorm_profile_pragma_once_suppresses_dot_segment_alias() {
+        // neolint resolves includes to a canonical filesystem path
+        // (src/preprocessor/directive.rs:477, :623), so `./once.lsl` and
+        // `once.lsl` share one `#pragma once` guard. This pins neolint's own
+        // filesystem policy only: it is not a Firestorm inventory test and it
+        // makes no claim about Boost.Wave, whose include locator also normalises
+        // dot segments (`filesystem_compatibility.hpp:69-76`,
+        // `cpp_include_paths.hpp:339/:375`) but does not resolve symlinks.
         let dir = temp_dir();
         let cache = dir.join("lslpreproc");
         fs::create_dir_all(&cache).unwrap();
