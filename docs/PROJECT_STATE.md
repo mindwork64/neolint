@@ -64,6 +64,8 @@ share the same prepared source and source map.
 - Known evidence limits: benchmark timings are single-host/Linux measurements;
   sub-10 ms rows include process-startup and scheduler noise; peak RSS was
   measured only on Linux. `MAX_TYPE_DEPTH` remains a defensive guard that is
-  unreachable through the current parser.
+  unreachable through the current parser. Issue #109 closed the scoped
+  `#pragma once` source/probe investigation; live Firestorm Viewer integration
+  was not run and remains unverified.
 - A clean lint result does not guarantee acceptance by the official compiler
   or any simulator.

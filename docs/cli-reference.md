@@ -21,7 +21,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--preprocess` | Enable the standard LSL preprocessor. |
 | `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
 | `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
-| `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
+| `-I DIR`, `-IDIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
 | `--include-dir=DIR`, `--dialect=DIALECT`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
 Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.

@@ -360,11 +360,11 @@ diagnostic cap (the cap is applied after suppression).
 | Include/multi-file inputs were not hashed | Evidence defect | Fixed: 70-file recursive manifest |
 | Near-limit fixture was 1.6 MiB, not near the 8 MiB limit | Evidence defect | Fixed: 8,026,842 bytes, 95.7 % of the limit |
 | `MAX_TYPE_DEPTH` unreachable through the parser | Known limitation (defensive) | Documented |
-| Duplicated CFG constant sets in AST and Legacy engines | Known limitation | Documented, follow-up #110 |
-| PRE diagnostics use `DiagnosticKind::Syntax` | Known limitation / policy question | Follow-up #108 |
-| Related locations absent from JSON | Known limitation | Follow-up #108 |
-| `#pragma once` not proven through the Firestorm inventory layer | Known limitation | Follow-up #109 |
-| `--help` omits `--preprocess`, `--dialect`, `-I` | Documentation drift (discoverability) | Follow-up #111 |
+| Duplicated CFG constant sets in AST and Legacy engines | Known limitation | Resolved by #110 / PR #115: implementations remain independent; a regression test guards numeric parity. |
+| PRE diagnostics use `DiagnosticKind::Syntax` | Known limitation / policy question | Resolved by #108 / PR #116: the existing kind vocabulary is retained; JSON adds optional `origin`. |
+| Related locations absent from JSON | Known limitation | Resolved by #108 / PR #116: non-empty related locations are exposed through optional JSON v1 `related`. |
+| `#pragma once` not proven through the Firestorm inventory layer | Known limitation | Resolved for scoped source/probe evidence by #109 / PR #113; live Viewer integration remains unverified. |
+| `--help` omits `--preprocess`, `--dialect`, `-I` | Documentation drift (discoverability) | Resolved by #111 / PR #114; real-binary help coverage was added. |
 | Iterative traversals, call-graph bounds, compare budget pre-check, multi-unit isolation, diagnostic caps | No issue found | Evidence in §8 and the Phase 7 record |
 
 Pre-existing process note: stable `.github/workflows/ci.yml` differs from frozen
@@ -396,12 +396,28 @@ this phase; `release.yml` is unchanged.
 - Exit codes and output digests were stable across all samples and both passes
   for every row in both runs.
 
-## 11. Follow-up Issues
+## 11. Resolved follow-up issues
 
-- #108 — preprocessor `DiagnosticKind` and JSON related locations (policy).
-- #109 — prove `#pragma once` through the Firestorm inventory include layer.
-- #110 — consolidate duplicated CFG and constant-evaluation limit constants.
-- #111 — `--help` omits the implemented `--preprocess`, `--dialect` and `-I`.
+All four follow-ups from this evidence package are closed. Their outcomes are
+recorded here so the historical findings above are not mistaken for current
+open defects:
+
+- **#108 — resolved by [PR #116](https://github.com/mindwork64/neolint/pull/116).**
+  JSON v1 keeps the existing `kind` vocabulary, adds optional
+  `origin: "preprocessor"`, and exposes non-empty secondary source locations
+  through optional `related` metadata. The synthetic aggregate `PRE039` marker
+  is excluded from the preprocessor origin tag.
+- **#109 — resolved by [PR #113](https://github.com/mindwork64/neolint/pull/113).**
+  Neolint Firestorm-profile regressions, a standalone Boost.Wave 1.90.0 probe,
+  and pinned-source reconstruction document the scoped behavior. The Firestorm
+  Viewer and its live inventory/asset services were not executed; that boundary
+  remains explicitly unverified.
+- **#110 — resolved by [PR #115](https://github.com/mindwork64/neolint/pull/115).**
+  AST and Legacy retain independent limit implementations; a regression test
+  asserts the corresponding numeric policy values stay aligned.
+- **#111 — resolved by [PR #114](https://github.com/mindwork64/neolint/pull/114).**
+  The implemented preprocessing, dialect, and include-directory options now
+  appear in `neolint --help`, with a real-binary regression test.
 
 ## 12. Roadmap
 

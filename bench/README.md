@@ -90,7 +90,9 @@ Modes: default (AST), explicit `--engine ast`, explicit `--engine legacy`,
   identity-prepared unit. Their ratio is **not** a parser-only comparison.
 - `--engine compare` runs both analyzers by design and is not a single-engine
   baseline.
-- Sub-5 ms rows are dominated by scheduling noise. Observed two-pass variation is
-  roughly 20-50 % there and around 1-10 % for the rows above ~20 ms. Compare only
-  expensive workloads, or medians of several passes, when evaluating a change.
+- Rows below 5 ms are dominated by scheduling noise; observed two-pass
+  variation was 20-60 %. Rows from 5 to 20 ms varied by roughly 5-20 %, while
+  expensive rows varied by about 1-9 %. These are observations from the recorded
+  host, not universal guarantees. Compare expensive workloads or medians across
+  several passes when evaluating a change.
 - Timing is never a pass/fail threshold in CI.

@@ -2,7 +2,10 @@
 
 Neolint's `--dialect firestorm` profile enables full preprocessing plus the
 documented Firestorm preprocessing behaviors that are safe and deterministic to
-reproduce. It does **not** enable switch or lazy-list syntax; those remain Phase 5.
+reproduce. Selecting the dialect does **not** turn on switch or lazy-list parsing
+by itself: the AST parser accepts those forms only when their independent
+Firestorm gates are active, typically through `USE_SWITCHES` and
+`USE_LAZY_LISTS`. See [Language support](language-support.md#firestorm-extensions-opt-in).
 
 ## `//fspreprocessor off`
 
@@ -154,8 +157,11 @@ Documented differences from neolint's policy:
 
 No Firestorm viewer was built or executed. The stub does not model the inventory
 service, the asynchronous asset backend, its timing or in-flight duplicate
-requests, the UI, or Firestorm's exact cache directory lifetime. Viewer-level `#pragma once` behaviour therefore remains
-unverified, and Issue #109 stays open for that evidence.
+requests, the UI, or Firestorm's exact cache directory lifetime. Viewer-level
+`#pragma once` behaviour therefore remains unverified. Issue #109 was closed
+after the scoped neolint tests, Boost.Wave probe, and pinned-source reconstruction
+were completed; its resolution does not claim live Viewer integration. A future
+Viewer-level test would be a separate task.
 
 ## Switch and lazy-list syntax
 
