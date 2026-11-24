@@ -15,8 +15,9 @@ is **not** the Firestorm viewer.
 | 3p-vs-upstream headers | **byte-identical** for every Wave header used by the probe (table below) |
 | Compiler | g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, `__VERSION__` 13.3.0 |
 | OS / arch | Linux 7.0.0-43-generic, x86_64 |
-| Probe binary | sha256 `f5e569e76f94033a` |
+| Probe binary | built by `run.sh`; byte-identical rebuilds are not guaranteed (GCC 13 embeds a filename-derived seed byte, one byte differed between two builds here), so the build is anchored on the source/header hashes, compiler and command above |
 | Boost.Wave library built | `stage/lib/libboost_wave.a`, sha256 `c6cd8c1a1ed93b8b` |
+| Probe exit status | 0 (eleven scenarios passed) |
 
 Relevant header hashes (identical in upstream 1.90.0 and the Firestorm 3p package):
 
