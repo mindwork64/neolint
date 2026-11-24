@@ -6,13 +6,14 @@ records verified state.
 
 ## Where the project is
 
-- **Phase 8 (Issue #107, AST-first stabilization) is merged** into the experimental
-  integration branch through [PR #112](https://github.com/mindwork64/neolint/pull/112).
+- **Phase 8 (Issue #107, AST-first stabilization) is complete and Issue #107 is
+  closed as completed** after the squash merge through
+  [PR #112](https://github.com/mindwork64/neolint/pull/112).
 - **Follow-up #109** (`#pragma once` / Boost.Wave evidence) is resolved by [PR #113](https://github.com/mindwork64/neolint/pull/113), squash merge
   `ed3a4d748c16be4d78dfc7ba43f9d61cc3437e73`.
-- **Follow-up #111** (`--help` discoverability) is merged through
-  [PR #114](https://github.com/mindwork64/neolint/pull/114), squash merge
-  `03f279b9369179c23518b4b042cf79582725d209`.
+- **Follow-up #111** (`--help` discoverability) is complete and closed as
+  completed after [PR #114](https://github.com/mindwork64/neolint/pull/114),
+  squash merge `03f279b9369179c23518b4b042cf79582725d209`.
 - Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
 - Phase 8 squash merge commit: `e4732b300013e26edc60b54af3a6743f93933c08`
   (parent was Phase 7 base
@@ -93,10 +94,6 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 - #108 preprocessor `DiagnosticKind` and JSON related locations (policy).
 - #110 duplicated CFG/constant limit constants across AST and Legacy engines.
-- #111 `--help` omitted `--preprocess`, `--dialect`, `-I` — **merged** in
-  `03f279b9369179c23518b4b042cf79582725d209` (help text plus a real-binary
-  `tests/cli_help.rs` regression). The Issue itself remains open for the
-  maintainer to close.
 - Measured limitations: single-host benchmark evidence, Linux-only RSS,
   sub-10 ms rows dominated by process startup, `MAX_TYPE_DEPTH` unreachable
   through the parser (defensive), pre-existing one-line difference between stable
@@ -104,9 +101,8 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 ## Next action
 
-Phase 8 and scoped follow-ups #109 and #111 are integrated into
-`exp/preprocessor-ast` (head `03f279b9369179c23518b4b042cf79582725d209`). The
-remaining follow-ups are #108 (diagnostic kind / JSON related locations) and #110
-(shared versus duplicated AST/Legacy limit constants). Any migration to stable
-`main`, v1.0.0 publication or Legacy retirement requires its own decision and
-Issue.
+Phase 8 is integrated into `exp/preprocessor-ast`; parent Issue #107 is closed.
+Follow-ups #109 and #111 are also completed and closed. The only remaining open
+follow-ups are #108 (diagnostic kind / JSON related locations) and #110 (shared
+versus duplicated AST/Legacy limit constants). Any migration to stable `main`,
+v1.0.0 publication or Legacy retirement requires its own decision and Issue.
