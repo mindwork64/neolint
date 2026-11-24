@@ -8,6 +8,8 @@ records verified state.
 
 - **Phase 8 (Issue #107, AST-first stabilization) is merged** into the experimental
   integration branch through [PR #112](https://github.com/mindwork64/neolint/pull/112).
+- **Follow-up #109** (`#pragma once` / Boost.Wave evidence) is resolved by [PR #113](https://github.com/mindwork64/neolint/pull/113), squash merge
+  `ed3a4d748c16be4d78dfc7ba43f9d61cc3437e73`.
 - Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
 - Phase 8 squash merge commit: `e4732b300013e26edc60b54af3a6743f93933c08`
   (parent was Phase 7 base
@@ -87,7 +89,6 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 ## Known problems and open follow-ups
 
 - #108 preprocessor `DiagnosticKind` and JSON related locations (policy).
-- #109 `#pragma once` through the Firestorm inventory include layer.
 - #110 duplicated CFG/constant limit constants across AST and Legacy engines.
 - #111 `--help` omits `--preprocess`, `--dialect`, `-I`.
 - Measured limitations: single-host benchmark evidence, Linux-only RSS,
@@ -97,6 +98,9 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 ## Next action
 
-Phase 8 is integrated into `exp/preprocessor-ast`. Follow-ups #108–#111 remain
-separate Issues. Any migration to stable `main`, v1.0.0 publication or Legacy
-retirement requires its own decision and Issue.
+Phase 8 and scoped follow-up #109 are integrated into `exp/preprocessor-ast`.
+The remaining follow-ups are #108 (diagnostic kind / JSON related locations),
+#110 (shared versus duplicated AST/Legacy limit constants), and #111 (`--help`
+discoverability). Next: address #111 as the contained CLI help regression. Any
+migration to stable `main`, v1.0.0 publication or Legacy retirement requires its
+own decision and Issue.
