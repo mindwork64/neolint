@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -31,19 +32,33 @@ jobs:
       - name: Test canonical metadata extractor
         run: python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'
 
+      - name: Check documentation contracts
+        run: python3 scripts/test_documentation.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run tests
+      - name: Run debug tests
         run: cargo test --all-targets --all-features
+
+      - name: Run release tests
+        run: cargo test --release --all-targets --all-features
 
       - name: Check Rust documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps
+
+      - name: Install Rust 1.75.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.75.0
+
+      - name: Run tests on MSRV 1.75.0
+        run: cargo +1.75.0 test --all-targets --all-features
 
       - name: Check pull request whitespace
         if: github.event_name == 'pull_request'

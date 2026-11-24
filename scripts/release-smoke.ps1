@@ -30,6 +30,16 @@ if ($LASTEXITCODE -ne 1 -or $diagnosticOutput -notmatch "SEM020") {
     throw "release smoke: invalid fixture did not report SEM020 with exit 1"
 }
 
+$unusedFixture = Join-Path $Root "corpus/medium/inventory_manager.lsl"
+$defaultOutput = (& $Binary $unusedFixture 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $defaultOutput -notmatch "SEM024") {
+    throw "release smoke: default AST engine did not report AST-only SEM024"
+}
+$legacyOutput = (& $Binary --engine legacy $unusedFixture 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $legacyOutput -match "SEM024") {
+    throw "release smoke: explicit Legacy did not preserve the historical engine output"
+}
+
 $jsonOutput = (& $Binary --format json $invalid 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 1) {
     throw "release smoke: JSON invocation did not exit 1"

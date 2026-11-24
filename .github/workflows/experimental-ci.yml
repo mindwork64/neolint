@@ -1,0 +1,71 @@
+name: Experimental Preprocessor AST CI
+
+on:
+  push:
+    branches:
+      - exp/preprocessor-ast
+      - exp-preprocessor-ast-phase-*
+  pull_request:
+    branches:
+      - exp/preprocessor-ast
+      - exp-preprocessor-ast-phase-*
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Experimental quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Test canonical metadata extractor
+        run: python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+
+      - name: Run release tests
+        run: cargo test --release --all-targets --all-features
+
+      - name: Check Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+      - name: Install Rust 1.75.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.75.0
+
+      - name: Run tests on MSRV 1.75.0
+        run: cargo +1.75.0 test --all-targets --all-features
+
+      - name: Check pull request whitespace
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git diff --check "refs/remotes/origin/${BASE_REF}...HEAD"

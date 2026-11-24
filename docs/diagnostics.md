@@ -45,10 +45,86 @@ All parser diagnostics have default severity **error** and kind **syntax**.
 | `PAR014` | Duplicate default state. | `default {} default {}` |
 
 For malformed input, neolint attempts to continue far enough to report additional independent problems. Recovery is best-effort: unbalanced outer braces can affect which surrounding construct receives a diagnostic.
+### AST parser diagnostics
+
+The independent `parse_ast` parser mirrors the `PARxxx` syntax contract on the
+same prepared token stream. Its only additional code is the explicit recursion
+guard:
+
+| Code | Meaning | Notes |
+| --- | --- | --- |
+| `AST001` | AST recursion depth exceeds 256 recursive constructs. | Error severity, syntax kind. Emitted once per parse invocation; the over-deep branch is skipped and later independent constructs are still parsed when delimiters permit. |
+| `AST002` | The bounded AST parser worker stack could not be created or terminated safely. | Error severity, syntax kind. The parser returns an empty AST and never retries the recursive parser on the caller's stack. |
+
+`AST001` is intentionally AST-only. The legacy parser has no equivalent guard;
+all ordinary syntax findings remain `PARxxx` and are compared by the differential
+harness.
+
+## Preprocessor diagnostics
+
+All preprocessor diagnostics keep kind **syntax** for compatibility. In JSON v1
+preprocessor-origin PRE diagnostics additionally carry
+`"origin":"preprocessor"`; the CLI-generated `PRE039` aggregate-cap marker
+does not. This distinguishes actual preprocessor findings without extending
+the existing `kind` values. `PRE037` is
+informational; the rest default to **error**. Their `primary` and `related`
+locations are original-file `SourceSpan`s in the diagnostic's own
+`AnalysisUnit`; they never pass through the prepared-span map. Related
+locations identify the relevant macro definition, previous definition, outer
+invocation, conditional opening, or EOF, and are exposed in the JSON `related`
+array with their file, label, byte range and line/column positions.
+
+| Code | Meaning | Related/notes |
+| --- | --- | --- |
+| `PRE001` | Unknown preprocessor directive. | Primary is the directive line. |
+| `PRE002` | Malformed or empty directive, including unexpected tokens after `#else`/`#endif`. | Primary is the directive line; conditional recovery still matches the frame. |
+| `PRE003` | Invalid `#define` (missing name, malformed parameter list, duplicate parameter). | Primary is the definition name/line. |
+| `PRE004` | Invalid `#undef` (missing, extra, or non-identifier operand). | Primary is the directive/operand. |
+| `PRE005` | Conflicting macro redefinition. | Related points at the previous definition; the old definition remains active. |
+| `PRE006` | Invalid `#if`/`#elif` expression syntax. | Primary is the expression/token; related is the conditional opening. |
+| `PRE007` | Missing or invalid `#ifdef`/`#ifndef` identifier. | Related is the conditional opening. |
+| `PRE008` | Duplicate `#else`. | Primary is the second `#else`. |
+| `PRE009` | `#elif` after `#else`. | Primary is the misplaced `#elif`. |
+| `PRE010` | `#elif` without a matching `#if`. | Primary is the `#elif`. |
+| `PRE011` | `#else` without a matching `#if`. | Primary is the `#else`. |
+| `PRE012` | `#endif` without a matching `#if`. | Primary is the `#endif`. |
+| `PRE013` | Unterminated conditional block at EOF. | Primary is the opening directive; related is the EOF point. |
+| `PRE014` | Wrong number of arguments for a function-like macro. | Related is the macro definition; the invocation is left unexpanded. |
+| `PRE015` | Unterminated function-like macro invocation. | Related is the macro definition; the invocation is left unexpanded. |
+| `PRE017` | Direct macro recursion. | Primary is the recursive invocation; related includes the definition and outer invocations. |
+| `PRE018` | Indirect macro recursion. | Primary is the recursive invocation; related includes the definition and outer invocations. |
+| `PRE019` | Macro expansion depth exceeds 64. | Primary is the invocation that would exceed the limit. |
+| `PRE020` | Expanded-output byte budget (8 MiB) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
+| `PRE021` | Expanded-output token budget (1,000,000) exceeded. | The affected expansion stops; the rest of the unit continues within the budget. |
+| `PRE022` | Preprocessor diagnostic limit (1,000) reached. | This is the final PRE diagnostic; later findings are suppressed. |
+| `PRE025` | Conditional nesting depth exceeds 64. | The over-deep frame is treated as inactive and still matched by `#endif`. |
+| `PRE026` | Division or remainder by zero in an evaluated expression. | The expression evaluates as false; unselected short-circuit branches are not diagnosed. |
+| `PRE027` | Checked `i64` arithmetic, literal, negation, division, or shift overflow. | The expression evaluates as false. |
+| `PRE028` | Invalid shift: negative left operand, negative count, or count at least 64 in an evaluated expression. | The expression evaluates as false. |
+| `PRE029` | Malformed decimal/octal/hexadecimal integer literal. | The literal is treated as zero so parsing can continue. |
+| `PRE030` | Missing `#if`/`#elif` expression. | Primary is a zero-length point at the directive end; related is the conditional opening. |
+| `PRE031` | Invalid `#include` syntax or forbidden remote/network include path. | Primary is the path spelling; related is the full directive. |
+| `PRE032` | Included file not found or unreadable (including invalid UTF-8/non-regular file). | Primary is the path spelling; related is the full directive. |
+| `PRE033` | Include cycle on the active include stack. | Primary is the include path; related is the previous entry and the directive. |
+| `PRE034` | Include depth exceeds 64. | Primary is the include path; related is the include-stack context. |
+| `PRE035` | Included source exceeds 4 MiB or the unit's 256-file limit. | Primary is the path spelling; related is the directive. |
+| `PRE036` | Unknown `#pragma` (other than `#pragma once`). | Primary is the pragma spelling/directive. |
+| `PRE037` | Firestorm `//fspreprocessor off` kill switch was found. | Severity **info**; primary is the exact marker range; never affects exit code. |
+| `PRE038` | Invalid `#`/`##` use, operands, or token-paste result. | Primary is the invocation; the affected expansion is left bounded. |
+| `PRE039` | Total rendered diagnostics limit (10,000) reached for an AnalysisUnit or a unit-based CLI invocation. | Terminal error diagnostic; later findings are suppressed. A CLI overflow removes unit-level PRE039 terminals and appends exactly one terminal PRE039. |
+
+`PRE016` remains intentionally unused; malformed invocation classes are covered by
+`PRE014` and `PRE015`.
+
+`PRE039` is emitted only by unit-based invocations: the default no-preprocess AST
+path (identity preparation), explicit `--engine ast`/`--engine compare`, and
+full preprocessing (`--preprocess` or `--dialect firestorm`) for every engine.
+Only explicit `--engine legacy` without preprocessing uses the uncapped direct
+plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which are **lint**. `SEM012`, `SEM013` and `SEM023` default to **warning**; the rest default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026` default to **warning**; the rest default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -75,6 +151,9 @@ All `SEM` diagnostics have kind **semantic** except `SEM013` and `SEM023`, which
 | `SEM021` | Duplicate named state or state/global/function/built-in namespace collision. | error | God-only built-ins are excluded; `default` duplication remains PAR014. |
 | `SEM022` | Undefined state-change target in a known event handler. | error | Function state changes and unknown extension event bodies are not checked. |
 | `SEM023` | Standalone comparison result is discarded. | warning / lint | Only comparison expression statements are checked; calls, assignments, increment/decrement, used comparisons and ambiguous/syntax-error cases are skipped. |
+| `SEM024` | Variable is declared but never read. | warning / lint | Syntactic read/use analysis, not runtime liveness. Plain assignment targets and call callees are not reads; compound assignments, increments/decrements and component reads are. Emits nothing when the unit has AST parser diagnostics, recovered function signatures, error nodes, missing/unclosed function/event/state bodies, or error-severity preprocessor/lexical diagnostics. |
+| `SEM025` | Parameter is declared but never read. | warning / lint | Syntactic read/use analysis over user-function and canonical event parameters. Unknown extension-event parameters and malformed/recovered parameters are excluded. Emits nothing when the unit has AST parser diagnostics, recovered function signatures, error nodes, missing/unclosed function/event/state bodies, or error-severity preprocessor/lexical diagnostics. |
+| `SEM026` | User function is never called from an event handler or global initializer. | warning / lint | Reachability over matched direct identifier calls only; built-in callees, indirect calls and calls without a closing parenthesis create no edges. A function called only from another unreachable function is still reported. Prototypes, recovered signatures and duplicate declarations after the first definition are never nodes. Suppressed by the same fail-closed conditions as SEM024/SEM025 (AST parser diagnostics, recovered signatures, error nodes, missing/unclosed bodies, or error-severity preprocessor/lexical diagnostics) and by budget overflow. |
 
 ## Illustrative minimal examples
 
@@ -130,6 +209,23 @@ default { state_entry() { state missing; } }
 ```lsl
 // SEM023: comparison result discarded; assignment was likely intended
 default { state_entry() { integer RStat; RStat == FALSE; } }
+```
+
+```lsl
+// SEM024: local variable is never read
+default { state_entry() { integer unused; } }
+```
+
+```lsl
+// SEM025: parameter is never read
+integer unusedParameter(integer value) { return 1; }
+default { state_entry() { llOwnerSay((string)unusedParameter(1)); } }
+```
+
+```lsl
+// SEM026: function is never called from any event or global initializer
+unusedFunction() { }
+default { state_entry() { } }
 ```
 
 ```lsl
@@ -215,6 +311,9 @@ default { state_entry() { integer value; float result = value.x; } }
 - Unresolved types and values are not assigned guessed types.
 - Some complex or malformed control-flow cases are not analyzed.
 - SEM023 intentionally skips comparisons containing calls or side effects and statements with syntax errors.
+- SEM024 is a syntactic read/use analysis, not runtime liveness: a read counts even when reachable only from a function that later call-graph analysis may prove is never invoked. SEM024 fails closed and emits nothing when the same unit has an error-severity preprocessor or lexical diagnostic, or when syntax errors, recovered function signatures, error nodes, missing bodies or unclosed function/event/state bodies make reads unreliable.
+- SEM025 uses the same syntactic read/use model and the same fail-closed gate. Because the scope model registers parameters only for user functions and canonical events, unknown extension-event parameters are excluded structurally rather than by a second policy.
+- SEM026 is reachability, not dead-code elimination: roots are matched direct identifier calls in event bodies and global initializers, and edges are matched direct identifier calls in user-function bodies. Built-in callees, indirect calls and calls without a real closing parenthesis never create edges; first-definition duplicate handling follows SEM001. A function called only from another unreachable function is still reported, because this is reachability, not a claim that no call sites exist. The graph is bounded and any node/edge/work overflow emits no SEM026 rather than reporting a partial result; error-severity preprocessor or lexical diagnostics suppress it through the same fail-closed gate as SEM024/SEM025.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

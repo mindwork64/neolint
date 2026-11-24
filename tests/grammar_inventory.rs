@@ -1,4 +1,39 @@
-use neolint::{lex, parse, Diagnostic, DiagnosticKind};
+use neolint::{lex, parse, parse_ast, parse_legacy, Diagnostic, DiagnosticKind};
+
+type NormalizedDiagnostic = (
+    String,
+    String,
+    String,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    String,
+);
+
+fn normalized(diagnostics: &[Diagnostic]) -> Vec<NormalizedDiagnostic> {
+    let mut values: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.code.to_owned(),
+                diagnostic.severity.as_str().to_owned(),
+                diagnostic.kind.as_str().to_owned(),
+                diagnostic.span.start,
+                diagnostic.span.end,
+                diagnostic.span.line,
+                diagnostic.span.column,
+                diagnostic.span.end_line,
+                diagnostic.span.end_column,
+                diagnostic.message.clone(),
+            )
+        })
+        .collect();
+    values.sort();
+    values
+}
 
 fn parse_source(source: &str) -> Vec<Diagnostic> {
     let (tokens, lexical_diagnostics) = lex(source);
@@ -6,7 +41,16 @@ fn parse_source(source: &str) -> Vec<Diagnostic> {
         lexical_diagnostics.is_empty(),
         "unexpected lexical diagnostics: {lexical_diagnostics:?}"
     );
-    parse(&tokens)
+    let legacy = parse(&tokens);
+    let independently_legacy = parse_legacy(&tokens);
+    assert_eq!(legacy, independently_legacy);
+    let (_, ast) = parse_ast(&tokens);
+    assert_eq!(
+        normalized(&legacy),
+        normalized(&ast),
+        "Legacy/AST grammar parity mismatch for {source:?}"
+    );
+    legacy
 }
 
 fn syntax_codes(diagnostics: &[Diagnostic]) -> Vec<&'static str> {

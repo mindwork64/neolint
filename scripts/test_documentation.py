@@ -4,7 +4,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DIAGNOSTIC_SOURCES = ("src/lexer.rs", "src/parser.rs", "src/semantic.rs")
+DIAGNOSTIC_SOURCES = (
+    "src/lexer.rs",
+    "src/parser.rs",
+    "src/semantic.rs",
+) + tuple(
+    str(path.relative_to(ROOT))
+    for directory in ("src/preprocessor", "src/ast", "src/ast_semantic")
+    for path in sorted((ROOT / directory).rglob("*.rs"))
+)
 
 
 class DocumentationTests(unittest.TestCase):
@@ -13,13 +21,18 @@ class DocumentationTests(unittest.TestCase):
         for relative in DIAGNOSTIC_SOURCES:
             source_codes.update(
                 re.findall(
-                    r'"(?:LEX|PAR|SEM)\d{3}"',
+                    r'"(?:LEX|PAR|SEM|PRE|AST)\d{3}"',
                     (ROOT / relative).read_text(),
                 )
             )
         documented = (ROOT / "docs/diagnostics.md").read_text()
         missing = sorted(code.strip('"') for code in source_codes if code.strip('"') not in documented)
         self.assertEqual(missing, [], f"missing diagnostic docs: {missing}")
+
+    def test_language_support_documents_ast_only_unused_analysis(self):
+        language_support = (ROOT / "docs/language-support.md").read_text()
+        for code in ("SEM024", "SEM025", "SEM026"):
+            self.assertIn(code, language_support, f"language-support.md omits {code}")
 
     def test_readme_documentation_links_exist(self):
         readme = (ROOT / "README.md").read_text()
@@ -54,6 +67,15 @@ class DocumentationTests(unittest.TestCase):
         self.assertTrue((ROOT / "LICENSES/LINDEN-RESEARCH-MIT.txt").is_file())
         self.assertTrue((ROOT / "data/README.md").is_file())
 
+
+    def test_ast_default_and_legacy_migration_are_documented(self):
+        cli = (ROOT / "docs/cli-reference.md").read_text()
+        config = (ROOT / "docs/configuration.md").read_text()
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        self.assertIn("`ast` is the default in v1.1.0 and later", cli)
+        self.assertIn("## Engine migration (v1.1.0)", config)
+        self.assertIn("`engine = legacy`", config)
+        self.assertIn("Legacy analyzer remains available", changelog)
 
     def test_release_version_documentation_matches_package(self):
         cargo = (ROOT / "Cargo.toml").read_text()
