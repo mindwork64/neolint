@@ -14,6 +14,9 @@ records verified state.
 - **Follow-up #111** (`--help` discoverability) is complete and closed as
   completed after [PR #114](https://github.com/mindwork64/neolint/pull/114),
   squash merge `03f279b9369179c23518b4b042cf79582725d209`.
+- **Follow-up #110** (AST/Legacy analysis-budget parity) is complete and closed
+  after [PR #115](https://github.com/mindwork64/neolint/pull/115), squash merge
+  `dffa8ae2e21c658ffba3a9e6e98acb27abe69ba5`.
 - Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
 - Phase 8 squash merge commit: `e4732b300013e26edc60b54af3a6743f93933c08`
   (parent was Phase 7 base
@@ -93,7 +96,6 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 ## Known problems and open follow-ups
 
 - #108 preprocessor `DiagnosticKind` and JSON related locations (policy).
-- #110 duplicated CFG/constant limit constants across AST and Legacy engines.
 - Measured limitations: single-host benchmark evidence, Linux-only RSS,
   sub-10 ms rows dominated by process startup, `MAX_TYPE_DEPTH` unreachable
   through the parser (defensive), pre-existing one-line difference between stable
@@ -101,8 +103,10 @@ cover included-file size, origin-chain depth and invocation unit capacity.
 
 ## Next action
 
-Phase 8 is integrated into `exp/preprocessor-ast`; parent Issue #107 is closed.
-Follow-ups #109 and #111 are also completed and closed. The only remaining open
-follow-ups are #108 (diagnostic kind / JSON related locations) and #110 (shared
-versus duplicated AST/Legacy limit constants). Any migration to stable `main`,
-v1.0.0 publication or Legacy retirement requires its own decision and Issue.
+Phase 8 and follow-ups #109, #110 and #111 are integrated into
+`exp/preprocessor-ast` and closed as completed. The only remaining open
+follow-up is #108 (preprocessor diagnostic kind / JSON related locations).
+Issue #110 was resolved without coupling the two engines: the six corresponding
+numeric budgets remain independently declared and are protected by a parity
+regression test. Any migration to stable `main`, v1.0.0 publication or Legacy
+retirement requires its own decision and Issue.
