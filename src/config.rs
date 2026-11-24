@@ -177,9 +177,9 @@ impl LintConfig {
 
     /// Configured analysis engine, defaulting to [`AnalysisEngine::Ast`].
     ///
-    /// On the experimental Phase 6H branch a configuration without an `engine`
-    /// setting selects AST. [`AnalysisEngine::Legacy`] must be selected
-    /// explicitly to restore the Legacy pipeline.
+    /// A configuration without an `engine` setting selects AST.
+    /// [`AnalysisEngine::Legacy`] must be selected explicitly to restore the
+    /// historical Legacy pipeline.
     pub fn engine(&self) -> AnalysisEngine {
         self.engine
     }

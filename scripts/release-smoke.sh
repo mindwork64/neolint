@@ -38,6 +38,18 @@ if [[ "$diagnostic_output" != *"SEM020"* ]]; then
     exit 1
 fi
 
+unused_fixture="$root/corpus/medium/inventory_manager.lsl"
+default_output="$("$binary" "$unused_fixture" 2>&1)"
+if [[ "$default_output" != *"SEM024"* ]]; then
+    echo "release smoke: default engine did not report AST-only SEM024" >&2
+    exit 1
+fi
+legacy_output="$("$binary" --engine legacy "$unused_fixture" 2>&1)"
+if [[ "$legacy_output" == *"SEM024"* ]]; then
+    echo "release smoke: explicit Legacy unexpectedly emitted AST-only SEM024" >&2
+    exit 1
+fi
+
 set +e
 json_output="$("$binary" --format json "$invalid" 2>&1)"
 json_status=$?

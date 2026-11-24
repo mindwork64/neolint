@@ -20,7 +20,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
 | `--preprocess` | Enable the standard LSL preprocessor. |
 | `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
-| `--engine ENGINE` | Select the analysis engine: `ast` (default on the experimental Phase 6H branch), `legacy`, or `compare`. |
+| `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
 | `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
 | `--include-dir=DIR`, `--dialect=DIALECT`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
@@ -32,16 +32,15 @@ Without preprocessing flags, the default AST path uses identity preparation: the
 
 ## Engines
 
-`ast` is the default on the experimental Phase 6H branch only. The published
-v1.0.0 release and the stable `main` branch are unchanged. Users who need the
-historical engine add `engine = legacy` to the configuration file or pass
+`ast` is the default in v1.1.0 and later. Users who need the historical v1.0.0
+analysis pipeline add `engine = legacy` to the configuration file or pass
 `--engine legacy`; see the
-[migration note](configuration.md#migration-note-phase-6h).
+[engine migration note](configuration.md#engine-migration-v110).
 
 | Engine | Behavior |
 | --- | --- |
-| `ast` | Default on the experimental Phase 6H branch. The independent typed-AST parser and AST semantic analyzer. Without preprocessing, input is identity-prepared and the unit-based caps can append a terminal `PRE039`. |
-| `legacy` | Explicit rollback engine. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from previous releases. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
+| `ast` | Default engine. The independent typed-AST parser and AST semantic analyzer. Without preprocessing, input is identity-prepared and the unit-based caps can append a terminal `PRE039`. |
+| `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 `SEM024`, `SEM025`, and `SEM026` are AST-only lint diagnostics. They appear in

@@ -18,18 +18,20 @@ Project logo, repository artwork, CLI icon, and the Windows executable icon are 
 
 ## Status
 
-- Current version: `1.0.0`.
-- Diagnostic families: lexical (`LEX`), syntax (`PAR`), and semantic/lint (`SEM`).
+- Current version: `1.1.0`.
+- AST is the default analysis engine; `--engine legacy` selects the historical compatibility engine.
+- `--engine compare` is available for maintainers.
+- Diagnostic families: lexical (`LEX`), syntax (`PAR`), preprocessor (`PRE`), and semantic/lint (`SEM`).
 - CLI-only: no GUI, TUI, web UI, IDE integration, language server, or autofix.
 - Normal lint runs are deterministic and offline.
-- Stable v1.0.0 is published: <https://github.com/mindwork64/neolint/releases/tag/v1.0.0>.
+- Stable v1.1.0 is published: <https://github.com/mindwork64/neolint/releases/tag/v1.1.0>.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
 ## Supported release targets
 
-The initial downloadable binary targets are Linux x86_64 and Windows x86_64. macOS, ARM, 32-bit, and other targets are not part of the initial binary release.
+The downloadable binary targets are Linux x86_64 and Windows x86_64. macOS, ARM, 32-bit, and other targets are not included in this release.
 
-Versioned Linux and Windows archives are available from the [v1.0.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.0.0). See [Getting started](docs/getting-started.md) for exact archive names, installation, and checksum verification.
+Versioned Linux and Windows archives are available from the [v1.1.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0). See [Getting started](docs/getting-started.md) for exact archive names, installation, and checksum verification.
 
 ## Quick start
 
@@ -40,7 +42,8 @@ neolint ./scripts/
 neolint --config .neolint.conf ./scripts/
 neolint --disable SEM001,SEM004 ./scripts/
 neolint --severity SEM004=warning script.lsl
-neolint --engine ast script.lsl
+neolint --engine legacy script.lsl
+neolint --engine compare script.lsl
 cat script.lsl | neolint -
 ```
 
@@ -48,6 +51,7 @@ Exit codes: `0` no error-severity diagnostics, `1` at least one error, `2` CLI/i
 
 ## User documentation
 
+- [Changelog](CHANGELOG.md)
 - [Getting started and installation](docs/getting-started.md)
 - [Command-line reference](docs/cli-reference.md)
 - [Configuration](docs/configuration.md)

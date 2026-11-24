@@ -61,8 +61,8 @@ Identifiers are currently ASCII-only. Non-ASCII characters are accepted inside c
 
 Firestorm's LSL preprocessor supports several syntax extensions. Neolint parses
 them only in the independent AST engine and only when the corresponding gate is
-enabled. AST is the default CLI engine on the experimental Phase 6H branch, so
-these forms are accepted by the default CLI when the gates are on; explicit
+enabled. AST is the default CLI engine, so these forms are accepted by the
+default CLI when the gates are on; explicit
 Legacy (`--engine legacy` or `engine = legacy`) rejects them, as does plain LSL
 parsing. The preprocessor dialect alone does not enable either extension.
 
@@ -120,7 +120,7 @@ includes); once observed, a later `#undef` does not disable the extension. The
 `//fspreprocessor off` kill switch disables preprocessing and both extensions.
 `PreparedSource` exposes the effective gates; pass them to
 `AstParseOptions`/`parse_ast_with_options`. The CLI runs the AST engine by
-default on the experimental Phase 6H branch and passes those effective gates;
+default and passes those effective gates;
 explicit `--engine legacy` runs the Legacy engine, which does not parse these
 extensions.
 

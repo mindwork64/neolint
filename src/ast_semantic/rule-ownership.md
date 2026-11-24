@@ -6,8 +6,8 @@ No SEM rule remains Legacy-only in the current matrix.
 ## Engine selection and compare scope (Phase 6G)
 
 - `--engine` / `engine = legacy|ast|compare` selects the analyzer. AST is the
-  Phase 6H default on the experimental branch; Legacy is the explicit rollback
-  engine, selected with `--engine legacy` or `engine = legacy`.
+  default engine; Legacy is the explicit v1.0.0 compatibility engine, selected
+  with `--engine legacy` or `engine = legacy`.
 - Compare reports cover only the raw `SEM001`–`SEM023` semantic streams. Parser
   and lexer parity is not claimed. Parser/lexer recovery divergence on invalid
   input is reported rather than treated as a parity defect; the SEM002 delta

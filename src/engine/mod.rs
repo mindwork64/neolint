@@ -1,8 +1,8 @@
 //! Engine-aware analysis selection and result envelopes.
 //!
-//! On the experimental Phase 6H branch [`AnalysisEngine::Ast`] is the default
-//! engine; [`AnalysisEngine::Legacy`] remains available as the explicit
-//! rollback engine, and [`AnalysisEngine::Compare`] stays opt-in. The frozen
+//! [`AnalysisEngine::Ast`] is the default engine; [`AnalysisEngine::Legacy`]
+//! remains available as the explicit compatibility engine, and
+//! [`AnalysisEngine::Compare`] stays opt-in. The frozen
 //! [`AnalysisUnit::analyze`](crate::source::AnalysisUnit::analyze) and
 //! [`AnalysisRun::analyze`](crate::pipeline::AnalysisRun::analyze) entry points
 //! keep their Legacy behavior regardless of the selector default, while the
@@ -30,8 +30,8 @@ pub use compare::{
 
 /// Which semantic analyzer the engine API runs.
 ///
-/// The default is [`AnalysisEngine::Ast`] on the experimental Phase 6H branch.
-/// [`AnalysisEngine::Legacy`] is the explicit rollback engine, and
+/// The default is [`AnalysisEngine::Ast`].
+/// [`AnalysisEngine::Legacy`] is the explicit compatibility engine, and
 /// [`AnalysisEngine::Compare`] remains opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnalysisEngine {
@@ -42,7 +42,7 @@ pub enum AnalysisEngine {
     Legacy,
     /// Independent typed-AST semantic analyzer.
     ///
-    /// This is the default engine on the experimental Phase 6H branch.
+    /// This is the default engine.
     #[default]
     Ast,
     /// Run both analyzers and report their raw semantic streams.

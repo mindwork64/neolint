@@ -68,6 +68,15 @@ class DocumentationTests(unittest.TestCase):
         self.assertTrue((ROOT / "data/README.md").is_file())
 
 
+    def test_ast_default_and_legacy_migration_are_documented(self):
+        cli = (ROOT / "docs/cli-reference.md").read_text()
+        config = (ROOT / "docs/configuration.md").read_text()
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        self.assertIn("`ast` is the default in v1.1.0 and later", cli)
+        self.assertIn("## Engine migration (v1.1.0)", config)
+        self.assertIn("`engine = legacy`", config)
+        self.assertIn("Legacy analyzer remains available", changelog)
+
     def test_release_version_documentation_matches_package(self):
         cargo = (ROOT / "Cargo.toml").read_text()
         version = re.search(r'^version = "([^"]+)"', cargo, re.MULTILINE).group(1)

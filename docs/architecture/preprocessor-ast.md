@@ -1,16 +1,23 @@
 # Preprocessor and AST Architecture
 
-Status: **Phases 1–5, 6A–6G implemented; Phase 6H makes AST the default on the
-experimental branch**; this document remains the normative contract for the
-remaining Phase 6 slices.
+Status: **The complete AST/preprocessor implementation is released in v1.1.0;
+AST is the default CLI engine and Legacy remains an explicit compatibility
+engine.** This document is the normative architecture and compatibility
+reference for the implemented pipeline.
+
+Historical references below to the Phase 6H experimental integration branch
+record how the AST migration was staged before v1.1.0. They do not describe the
+current release policy: AST is now the stable default, Legacy remains available,
+and Compare remains an opt-in maintainer tool.
 Baseline architecture: `98556e21e175190c95f2da39fc0e2ba7a8d9544c`.
 Scope: source ownership, identity/full preprocessing, includes, advanced macros,
 the Firestorm preprocessing profile, unified diagnostics, CLI integration, and the
 independent typed AST parser and Firestorm switch/lazy-list AST parsing are
 implemented. All existing SEM001–SEM023 diagnostics have independent AST
 implementations with differential parity. Phase 6G added engine selection and
-Compare; Phase 6H selects AST by default on the experimental integration branch
-only (see the Phase 6H implementation record).
+Compare; Phase 6H selected AST by default on the integration branch, and
+v1.1.0 promotes that behavior to the stable release line. Legacy remains
+selectable and Compare remains opt-in.
 Audience: maintainers and contributors working on Phase 6.
 
 This document is the normative source of context for the preprocessor and AST
@@ -3743,9 +3750,10 @@ over exit-status parity for a suppressed diagnostic.
 - [x] Phase 6A–6F — AST implementations for SEM001–SEM023.
 - [x] Phase 6G — engine selection, bounded Compare, CLI wiring.
 - [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
+- [x] v1.1.0 release promotion — AST default is now on stable `main`; Legacy retained; Compare opt-in.
 - [x] **Phase 7 (this Issue)** — implementation record complete on the experimental branch: SEM024–SEM026 are implemented, documented, and regression-tested.
 - [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md); gaps are tracked as Issues #108–#111. Phase 8 is not permission to remove Legacy or change stable `main`.
-- [ ] Separate decision on stable `main` / v1.0.0 migration — requires its own Issue and explicit authorization.
+- [x] Stable-main promotion — AST is the default in v1.1.0; Legacy remains available and Compare remains opt-in.
 
 ---
 

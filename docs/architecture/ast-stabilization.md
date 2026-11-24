@@ -1,18 +1,17 @@
 # AST-first stabilization evidence (Phase 8)
 
-Status: evidence package for GitHub Issue #107. This document answers, with
-reproducible measurements and verifiable binary provenance, whether the AST-first
-experimental implementation is stable enough to support a *separate* future
-decision about stable `main` / v1.0.0. It does not authorize that decision, does
-not change `main`, and does not remove the Legacy engine.
+Status: historical Phase 8 evidence package for GitHub Issue #107. At the time
+it was written, this document deliberately deferred the stable-main decision.
+That decision was subsequently authorized and implemented for v1.1.0: AST is
+now the default CLI engine, Legacy remains available as a compatibility path,
+and Compare remains opt-in for maintainers.
 
-**Verdict: QUALIFIED WITH FOLLOW-UPS.** Every required gate is green on the PR
-head, the documented resource limits are reconciled with their enforcement
-points, both measured binaries are built from verified clean worktrees, the
-harness and raw samples are committed and reproducible, and two measured
-bottlenecks were fixed with large, repeatable gains. Four documented limitations
-remain and are tracked as separate Issues (#108–#111); none is a correctness
-defect in the analyzed paths.
+**Verdict: promotion approved after follow-ups.** The required Phase 8 gates
+were green, documented resource limits were reconciled with their enforcement
+points, benchmark binaries were rebuilt from verified clean worktrees, and the
+remaining Issues #108–#111 have all been resolved. This evidence remains useful
+for understanding performance trade-offs; it is not a claim that AST is faster
+than Legacy in every workload.
 
 ## 1. What is measured
 
@@ -417,5 +416,5 @@ this phase; `release.yml` is unchanged.
 - [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
 - [x] Phase 7 — AST-native SEM024–SEM026, documentation and regression tests.
 - [x] Phase 8 (this Issue) — reproducible benchmark facility and verified baseline, resource-limit reconciliation, two profile-guided fixes, evidence package and follow-ups #108–#111.
-- [ ] Separate decision on stable `main` / v1.0.0 migration.
-- [ ] Separate decision on future Legacy retirement, if justified.
+- [x] Stable-main promotion: AST is the default in v1.1.0; Legacy remains available.
+- [x] Legacy retirement decision: deferred. No removal is included in v1.1.0.

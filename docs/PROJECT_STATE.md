@@ -1,114 +1,69 @@
 # Project state
 
-Compact checkpoint for agent handoffs. Update at meaningful slice boundaries, not
-after every command. Canonical contracts live in the GitHub Issues; this file only
-records verified state.
+Compact checkpoint for agent handoffs. Canonical contracts live in the source,
+tests and user-facing documentation; update this file at meaningful boundaries.
 
-## Where the project is
+## Current release line
 
-- **Phase 8 (Issue #107, AST-first stabilization) is complete and Issue #107 is
-  closed as completed** after the squash merge through
-  [PR #112](https://github.com/mindwork64/neolint/pull/112).
-- **Follow-up #109** (`#pragma once` / Boost.Wave evidence) is resolved by [PR #113](https://github.com/mindwork64/neolint/pull/113), squash merge
-  `ed3a4d748c16be4d78dfc7ba43f9d61cc3437e73`.
-- **Follow-up #111** (`--help` discoverability) is complete and closed as
-  completed after [PR #114](https://github.com/mindwork64/neolint/pull/114),
-  squash merge `03f279b9369179c23518b4b042cf79582725d209`.
-- **Follow-up #110** (AST/Legacy analysis-budget parity) is complete and closed
-  after [PR #115](https://github.com/mindwork64/neolint/pull/115), squash merge
-  `dffa8ae2e21c658ffba3a9e6e98acb27abe69ba5`.
-- **Follow-up #108** (preprocessor origin and related JSON locations) is complete
-  and closed after [PR #116](https://github.com/mindwork64/neolint/pull/116),
-  squash merge `312c070b4ac7e4ab9d6d2894e7e1c400a834c3d3`.
-- Source branch: `exp-preprocessor-ast-phase-08-stabilization`.
-- Phase 8 squash merge commit: `e4732b300013e26edc60b54af3a6743f93933c08`
-  (parent was Phase 7 base
-  `66936b0e175d51cba8d83377061229869ef64e96`).
-- Benchmark evidence artifact snapshot: `4a732925bb1d81330066355a4f9105bfffc3c1bb`.
-- Benchmark harness capture source: `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d`
-  (tree `8264d70e02802de0fe57e4d49e2a662c8086eeef`, clean worktree).
-- Final PR source HEAD before squash merge:
-  `f735c5c2eca03495ca275359aa88288cdfe33d95`.
-- Stable `main`: `98556e21e175190c95f2da39fc0e2ba7a8d9544c` — frozen and unchanged.
-- AST is the default engine **only on the experimental branch**. Legacy remains
-  selectable (`--engine legacy`) and unchanged; Compare remains opt-in and compares
-  exactly `SEM001`–`SEM023`; `SEM024`–`SEM026` are AST-only. v1.0.0 and the release
-  workflow are untouched.
+- **v1.1.0 promotes the AST-first implementation to stable `main`.**
+- `ast` is the default CLI and `LintConfig::default()` engine.
+- `legacy` remains available through `--engine legacy` or `engine = legacy`.
+  It is not deprecated or removed in this release.
+- `compare` remains opt-in and is intended for maintainers; it displays Legacy
+  diagnostics and reports the semantic comparison on stderr.
+- The v1.1.0 release targets remain Linux x86_64 and Windows x86_64.
+- Neolint remains a deterministic, offline-by-default CLI tool. No IDE
+  integration, language server, incremental analysis or autofix is included.
 
-## Architecture in one paragraph
+## Completed implementation
 
-CLI → `pipeline::AnalysisRun` (one `AnalysisUnit` per input; checked unit/file
-budgets) → `SourceManager` + optional preprocessor (identity, standard or
-Firestorm dialect) producing a `PreparedSource` with a `SourceMap` → engine
-dispatch: `Legacy` (frozen token scanner, direct path), `Ast` (lex → iterative
-typed parser with a 256-depth guard on a 16 MiB worker stack → `ast_semantic`
-rules over a name-indexed `ScopeTree`, `ExpressionFacts`, `CallSite` and a bounded
-call graph), or `Compare` (both analyzers, 23-code differential report) → rendered
-diagnostics through the map (prepared source validated once per unit) → capped
-display (10,000 per unit and per invocation, terminal `PRE039`).
+- Phases 1–5 and 6A–6H: SourceManager/SourceMap, LSL and Firestorm
+  preprocessing, include handling, macro expansion, typed AST parser, semantic
+  engine selection, and AST default.
+- Phase 7: AST-native `SEM024` (unread variables), `SEM025` (unread parameters)
+  and `SEM026` (unreachable user functions).
+- Phase 8: reproducible benchmark harness, resource-limit reconciliation and
+  profile-guided fixes.
+- Phase 8 follow-ups #108–#111 are integrated and closed:
+  - JSON v1 preprocessor `origin` and `related` locations are additive.
+  - Boost.Wave `#pragma once` behavior is source-audited and tested.
+  - AST/Legacy numeric resource-limit policy parity is regression-tested.
+  - CLI help documents implemented preprocessing options.
+- Legacy and AST remain independent implementations. Compare fingerprints
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM026` are AST-only.
 
-## Verified gates
+## Architecture
 
-The full gate was green on the final PR source HEAD
-`f735c5c2eca03495ca275359aa88288cdfe33d95`:
-[45289677266](https://github.com/mindwork64/neolint/actions/runs/45289677266)
-(pull_request) and [45289669162](https://github.com/mindwork64/neolint/actions/runs/45289669162)
-(push). Both completed successfully, including formatting, Clippy, debug/release
-tests, rustdoc, MSRV 1.75, Python metadata/harness tests, documentation tests and
-PR whitespace.
+CLI → `AnalysisRun` → `AnalysisUnit` → SourceManager / optional preprocessor →
+PreparedSource + SourceMap → Legacy, AST or Compare → source-map diagnostic
+rendering → suppression and bounded display (`PRE039`).
 
-- `cargo test --all-targets --all-features`: **951 passed, 0 failed** (also 951 in
-  release and on Rust 1.75).
-- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`: clean.
-- `python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'`:
-  **19 passed** (canonical metadata extractor plus benchmark-harness unit tests).
-- `python3 scripts/test_documentation.py`: **7 passed**.
-- `git diff --check`: clean.
+Plain no-preprocess Legacy retains its historical direct path. AST uses identity
+preparation even when preprocessing is disabled. All preprocessed engine modes
+share the same prepared source and source map.
 
-## Performance evidence
+## Verified implementation evidence
 
-- Harness: `bench/bench.py` + `bench/workloads.py` + `bench/README.md`, standard
-  library only. Evidence document: `docs/architecture/ast-stabilization.md`.
-- Both measured binaries were rebuilt from clean worktrees at the recorded commits
-  and re-verified inside the harness (`--verify-build`): base `66936b0` →
-  `83d9fce6…`, post-fix `1273c4d` → `227352d9…`.
-- Captures ran from a clean harness worktree at
-  `a0fea1ea5ce73557a8e925efc34c50528fdd6a5d` (tree
-  `8264d70e02802de0fe57e4d49e2a662c8086eeef`, `harness_dirty: false`).
-  The recorded source digest is
-  `babcf808592bf1803849ff1e4313dca8f334f7964d128587230186808347efe3`,
-  independently checked against `bench/bench.py` and `bench/workloads.py`.
-- Two independent passes per binary, cross-pass signatures consistent, identical
-  70-file input manifest (8,764,087 bytes).
-- Headline effects: `diagnostic_flood/default` 173.59 → 91.18 ms (**−47.5 %**) and
-  `many_symbols/default` 48.97 → 30.12 ms (**−38.5 %**). The near-limit row
-  (7.65 MiB, 95.7 % of the 8 MiB root limit) is unchanged within noise
-  (486.52 → 496.71 ms), and the Legacy negative control moves 22–36 % on sub-10 ms
-  rows, which bounds the noise envelope.
-- Peak RSS for the near-limit input is ≈310 MB (≈2.5 KB per statement, roughly
-  linear) — a capacity observation, not a violated limit.
+- Final Phase 8 source and documentation state is recorded in
+  [`preprocessor-ast.md`](architecture/preprocessor-ast.md).
+- Benchmark methodology and limitations are recorded in
+  [`ast-stabilization.md`](architecture/ast-stabilization.md).
+- Phase 8 CI recorded 951 passing Rust tests in debug, release and Rust 1.75,
+  plus Python metadata/harness and documentation tests. The v1.1.0 promotion
+  CI repeats those gates against the release branch and the merge candidate.
+- Real-script save-and-lint experiment used a 1,234-line Firestorm script:
+  median save+lint 9.328 ms Legacy, 9.916 ms AST and 10.944 ms Compare on a
+  Ryzen 5 2600X. This is a fresh-process CLI measurement, not an incremental
+  language-server benchmark.
 
-## Limits
+## Release policy and known limitations
 
-`docs/architecture/preprocessor-ast.md` §12 maps every limit to its constant,
-enforcement point, scope, behaviour on exceed and boundary test. Named constants
-`MAX_INCLUDE_DEPTH` and `MAX_ORIGIN_DEPTH` replaced bare literals; N/N+1 tests
-cover included-file size, origin-chain depth and invocation unit capacity.
-
-## Known problems and open follow-ups
-
-- Measured limitations: single-host benchmark evidence, Linux-only RSS,
-  sub-10 ms rows dominated by process startup, `MAX_TYPE_DEPTH` unreachable
-  through the parser (defensive), pre-existing one-line difference between stable
-  `ci.yml` and frozen `main` (Phase 0 commit `d56b392`, deliberately not modified).
-
-## Next action
-
-Phase 8 and follow-ups #108, #109, #110 and #111 are integrated into
-`exp/preprocessor-ast` and closed as completed. There are no remaining open
-Phase 8 follow-ups. JSON v1 exposes preprocessor origin and related source
-locations through additive optional fields while preserving the existing
-`kind` vocabulary. The AST/Legacy limit values remain independently declared
-and are protected by a parity regression test. Any migration to stable `main`,
-v1.0.0 publication or Legacy retirement requires its own separate decision.
+- `main` is the stable release branch; feature development continues through
+  dedicated branches and pull requests.
+- Legacy retirement is not part of v1.1.0 and requires a separate decision.
+- Known evidence limits: benchmark timings are single-host/Linux measurements;
+  sub-10 ms rows include process-startup and scheduler noise; peak RSS was
+  measured only on Linux. `MAX_TYPE_DEPTH` remains a defensive guard that is
+  unreachable through the current parser.
+- A clean lint result does not guarantee acceptance by the official compiler
+  or any simulator.
