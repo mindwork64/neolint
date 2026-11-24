@@ -1110,7 +1110,7 @@ fn print_json(results: &[FileResult]) {
                 diagnostic.span.end
             );
             // Preserve the existing kind vocabulary for JSON v1 consumers.
-            if diagnostic.code.starts_with("PRE") {
+            if diagnostic.code.starts_with("PRE") && diagnostic.code != "PRE039" {
                 print!(",\"origin\":\"preprocessor\"");
             }
             if !item.related.is_empty() {

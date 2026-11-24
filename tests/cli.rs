@@ -1459,6 +1459,10 @@ fn global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039() {
     );
     assert_eq!(stdout.matches("PRE039").count(), 1);
     assert!(
+        !stdout.contains("\\"origin\\":"),
+        "the CLI-generated PRE039 cap marker is not a preprocessor-origin diagnostic: {stdout}"
+    );
+    assert!(
         !stdout.contains("b.lsl"),
         "later file retained diagnostics beyond the budget"
     );
