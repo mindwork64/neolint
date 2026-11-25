@@ -4209,3 +4209,21 @@ exhaustion suppress SEM044.
 The diagnostic concerns structural reachability from `default`, not the
 persistence of an already-active state when an object is rezzed from inventory.
 Legacy and Compare remain unchanged; SEM044 is AST-only.
+
+
+### Post-v1.1.0 operator operand validation (SEM045)
+
+SEM045 validates only operands whose types are known through the AST scope and
+type resolver. Logical, bitwise and shift operators require integer operands;
+unary logical/bitwise negation requires integer; unary arithmetic negation
+accepts integer, float, vector and rotation; increment/decrement require a
+known integer or float variable. Built-in constants are not writable. Unknown
+expressions are skipped rather than assigned guessed types. Any parser error,
+unreliable lexical/preprocessor input, or more than 65,536 collected expression
+sites suppresses the rule. Unary plus is intentionally not covered pending a
+separate confirmation of its LSL acceptance semantics.
+
+SEM045 is an AST-only semantic error. It does not enter the SEM001–SEM023
+Compare parity set and does not modify Legacy output.
+
+Evidence: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers), and [LslPlus operator type validation](https://hdiff.luite.com/diff/LslPlus/0.2.0/0.3.0).

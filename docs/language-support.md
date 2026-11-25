@@ -375,6 +375,37 @@ static syntactic check, not constant folding and not a guarantee that the target
 viewer/compiler will accept every script; see the [diagnostic reference](diagnostics.md)
 for its conservative boundaries.
 
+## Operator operand types
+
+The AST engine reports semantic error `SEM045` when it can prove that an
+operator receives a type outside the supported LSL operand set. The rule checks
+logical `&&`/`||`, bitwise `&`/`|`/`^` and shifts `<<`/`>>` as integer-only
+operators; unary `!` and `~` also require an integer. Unary negation accepts
+integer, float, vector and rotation values. Increment and decrement require a
+known integer or float variable, and built-in constants cannot be modified.
+
+For example, the following contains three independent `SEM045` findings:
+
+```lsl
+default {
+    state_entry() {
+        float amount = 1.0;
+        string label = "bad";
+        integer invalid_not = !amount;
+        integer invalid_shift = 1 << label;
+        label++;
+    }
+}
+```
+
+The rule deliberately skips unknown expression types instead of guessing. It
+also fails closed for parser errors, unreliable lexical/preprocessor input, or
+more than 65,536 collected expression sites. These diagnostics are AST-only:
+Legacy output and the SEM001–SEM023 Compare parity set are unchanged. Unary
+plus is not currently covered by SEM045.
+
+References: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers), and [LslPlus operator type validation](https://hdiff.luite.com/diff/LslPlus/0.2.0/0.3.0).
+
 ## Important limitations
 
 Neolint is not a complete LSL compiler or a complete symbol database for every scripting environment. It does not guarantee that a script will compile or behave correctly in Second Life or another simulator. Always use the official compiler and the target runtime to verify scripts that matter.

@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, and `SEM045`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -172,6 +172,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM042` | Detection-context-only function is reachable from an incompatible event. | warning / lint | AST-only. Propagates known event contexts through direct user-function calls. `llDetectedGrab` and `llDetectedTouch*` are touch-only, `llDetectedLinkNumber` is restricted to touch/collision events, `llDetectedDamage` requires a damage event, and `llAdjustDamage` requires `on_damage`. Unknown extension events and unreferenced helpers are not guessed; parser errors, unreliable environments and graph-budget overflow suppress the rule. |
 | `SEM043` | Division or integer remainder has a statically known zero divisor. | warning / lint | AST-only. Checks `/`, `%`, `/=` and `%=` when operand types are valid and the divisor can be evaluated from literals, unshadowed numeric built-in constants, parentheses, zero-preserving numeric casts and side-effect-free constant arithmetic. Mutable variables and calls are never guessed; vector `%` is not treated as integer remainder. Parser errors, unreliable environments and work/depth budget exhaustion suppress the rule. |
 | `SEM044` | A populated named state has no transition path from `default`. | warning / lint | AST-only. Builds a bounded over-approximation from state-change statements in event handlers. Conditional and otherwise unreachable transitions count as possible edges; unknown targets, malformed/duplicate states, parser errors, unreliable environments and budget exhaustion are handled conservatively (4,096 states, 32,768 traversal units and 128 nested statement levels maximum). Empty states remain covered by SEM038. |
+| `SEM045` | An operator operand is incompatible or an increment target is not writable. | error / semantic | AST-only. Checks unary `-`, `!`, `~`, logical/bitwise/shift operators, and `++`/`--` on known variables. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. Built-in constants cannot be incremented or decremented. Unary plus is intentionally outside the rule. |
 
 ## Illustrative minimal examples
 
@@ -303,6 +304,19 @@ state abandoned { state_entry() { llOwnerSay("not reachable from default"); } }
 ```
 
 ```lsl
+// SEM045: known-invalid operator operand types
+default {
+    state_entry() {
+        float amount = 1.0;
+        string label = "bad";
+        integer invalid_not = !amount;
+        integer invalid_shift = 1 << label;
+        label++;
+    }
+}
+```
+
+```lsl
 // SEM003: wrong event parameter count
 default { touch_start() { } }
 ```
@@ -396,6 +410,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM042 propagates known event contexts through matched direct user-function calls. General `llDetected*` functions require a detection event; `llDetectedGrab` and `llDetectedTouch*` are touch-only; `llDetectedLinkNumber` is restricted to touch/collision events; `llDetectedDamage` is limited to `on_damage`/`final_damage`; and `llAdjustDamage` is `on_damage`-only. Unknown extension events contribute no guessed context, unreferenced functions are ignored, and the check fails closed for parser errors, unreliable environments or call-graph budget overflow.
 - SEM043 reports only when a valid numeric `/`, integer `%`, `/=`, or `%=` operation has a denominator that the bounded constant evaluator proves to be zero. It understands integer/float literals, unshadowed numeric built-in constants such as `FALSE`, parentheses, unary numeric operators, zero-preserving numeric casts and side-effect-free constant arithmetic. It does not evaluate mutable variables or function calls, and vector `%` remains a vector cross product rather than integer remainder. Any parser error, unreliable lexical/preprocessor environment or evaluator budget/depth exhaustion suppresses the rule.
 - SEM044 builds a conservative state-transition graph starting at `default` and warns on populated named states with no path from that root. Every state-change statement in a valid event body is treated as a possible edge, even when nested in a conditional or textually unreachable code; this favors false negatives over false positives. Transitions inside global functions are not used because those are separately diagnosed by SEM034/SEM035. Empty states are left to SEM038. The rule skips duplicate/malformed state sets, parser errors, unreliable environments and budget/depth exhaustion. This is structural reachability from `default`, not a model of a script restored from an inventory snapshot in a previously active state.
+- SEM045 validates only operator/type combinations with confirmed LSL constraints: unary `-` accepts integer/float/vector/rotation, `!` and `~` require integer, logical/bitwise/shift operators require two integers, and increment/decrement require a known integer/float variable. Unknown values are not guessed. Built-in constants are not writable. Unary plus is intentionally excluded. Any parser error, unreliable lexical/preprocessor environment or more than 65,536 expression sites suppresses the rule.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

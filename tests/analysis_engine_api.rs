@@ -785,3 +785,44 @@ fn identity_preparation_preserves_root_bytes_through_pipeline() {
     assert_identity_preparation(run.unit(file_index).unwrap(), source, &display);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn sem045_is_ast_only_and_does_not_change_legacy_or_compare_streams() {
+    let source = "default { state_entry() { float value; integer invalid = !value; } }";
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("operators.lsl", source).unwrap();
+    let unit = run.unit(index).unwrap();
+
+    let ast = unit
+        .analyze_with_engine(AnalysisEngine::Ast)
+        .expect("AST analysis should succeed");
+    assert!(
+        ast.diagnostics()
+            .iter()
+            .any(|item| item.diagnostic().code == "SEM045"),
+        "AST mode must emit SEM045"
+    );
+
+    let legacy = unit
+        .analyze_with_engine(AnalysisEngine::Legacy)
+        .expect("Legacy analysis should succeed");
+    assert!(
+        legacy
+            .diagnostics()
+            .iter()
+            .all(|item| item.diagnostic().code != "SEM045"),
+        "Legacy output must remain frozen"
+    );
+
+    let compare = unit
+        .analyze_with_engine(AnalysisEngine::Compare)
+        .expect("Compare analysis should succeed");
+    assert!(
+        compare
+            .diagnostics()
+            .iter()
+            .all(|item| item.diagnostic().code != "SEM045"),
+        "Compare display output must remain Legacy-only"
+    );
+    assert_eq!(compare.comparison().unwrap().by_rule.len(), 23);
+}

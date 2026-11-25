@@ -109,7 +109,7 @@ The AST engine is the default in v1.1.0. The previous Legacy engine remains avai
 **Also included:**
 - Standard LSL preprocessing and an opt-in Firestorm preprocessor profile.
 - Include directories, macro expansion, source locations, and related diagnostic locations.
-- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, and statically provable division-by-zero hazards (`SEM024`–`SEM044`).
+- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable division-by-zero hazards, and invalid operator operands (`SEM024`–`SEM045`).
 - Human-readable output and structured JSON diagnostics.
 - Configurable rule suppression and severity overrides.
 
