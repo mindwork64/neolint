@@ -61,7 +61,9 @@ signatures are unchanged.
   states, `SEM039` rejects elements with list type inside a list, and `SEM040`
   warns when list equality/inequality compares lengths rather than contents.
   `SEM041` warns on a bare plain assignment in an `if` condition; an extra pair
-  of parentheses marks the assignment as intentional.
+  of parentheses marks the assignment as intentional. `SEM042` warns when
+  detection-context functions can be reached from events that do not provide
+  the required detection data.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both

@@ -33,3 +33,4 @@ invalid_empty_states|invalid|invalid/empty_states.lsl|original|project-authored|
 invalid_nested_list_element|invalid|invalid/nested_list_element.lsl|original|project-authored|valid|SEM001:1:error,SEM024:2:warning,SEM039:1:error|1|none|A list cannot contain another list, including a list variable
 medium_list_comparisons|medium|medium/list_comparisons.lsl|original|project-authored|valid|SEM040:2:warning|0|none|List equality compares lengths rather than contents
 medium_if_assignment|medium|medium/if_assignment.lsl|original|project-authored|valid|SEM041:1:warning|0|none|Bare assignment in if condition is suspicious; an extra pair of parentheses marks intentional use
+medium_detected_context|medium|medium/detected_context.lsl|original|project-authored|valid|SEM042:2:warning|0|none|Detection-only calls reached from state_entry, directly and through a helper also used by touch_start

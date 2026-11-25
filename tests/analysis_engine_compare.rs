@@ -547,7 +547,8 @@ fn ast_only_codes_are_ignored_by_the_comparator() {
     assert_eq!(SEM_CODES.len(), 23);
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037",
+        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
+        "SEM042",
     ] {
         assert!(
             !SEM_CODES.contains(&code),
@@ -607,6 +608,23 @@ fn ast_only_codes_are_ignored_by_the_comparator() {
             severity: Severity::Warning,
             kind: DiagnosticKind::Lint,
             ..diagnostic("SEM037")
+        },
+        diagnostic("SEM038"),
+        diagnostic("SEM039"),
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM040")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM041")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM042")
         },
     ];
 
