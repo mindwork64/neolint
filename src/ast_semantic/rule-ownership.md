@@ -171,16 +171,23 @@ No SEM rule remains Legacy-only in the current matrix.
 - SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
   deduplicated edges, fail-closed skip on unsupported/partial graphs and
   suppression when the same function has SEM009/SEM010 findings.
-- Constant conditions use a bounded AST-only numeric evaluator. It supports
-  32-bit integer wrapping/division/shift rules, finite f32 arithmetic and
-  comparisons, canonical integer/float constants, integer-to-float casts,
-  mutable-shadow checks and integer logical operators when both operands
-  are known. LSL evaluates both operands of && and ||; no short-circuit is
-  assumed. Mutable values, calls, non-finite results, float-to-integer
-  conversions other than exact zero, and
-  unsupported mixed-operand operators remain unknown. `ForStatement::condition_missing`
-  preserves genuinely empty `for (;;)`, while `condition_malformed` marks a
-  non-empty parse failure as an unknown condition rather than an infinite loop.
+- Constant conditions use a bounded AST-only numeric evaluator and a local
+  scalar data-flow environment. It supports 32-bit integer wrapping/division/shift
+  rules, finite f32 arithmetic and comparisons, canonical integer/float constants,
+  integer-to-float casts and integer logical operators when both operands are
+  known. Definitely assigned local `integer`/`float` values propagate through
+  straight-line code; after `if/else`, only values identical across every
+  reachable fallthrough branch survive. Reassignments, increments and compound
+  assignments update or invalidate facts. Mutable globals/parameters and calls
+  are not treated as constant; loops discard incoming facts rather than assume
+  a first-iteration value remains stable. Bodies with jumps/labels disable local
+  propagation until non-local incoming states can be merged. LSL evaluates both
+  operands of && and ||; no short-circuit is assumed. Non-finite results, unsafe
+  float-to-integer conversions and unsupported mixed-operand operators remain
+  unknown. The local fact environment is capped at 4,096 entries per code body;
+  exceeding the cap disables propagation for that body. `ForStatement::condition_missing`
+  preserves genuinely empty `for (;;)`, while `condition_malformed` remains an
+  unknown condition, not an infinite loop.
 - This is a deliberate post-migration AST enhancement. Legacy remains frozen;
   Compare may therefore report intentional SEM011 differences when the AST
   proves a floating-point condition that the Legacy integer evaluator leaves
@@ -299,7 +306,9 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
 - SEM037 uses the shared bounded CFG to report the first unreachable
   non-empty statement in each straight-line sequence. It covers nested blocks,
   conditional branches, loop bodies, switch arms and statements following
-  guaranteed termination.
+  guaranteed termination. The CFG condition evaluator also sees definitely
+  assigned local numeric values; branch joins retain only agreeing values from
+  reachable fallthrough paths.
 - The CFG prunes edges for statically known integer/float conditions, models
   zero-iteration and non-terminating for/while/do-while paths, resolves valid
   jump edges, and models Firestorm switch dispatch, fallthrough, default and
@@ -307,9 +316,12 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   reachable exit; a reachable break or unmatched path keeps the exit reachable.
 - A state change to a different, unique known state terminates an event body.
   Same-state/unknown targets and state changes in global functions are not
-  terminal. Invalid jump scopes, duplicate/missing labels, unvalidated jumps
-  in unknown extension events, parser errors, error nodes, unclosed blocks and
-  graph/work/depth budget exhaustion suppress SEM037 for the affected body.
+  terminal. Loop-carried local values are not propagated; mutable globals and
+  parameters stay unknown, and bodies containing jump/label control flow disable
+  local-value propagation. Invalid jump scopes, duplicate/missing labels,
+  unvalidated jumps in unknown extension events, parser errors, error nodes,
+  unclosed blocks and graph/work/depth budget exhaustion suppress SEM037 for the
+  affected body.
 - SEM036 retains its earlier conservative suppression in bodies containing
   jumps/labels. Both diagnostics are AST-only, outside SEM001–SEM023 Compare,
   and do not alter Legacy output.

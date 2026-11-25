@@ -2201,7 +2201,7 @@ the guard runs before the allocation or traversal it bounds.
 | AST recursion depth | `MAX_AST_RECURSION_DEPTH` | 256 | Parser entry for statements and expressions (`src/ast/parser.rs:460`, `:1114`) | Per unit | `AST001`, deepest construct skipped | `AST001` cases in `tests/ast_parser.rs`, `tests/ast_firestorm.rs` |
 | AST parser worker stack | `PARSER_STACK_BYTES` | 16 MiB | Dedicated parser thread (`src/ast/parser.rs:2695`) | Per parse | `AST002` if the worker cannot start | `worker_failure_returns_empty_ast_and_one_safe_diagnostic` |
 | AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` growth and traversal (`src/ast_semantic/flow.rs:19-22`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
-| AST constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` | 128 / 64 | `evaluate_integer` budget (`src/ast_semantic/flow.rs:23-24`) | Per expression | Evaluation yields "not constant"; dependent rule is suppressed | Phase 6C/6D suites |
+| AST flow constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` / `MAX_CONSTANT_FACTS` | 128 / 64 / 4,096 | Bounded expression evaluator and `insert_constant_fact` (`src/ast_semantic/flow.rs`) | Per expression / code body | Expression becomes unknown; local propagation is disabled for the body if the fact cap is exceeded | Phase 6C/6D suites |
 | Type inference depth | `MAX_TYPE_DEPTH` | 256 | `infer_expression_type` (`src/ast_semantic/types.rs:11`, `:86`) | Per expression | Type inference yields unknown; dependent rules are suppressed | Defensive: the parser cap fires first (see below) |
 | Call-graph analysis | `MAX_CALL_GRAPH_NODES` / `MAX_CALL_GRAPH_EDGES` / `MAX_CALL_GRAPH_WORK` | 4,096 / 8,192 / 16,384 | Graph construction and reachability (`src/ast_semantic/callgraph.rs:24-28`) | Per unit | Whole graph suppressed; `SEM026` emits nothing | `call_graph_budget_overflow_suppresses_sem026`, `production_edge_budget_overflow_suppresses_sem026`, `production_work_budget_overflow_suppresses_sem026` |
 | Legacy control-flow analysis | `MAX_CFG_TOKENS_PER_FUNCTION` / `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` | 16,384 / 4,096 / 8,192 / 128 | Legacy flow scanner (`src/semantic.rs:1684-1687`) | Per function | Flow rule is suppressed | Legacy semantic tests |
@@ -3286,13 +3286,19 @@ operands. This lets if, for, while and do/while edges be pruned when a condition
 is provably constant and every operand is known and side-effect-free. Float
 operands to integer-only logical/unary operators remain unknown.
 
-The evaluator still fails closed for mutable variables, user calls, malformed
-expressions, non-finite arithmetic, unsupported mixed numeric operators,
-unsafe float-to-integer casts and budget exhaustion. It does not perform
-interprocedural constant propagation or infer values from mutable initializers.
-Legacy remains frozen, so Compare can show an intentional SEM011 difference
-for a condition the extended AST evaluator proves but the Legacy integer-only
-constant evaluator cannot. LSL's eager logical evaluation is documented in
+The evaluator now also uses bounded local data-flow facts for numeric scalar
+locals. Values from local initializers and simple assignments propagate through
+straight-line code. At an `if/else` join, only values that agree across all
+reachable branches that fall through remain known; a branch that returns does
+not constrain the surviving branch. Reassignments, increments and compound
+assignments update or invalidate facts. Mutable globals and parameters, user
+calls, malformed expressions, non-finite arithmetic, unsupported mixed numeric
+operators, unsafe float-to-integer casts and budget exhaustion remain unknown.
+Loop-carried values are not propagated, and bodies containing `jump`/label
+control flow disable this local propagation until their incoming environments
+can be merged safely. There is no interprocedural propagation. Legacy remains
+frozen, so Compare can show intentional SEM011 differences for paths proved by
+the extended AST analysis but not by Legacy. LSL's eager logical evaluation is documented in
 [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators).
 
 #### Phase 6D implementation record
@@ -4169,7 +4175,13 @@ function/event entry. The rule reports the first unreachable non-empty statement
 in each straight-line sequence, including within nested blocks, branches, loop
 bodies and switch arms.
 
-The same graph models statically provable integer/float conditions, zero- and
+The same graph models statically provable integer/float conditions, including
+definitely known local numeric values from declarations and assignments.
+Straight-line local values are propagated; at `if/else` joins, only values that
+agree across all reachable fallthrough branches survive, and a terminating
+branch does not constrain the surviving path. Mutable globals/parameters remain
+unknown. Loop-carried values are not propagated, and bodies with `jump`/label
+control flow disable local-value propagation. The CFG also models zero- and
 many-iteration loop paths, valid jump edges and Firestorm switch dispatch,
 fallthrough, default and break. It can prove a branch body unreachable when its
 condition is constant, code after a loop unreachable when no exit edge exists,

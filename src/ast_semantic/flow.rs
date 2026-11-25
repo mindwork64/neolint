@@ -3,14 +3,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    Ast, BinaryOperator, Block, Expression, ExpressionKind, ForStatement, IfStatement,
-    ReturnStatement, Statement, StatementKind, TopLevel, TypeKind, UnaryOperator,
+    AssignmentOperator, Ast, BinaryOperator, Block, Expression, ExpressionKind, ForStatement,
+    IfStatement, ReturnStatement, Statement, StatementKind, TopLevel, TypeKind, UnaryOperator,
 };
 use crate::builtins;
 use crate::diagnostic::{Diagnostic, Span};
 
 use super::rules::semantic_error;
-use super::scopes::{ScopeId, ScopeTree};
+use super::scopes::{ScopeId, ScopeTree, SymbolKind};
 use super::types::{
     can_implicitly_convert, expression_first_token_span, infer_expression_type,
     UserFunctionSignature,
@@ -22,6 +22,10 @@ const MAX_CFG_DEPTH: usize = 128;
 const MAX_CFG_WORK: usize = 16_384;
 const MAX_CONSTANT_NODES: usize = 128;
 const MAX_CONSTANT_DEPTH: usize = 64;
+const MAX_CONSTANT_FACTS: usize = 4_096;
+const CONSTANT_PROPAGATION_DISABLED: usize = usize::MAX;
+
+type ConstantEnvironment = HashMap<usize, ConstantNumber>;
 
 /// Jump diagnostics and code scopes where an invalid jump graph must be ignored.
 pub(crate) struct JumpReport {
@@ -486,7 +490,24 @@ pub(crate) fn analyze_body(
         work: 0,
         failed: false,
     };
-    let fragment = build_statements(&body.statements, scope, scopes, &mut graph, None, 0)?;
+    // Functions with non-local jumps are deliberately analyzed without local
+    // value propagation: a jump may enter a label with values from a path that
+    // the structured builder cannot represent as one environment.
+    let mut constants = ConstantEnvironment::new();
+    if contains_nonlocal_control_transfer(&body.statements) {
+        // A label can be entered from a different source path even when its
+        // matching jump occurs later. Keep the entire code scope conservative.
+        constants.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+    }
+    let fragment = build_statements(
+        &body.statements,
+        scope,
+        scopes,
+        &mut graph,
+        None,
+        0,
+        &mut constants,
+    )?;
     let exit = graph.node()?;
     if !connect_exits(&mut graph, &fragment.exits, exit) {
         return None;
@@ -520,6 +541,7 @@ fn build_statements(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
     if depth > MAX_CFG_DEPTH {
         graph.failed = true;
@@ -535,7 +557,20 @@ fn build_statements(
     let mut entry = None;
     let mut exits = Vec::new();
     for statement in statements {
-        let fragment = build_statement(statement, scope, scopes, graph, break_target, depth + 1)?;
+        // Once the preceding fragment has no ordinary exit, this statement is
+        // unreachable along structured fallthrough. Still build its CFG nodes
+        // for diagnostics, but never let its assignments leak into a live path.
+        let has_live_fallthrough = entry.is_none() || !exits.is_empty();
+        let mut next_constants = constants.clone();
+        let fragment = build_statement(
+            statement,
+            scope,
+            scopes,
+            graph,
+            break_target,
+            depth + 1,
+            &mut next_constants,
+        )?;
         if entry.is_some() {
             if !connect_exits(graph, &exits, fragment.entry) {
                 return None;
@@ -544,6 +579,9 @@ fn build_statements(
             entry = Some(fragment.entry);
         }
         exits = fragment.exits;
+        if has_live_fallthrough {
+            *constants = next_constants;
+        }
     }
     Some(Fragment {
         entry: entry?,
@@ -558,8 +596,17 @@ fn build_statement(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
-    let fragment = build_statement_inner(statement, scope, scopes, graph, break_target, depth)?;
+    let fragment = build_statement_inner(
+        statement,
+        scope,
+        scopes,
+        graph,
+        break_target,
+        depth,
+        constants,
+    )?;
     let key = (statement.span.start, statement.span.end);
     if graph
         .statement_entries
@@ -579,6 +626,7 @@ fn build_statement_inner(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
     if depth > MAX_CFG_DEPTH {
         graph.failed = true;
@@ -592,18 +640,46 @@ fn build_statement_inner(
     match &statement.kind {
         StatementKind::Block(block) => {
             let child = scopes.scope_for_block(block).unwrap_or(scope);
-            build_statements(&block.statements, child, scopes, graph, break_target, depth)
+            build_statements(
+                &block.statements,
+                child,
+                scopes,
+                graph,
+                break_target,
+                depth,
+                constants,
+            )
         }
-        StatementKind::If(if_statement) => {
-            build_if(if_statement, scope, scopes, graph, break_target, depth)
-        }
-        StatementKind::For(for_statement) => {
-            build_for(for_statement, scope, scopes, graph, break_target, depth)
-        }
-        StatementKind::While(while_statement) => {
-            build_while(while_statement, scope, scopes, graph, break_target, depth)
-        }
+        StatementKind::If(if_statement) => build_if(
+            if_statement,
+            scope,
+            scopes,
+            graph,
+            break_target,
+            depth,
+            constants,
+        ),
+        StatementKind::For(for_statement) => build_for(
+            for_statement,
+            scope,
+            scopes,
+            graph,
+            break_target,
+            depth,
+            constants,
+        ),
+        StatementKind::While(while_statement) => build_while(
+            while_statement,
+            scope,
+            scopes,
+            graph,
+            break_target,
+            depth,
+            constants,
+        ),
         StatementKind::DoWhile(do_while) => {
+            clear_constant_facts(constants);
+            let mut body_constants = empty_constant_environment_like(constants);
             let body = build_statement(
                 &do_while.body,
                 scope,
@@ -611,16 +687,23 @@ fn build_statement_inner(
                 graph,
                 break_target,
                 depth + 1,
+                &mut body_constants,
             )?;
             let condition = graph.node()?;
             if !connect_exits(graph, &body.exits, condition) {
                 return None;
             }
-            let (may_repeat, may_exit) =
-                condition_possibilities(&do_while.condition, false, scope, scopes)?;
+            let (may_repeat, may_exit) = condition_possibilities(
+                &do_while.condition,
+                false,
+                scope,
+                scopes,
+                &empty_constant_environment_like(constants),
+            )?;
             if may_repeat && !graph.edge(condition, body.entry) {
                 return None;
             }
+            clear_constant_facts(constants);
             Some(Fragment {
                 entry: body.entry,
                 exits: if may_exit {
@@ -637,39 +720,8 @@ fn build_statement_inner(
                 exits: Vec::new(),
             })
         }
-        StatementKind::Jump(jump) => {
-            let node = graph.node()?;
-            graph.pending_jumps.push((node, jump.label.clone()));
-            Some(Fragment {
-                entry: node,
-                exits: Vec::new(),
-            })
-        }
-        StatementKind::Label(label) => {
-            let node = graph.node()?;
-            if graph.labels.insert(label.name.clone(), node).is_some() {
-                graph.failed = true;
-                return None;
-            }
-            Some(Fragment {
-                entry: node,
-                exits: vec![node],
-            })
-        }
-        StatementKind::Switch(switch) => build_switch(switch, scope, scopes, graph, depth),
-        StatementKind::Break(_) => {
-            let node = graph.node()?;
-            let Some(target) = break_target else {
-                graph.failed = true;
-                return None;
-            };
-            if !graph.edge(node, target) {
-                return None;
-            }
-            Some(Fragment {
-                entry: node,
-                exits: Vec::new(),
-            })
+        StatementKind::Switch(switch) => {
+            build_switch(switch, scope, scopes, graph, depth, constants)
         }
         StatementKind::Error(_) => {
             graph.failed = true;
@@ -686,10 +738,54 @@ fn build_statement_inner(
                 exits: Vec::new(),
             })
         }
-        StatementKind::Empty
-        | StatementKind::Local(_)
-        | StatementKind::StateChange(_)
-        | StatementKind::Expression(_) => {
+        StatementKind::Local(local) => {
+            apply_local_declaration(local, scope, scopes, constants);
+            let node = graph.node()?;
+            Some(Fragment {
+                entry: node,
+                exits: vec![node],
+            })
+        }
+        StatementKind::Expression(expression) => {
+            apply_expression_effects(&expression.expression, scope, scopes, constants);
+            let node = graph.node()?;
+            Some(Fragment {
+                entry: node,
+                exits: vec![node],
+            })
+        }
+        StatementKind::Jump(_) | StatementKind::Label(_) | StatementKind::Break(_) => {
+            clear_constant_facts(constants);
+            let node = graph.node()?;
+            match &statement.kind {
+                StatementKind::Jump(jump) => graph.pending_jumps.push((node, jump.label.clone())),
+                StatementKind::Label(label) => {
+                    if graph.labels.insert(label.name.clone(), node).is_some() {
+                        graph.failed = true;
+                        return None;
+                    }
+                }
+                StatementKind::Break(_) => {
+                    let Some(target) = break_target else {
+                        graph.failed = true;
+                        return None;
+                    };
+                    if !graph.edge(node, target) {
+                        return None;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            Some(Fragment {
+                entry: node,
+                exits: if matches!(&statement.kind, StatementKind::Label(_)) {
+                    vec![node]
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+        StatementKind::Empty | StatementKind::StateChange(_) => {
             let node = graph.node()?;
             Some(Fragment {
                 entry: node,
@@ -706,10 +802,17 @@ fn build_if(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
     let condition = graph.node()?;
     let (may_true, may_false) =
-        condition_possibilities(&if_statement.condition, false, scope, scopes)?;
+        condition_possibilities(&if_statement.condition, false, scope, scopes, constants)?;
+    // Conditions are evaluated before entering either branch. Side effects
+    // invalidate or update the environment shared by both possible paths.
+    apply_expression_effects(&if_statement.condition, scope, scopes, constants);
+    let branch_input = constants.clone();
+
+    let mut then_constants = branch_input.clone();
     let then_branch = build_statement(
         &if_statement.then_branch,
         scope,
@@ -717,26 +820,45 @@ fn build_if(
         graph,
         break_target,
         depth + 1,
+        &mut then_constants,
     )?;
     let mut exits = Vec::new();
+    let mut live_environments = Vec::new();
     if may_true {
         if !graph.edge(condition, then_branch.entry) {
             return None;
         }
+        if !then_branch.exits.is_empty() {
+            live_environments.push(then_constants);
+        }
         exits.extend(then_branch.exits);
     }
     if let Some(else_branch) = &if_statement.else_branch {
-        let else_fragment =
-            build_statement(else_branch, scope, scopes, graph, break_target, depth + 1)?;
+        let mut else_constants = branch_input.clone();
+        let else_fragment = build_statement(
+            else_branch,
+            scope,
+            scopes,
+            graph,
+            break_target,
+            depth + 1,
+            &mut else_constants,
+        )?;
         if may_false {
             if !graph.edge(condition, else_fragment.entry) {
                 return None;
+            }
+            if !else_fragment.exits.is_empty() {
+                live_environments.push(else_constants);
             }
             exits.extend(else_fragment.exits);
         }
     } else if may_false {
         exits.push(condition);
+        live_environments.push(branch_input);
     }
+
+    *constants = merge_constant_environments(&live_environments);
     Some(Fragment {
         entry: condition,
         exits,
@@ -750,15 +872,28 @@ fn build_for(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
+    // A loop condition may be evaluated repeatedly after body/increment writes.
+    // Until loop-carried data-flow reaches a fixed point, do not use incoming
+    // local values to prune either edge.
+    clear_constant_facts(constants);
+    let mut loop_constants = empty_constant_environment_like(constants);
     let condition = graph.node()?;
     let (may_enter, may_exit) = if for_statement.condition_missing {
         (true, false)
     } else if for_statement.condition_malformed {
         (true, true)
     } else {
-        condition_possibilities(&for_statement.condition, false, scope, scopes)?
+        condition_possibilities(
+            &for_statement.condition,
+            false,
+            scope,
+            scopes,
+            &loop_constants,
+        )?
     };
+    apply_expression_effects(&for_statement.condition, scope, scopes, &mut loop_constants);
     let body = build_statement(
         &for_statement.body,
         scope,
@@ -766,6 +901,7 @@ fn build_for(
         graph,
         break_target,
         depth + 1,
+        &mut loop_constants,
     )?;
     if may_enter && !graph.edge(condition, body.entry) {
         return None;
@@ -773,6 +909,7 @@ fn build_for(
     if !connect_exits(graph, &body.exits, condition) {
         return None;
     }
+    clear_constant_facts(constants);
     Some(Fragment {
         entry: condition,
         exits: if may_exit {
@@ -790,10 +927,24 @@ fn build_while(
     graph: &mut FlowGraph,
     break_target: Option<usize>,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
+    clear_constant_facts(constants);
+    let mut loop_constants = empty_constant_environment_like(constants);
     let condition = graph.node()?;
-    let (may_enter, may_exit) =
-        condition_possibilities(&while_statement.condition, false, scope, scopes)?;
+    let (may_enter, may_exit) = condition_possibilities(
+        &while_statement.condition,
+        false,
+        scope,
+        scopes,
+        &loop_constants,
+    )?;
+    apply_expression_effects(
+        &while_statement.condition,
+        scope,
+        scopes,
+        &mut loop_constants,
+    );
     let body = build_statement(
         &while_statement.body,
         scope,
@@ -801,6 +952,7 @@ fn build_while(
         graph,
         break_target,
         depth + 1,
+        &mut loop_constants,
     )?;
     if may_enter && !graph.edge(condition, body.entry) {
         return None;
@@ -808,6 +960,7 @@ fn build_while(
     if !connect_exits(graph, &body.exits, condition) {
         return None;
     }
+    clear_constant_facts(constants);
     Some(Fragment {
         entry: condition,
         exits: if may_exit {
@@ -824,7 +977,9 @@ fn build_switch(
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
     depth: usize,
+    constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
+    clear_constant_facts(constants);
     if depth > MAX_CFG_DEPTH {
         graph.failed = true;
         return None;
@@ -842,6 +997,7 @@ fn build_switch(
             return None;
         }
         has_default |= matches!(arm.label, crate::ast::SwitchLabel::Default);
+        let mut arm_constants = empty_constant_environment_like(constants);
         arms.push(build_statements(
             &arm.statements,
             switch_scope,
@@ -849,6 +1005,7 @@ fn build_switch(
             graph,
             Some(switch_exit),
             depth + 1,
+            &mut arm_constants,
         )?);
     }
 
@@ -882,6 +1039,7 @@ fn build_switch(
     // Keep the structural switch exit even when it is currently unreachable.
     // Deferred `jump` edges are resolved after the enclosing function is built
     // and may make the exit reachable later.
+    clear_constant_facts(constants);
     Some(Fragment {
         entry: dispatch,
         exits: vec![switch_exit],
@@ -895,6 +1053,35 @@ fn connect_exits(graph: &mut FlowGraph, exits: &[usize], target: usize) -> bool 
         }
     }
     true
+}
+
+fn contains_side_effects(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Assignment(_) | ExpressionKind::Increment(_) => true,
+        ExpressionKind::Parenthesized(inner)
+        | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+        | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+            contains_side_effects(inner)
+        }
+        ExpressionKind::Binary(binary) => {
+            contains_side_effects(&binary.left) || contains_side_effects(&binary.right)
+        }
+        ExpressionKind::Call(call) => {
+            contains_side_effects(&call.callee) || call.arguments.iter().any(contains_side_effects)
+        }
+        ExpressionKind::Component(component) => contains_side_effects(&component.base),
+        ExpressionKind::LazyIndex(lazy) => {
+            contains_side_effects(&lazy.base) || lazy.indices.iter().any(contains_side_effects)
+        }
+        ExpressionKind::List(list) => list.elements.iter().any(contains_side_effects),
+        ExpressionKind::Vector(vector) => vector.components.iter().any(contains_side_effects),
+        ExpressionKind::Rotation(rotation) => rotation.components.iter().any(contains_side_effects),
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Integer(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::String(_)
+        | ExpressionKind::Error(_) => false,
+    }
 }
 
 fn contains_error(expression: &Expression) -> bool {
@@ -927,7 +1114,255 @@ fn contains_error(expression: &Expression) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+fn contains_nonlocal_control_transfer(statements: &[Statement]) -> bool {
+    let mut pending: Vec<&Statement> = statements.iter().collect();
+    while let Some(statement) = pending.pop() {
+        match &statement.kind {
+            StatementKind::Jump(_) | StatementKind::Label(_) => return true,
+            StatementKind::Return(return_statement)
+                if !return_statement.recovered_labels.is_empty()
+                    || !return_statement.recovered_jumps.is_empty() =>
+            {
+                return true;
+            }
+            StatementKind::Block(block) => pending.extend(&block.statements),
+            StatementKind::If(if_statement) => {
+                pending.push(&if_statement.then_branch);
+                if let Some(branch) = &if_statement.else_branch {
+                    pending.push(branch);
+                }
+            }
+            StatementKind::For(for_statement) => pending.push(&for_statement.body),
+            StatementKind::While(while_statement) => pending.push(&while_statement.body),
+            StatementKind::DoWhile(do_while) => pending.push(&do_while.body),
+            StatementKind::Switch(switch) => {
+                for arm in &switch.arms {
+                    pending.extend(&arm.statements);
+                }
+            }
+            StatementKind::Empty
+            | StatementKind::Local(_)
+            | StatementKind::Return(_)
+            | StatementKind::StateChange(_)
+            | StatementKind::Expression(_)
+            | StatementKind::Break(_)
+            | StatementKind::Error(_) => {}
+        }
+    }
+    false
+}
+
+fn is_constant_propagation_disabled(constants: &ConstantEnvironment) -> bool {
+    constants.contains_key(&CONSTANT_PROPAGATION_DISABLED)
+}
+
+fn empty_constant_environment_like(source: &ConstantEnvironment) -> ConstantEnvironment {
+    let mut constants = ConstantEnvironment::new();
+    if is_constant_propagation_disabled(source) {
+        constants.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+    }
+    constants
+}
+
+fn clear_constant_facts(constants: &mut ConstantEnvironment) {
+    let disabled = is_constant_propagation_disabled(constants);
+    constants.clear();
+    if disabled {
+        constants.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+    }
+}
+
+fn insert_constant_fact(constants: &mut ConstantEnvironment, key: usize, value: ConstantNumber) {
+    if is_constant_propagation_disabled(constants) {
+        return;
+    }
+    if constants.contains_key(&key) {
+        constants.insert(key, value);
+    } else if constants.len() >= MAX_CONSTANT_FACTS {
+        // Keep memory/work bounded and fail closed for the rest of this body.
+        clear_constant_facts(constants);
+        constants.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+    } else {
+        constants.insert(key, value);
+    }
+}
+
+fn merge_constant_environments(environments: &[ConstantEnvironment]) -> ConstantEnvironment {
+    if let Some(disabled) = environments
+        .iter()
+        .find(|environment| is_constant_propagation_disabled(environment))
+    {
+        return empty_constant_environment_like(disabled);
+    }
+    let Some(first) = environments.first() else {
+        return ConstantEnvironment::new();
+    };
+    let mut merged = first.clone();
+    merged.retain(|key, value| {
+        environments[1..]
+            .iter()
+            .all(|environment| environment.get(key) == Some(value))
+    });
+    merged
+}
+
+fn local_numeric_binding(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+) -> Option<(usize, &'static str)> {
+    let mut target = expression;
+    while let ExpressionKind::Parenthesized(inner) = &target.kind {
+        target = inner;
+    }
+    let ExpressionKind::Identifier(identifier) = &target.kind else {
+        return None;
+    };
+    let symbol = scopes.lookup_value_at(scope, &identifier.name, identifier.span.start)?;
+    if symbol.kind != SymbolKind::Local {
+        return None;
+    }
+    match symbol.type_name.as_deref()? {
+        "integer" => Some((symbol.span.start, "integer")),
+        "float" => Some((symbol.span.start, "float")),
+        _ => None,
+    }
+}
+
+fn constant_matches_type(value: ConstantNumber, type_name: &str) -> bool {
+    matches!(
+        (value, type_name),
+        (ConstantNumber::Integer(_), "integer") | (ConstantNumber::Float(_), "float")
+    )
+}
+
+fn apply_local_declaration(
+    local: &crate::ast::LocalVariableDeclaration,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &mut ConstantEnvironment,
+) {
+    if is_constant_propagation_disabled(constants) {
+        return;
+    }
+    for declarator in &local.declarators {
+        let binding = scopes
+            .lookup_value_at(scope, &declarator.name, declarator.name_span.start)
+            .filter(|symbol| symbol.kind == SymbolKind::Local)
+            .map(|symbol| (symbol.span.start, symbol.type_name.as_deref().unwrap_or("")));
+        if let Some((key, _)) = binding {
+            // A declaration without an initializer is not definitely known.
+            constants.remove(&key);
+        }
+        if declarator.initializer_error.is_some() {
+            clear_constant_facts(constants);
+            if let Some((key, _)) = binding {
+                constants.remove(&key);
+            }
+            continue;
+        }
+        let Some(initializer) = &declarator.initializer else {
+            continue;
+        };
+        // Evaluate the initializer against the values available before this
+        // declarator is written; a self-reference must not see stale data.
+        let candidate = {
+            let mut budget = MAX_CONSTANT_NODES;
+            evaluate_constant_number(initializer, scope, scopes, constants, 0, &mut budget)
+        };
+        apply_expression_effects(initializer, scope, scopes, constants);
+        if let Some((key, type_name)) = binding {
+            if let Some(value) = candidate.filter(|value| constant_matches_type(*value, type_name))
+            {
+                insert_constant_fact(constants, key, value);
+            } else {
+                constants.remove(&key);
+            }
+        }
+    }
+}
+
+fn apply_expression_effects(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &mut ConstantEnvironment,
+) {
+    if is_constant_propagation_disabled(constants) {
+        return;
+    }
+    if contains_error(expression) {
+        // Recovered expressions can retain only part of their original side
+        // effects. Do not carry facts past a syntactically damaged expression.
+        clear_constant_facts(constants);
+        return;
+    }
+    match &expression.kind {
+        ExpressionKind::Assignment(assignment) => {
+            let binding = local_numeric_binding(&assignment.target, scope, scopes);
+            // For `x = x + 1`, read the old value before replacing it. The
+            // constant evaluator rejects RHS expressions with their own side
+            // effects, so this candidate cannot hide a nested write.
+            let candidate = if assignment.operator == AssignmentOperator::Assign {
+                let mut budget = MAX_CONSTANT_NODES;
+                evaluate_constant_number(
+                    &assignment.value,
+                    scope,
+                    scopes,
+                    constants,
+                    0,
+                    &mut budget,
+                )
+            } else {
+                None
+            };
+            if binding.is_none() {
+                apply_expression_effects(&assignment.target, scope, scopes, constants);
+            }
+            apply_expression_effects(&assignment.value, scope, scopes, constants);
+            if let Some((key, type_name)) = binding {
+                constants.remove(&key);
+                if let Some(value) =
+                    candidate.filter(|value| constant_matches_type(*value, type_name))
+                {
+                    insert_constant_fact(constants, key, value);
+                }
+            }
+        }
+        ExpressionKind::Increment(increment) => {
+            if let Some((key, _)) = local_numeric_binding(&increment.operand, scope, scopes) {
+                constants.remove(&key);
+            } else {
+                apply_expression_effects(&increment.operand, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::Parenthesized(inner)
+        | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+        | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+            apply_expression_effects(inner, scope, scopes, constants);
+        }
+        ExpressionKind::Binary(_)
+        | ExpressionKind::Call(_)
+        | ExpressionKind::Component(_)
+        | ExpressionKind::LazyIndex(_)
+        | ExpressionKind::List(_)
+        | ExpressionKind::Vector(_)
+        | ExpressionKind::Rotation(_) => {
+            if contains_side_effects(expression) {
+                // Operand/argument evaluation order is not assumed when a
+                // compound expression contains multiple writes.
+                clear_constant_facts(constants);
+            }
+        }
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Integer(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::String(_)
+        | ExpressionKind::Error(_) => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ConstantNumber {
     Integer(i32),
     Float(f32),
@@ -954,6 +1389,7 @@ fn condition_possibilities(
     empty_is_true: bool,
     scope: ScopeId,
     scopes: &ScopeTree,
+    constants: &ConstantEnvironment,
 ) -> Option<(bool, bool)> {
     if empty_is_true {
         return Some((true, false));
@@ -963,7 +1399,9 @@ fn condition_possibilities(
     }
 
     let mut budget = MAX_CONSTANT_NODES;
-    let Some(value) = evaluate_constant_number(expression, scope, scopes, 0, &mut budget) else {
+    let Some(value) =
+        evaluate_constant_number(expression, scope, scopes, constants, 0, &mut budget)
+    else {
         // Unknown values deliberately preserve both paths. In particular, a
         // mutable local/global is never treated as a constant merely because
         // its initializer happens to be a literal.
@@ -977,6 +1415,7 @@ fn evaluate_constant_number(
     expression: &Expression,
     scope: ScopeId,
     scopes: &ScopeTree,
+    constants: &ConstantEnvironment,
     depth: usize,
     budget: &mut usize,
 ) -> Option<ConstantNumber> {
@@ -987,7 +1426,7 @@ fn evaluate_constant_number(
 
     match &expression.kind {
         ExpressionKind::Parenthesized(inner) => {
-            evaluate_constant_number(inner, scope, scopes, depth + 1, budget)
+            evaluate_constant_number(inner, scope, scopes, constants, depth + 1, budget)
         }
         ExpressionKind::Integer(literal) => {
             parse_integer_text(&literal.text).map(ConstantNumber::Integer)
@@ -999,10 +1438,16 @@ fn evaluate_constant_number(
             .filter(|value| value.is_finite())
             .map(ConstantNumber::Float),
         ExpressionKind::Identifier(identifier) => {
-            if scopes
-                .lookup_value_at(scope, &identifier.name, identifier.span.start)
-                .is_some()
+            if let Some(symbol) =
+                scopes.lookup_value_at(scope, &identifier.name, identifier.span.start)
             {
+                if symbol.kind == SymbolKind::Local
+                    && matches!(symbol.type_name.as_deref(), Some("integer" | "float"))
+                {
+                    return constants.get(&symbol.span.start).copied();
+                }
+                // Parameters, globals and non-numeric locals are mutable and
+                // never become constants merely from their declaration.
                 return None;
             }
             let constant = builtins::definitions()
@@ -1020,7 +1465,14 @@ fn evaluate_constant_number(
             }
         }
         ExpressionKind::Unary(unary) => {
-            let value = evaluate_constant_number(&unary.operand, scope, scopes, depth + 1, budget)?;
+            let value = evaluate_constant_number(
+                &unary.operand,
+                scope,
+                scopes,
+                constants,
+                depth + 1,
+                budget,
+            )?;
             match (unary.operator, value) {
                 (UnaryOperator::Plus, value) => Some(value),
                 (UnaryOperator::Minus, ConstantNumber::Integer(value)) => {
@@ -1044,8 +1496,22 @@ fn evaluate_constant_number(
             // LSL evaluates both operands of && and || (there is no
             // short-circuiting). Both values must therefore be statically
             // known before the logical result can be folded.
-            let left = evaluate_constant_number(&binary.left, scope, scopes, depth + 1, budget)?;
-            let right = evaluate_constant_number(&binary.right, scope, scopes, depth + 1, budget)?;
+            let left = evaluate_constant_number(
+                &binary.left,
+                scope,
+                scopes,
+                constants,
+                depth + 1,
+                budget,
+            )?;
+            let right = evaluate_constant_number(
+                &binary.right,
+                scope,
+                scopes,
+                constants,
+                depth + 1,
+                budget,
+            )?;
             if matches!(
                 binary.operator,
                 BinaryOperator::AndAnd | BinaryOperator::OrOr
@@ -1063,7 +1529,14 @@ fn evaluate_constant_number(
             evaluate_constant_binary(binary.operator, left, right)
         }
         ExpressionKind::Cast(cast) => {
-            let value = evaluate_constant_number(&cast.operand, scope, scopes, depth + 1, budget)?;
+            let value = evaluate_constant_number(
+                &cast.operand,
+                scope,
+                scopes,
+                constants,
+                depth + 1,
+                budget,
+            )?;
             match (cast.ty.kind, value) {
                 (TypeKind::Integer, ConstantNumber::Integer(value)) => {
                     Some(ConstantNumber::Integer(value))
@@ -1226,6 +1699,34 @@ mod limit_parity_tests {
 }
 
 #[cfg(test)]
+mod constant_environment_tests {
+    use std::collections::HashMap;
+
+    use super::{
+        insert_constant_fact, is_constant_propagation_disabled, ConstantEnvironment,
+        ConstantNumber, MAX_CONSTANT_FACTS,
+    };
+
+    #[test]
+    fn local_fact_budget_disables_the_environment_without_partial_facts() {
+        let mut constants: ConstantEnvironment = HashMap::new();
+        for key in 0..MAX_CONSTANT_FACTS {
+            insert_constant_fact(&mut constants, key, ConstantNumber::Integer(key as i32));
+        }
+        assert_eq!(constants.len(), MAX_CONSTANT_FACTS);
+        assert!(!is_constant_propagation_disabled(&constants));
+
+        insert_constant_fact(
+            &mut constants,
+            MAX_CONSTANT_FACTS,
+            ConstantNumber::Integer(1),
+        );
+        assert!(is_constant_propagation_disabled(&constants));
+        assert_eq!(constants.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod constant_condition_tests {
     use crate::ast::{parse_ast, parse_ast_with_options, AstParseOptions};
     use crate::diagnostic::Diagnostic;
@@ -1361,6 +1862,135 @@ mod constant_condition_tests {
         assert_eq!(
             missing_return_functions(source),
             vec!["function unknown_integer_cast may reach the end without returning a value",]
+        );
+    }
+
+    #[test]
+    fn local_values_propagate_and_merge_only_when_definite() {
+        let source = r#"
+            integer initialized_local() {
+                integer value = 1;
+                if (value == 1) return 1;
+            }
+            integer assigned_local() {
+                integer value;
+                value = 2;
+                if (value > 1) return 1;
+            }
+            integer equal_branch_values(integer condition) {
+                integer value;
+                if (condition) value = 5;
+                else value = 5;
+                if (value == 5) return 1;
+            }
+            integer different_branch_values(integer condition) {
+                integer value;
+                if (condition) value = 1;
+                else value = 0;
+                if (value == 1) return 1;
+            }
+            integer terminating_branch(integer condition) {
+                integer value = 1;
+                if (condition) return 1;
+                value = 2;
+                if (value == 2) return 1;
+            }
+            integer parameter_stays_unknown(integer value) {
+                if (value) return 1;
+            }
+            integer mutable_global;
+            integer global_stays_unknown() {
+                if (mutable_global) return 1;
+            }
+            integer local_float() {
+                float value = 1.5;
+                if (value == 1.5) return 1;
+            }
+            integer self_referential_assignment() {
+                integer value = 1;
+                value = value + 1;
+                if (value == 2) return 1;
+            }
+            integer assignment_in_condition_updates_local() {
+                integer value = 1;
+                if ((value = 0)) return 1;
+                if (value == 0) return 1;
+            }
+            integer jump_label_values_stay_unknown() {
+                integer value = 0;
+                jump after_write;
+                value = 1;
+                @after_write;
+                if (value == 0) return 1;
+            }
+            integer loop_carried_value_stays_unknown() {
+                integer value = 0;
+                while (value == 0) {
+                    value = 1;
+                }
+                if (value) return 1;
+            }
+            integer increment_invalidates_value() {
+                integer value = 1;
+                ++value;
+                if (value == 2) return 1;
+            }
+            integer compound_assignment_invalidates_value() {
+                integer value = 1;
+                value += 1;
+                if (value == 2) return 1;
+            }
+            integer parenthesized_assignment_invalidates_value() {
+                integer value = 0;
+                (value) = 1;
+                if (value == 0) return 1;
+            }
+            integer unordered_side_effects_stay_unknown() {
+                integer value = 0;
+                (value = 1) + (value = 2);
+                if (value == 2) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function different_branch_values may reach the end without returning a value",
+                "function parameter_stays_unknown may reach the end without returning a value",
+                "function global_stays_unknown may reach the end without returning a value",
+                "function jump_label_values_stay_unknown may reach the end without returning a value",
+                "function loop_carried_value_stays_unknown may reach the end without returning a value",
+                "function increment_invalidates_value may reach the end without returning a value",
+                "function compound_assignment_invalidates_value may reach the end without returning a value",
+                "function parenthesized_assignment_invalidates_value may reach the end without returning a value",
+                "function unordered_side_effects_stay_unknown may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_values_also_prune_unreachable_statement_edges() {
+        let source = r#"
+            integer local_condition() {
+                integer value = 0;
+                if (value) {
+                    llSay(0, "unreachable");
+                }
+                return 1;
+            }
+            default { state_entry() { } }
+        "#;
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast(&tokens);
+        assert!(syntax.is_empty(), "{syntax:?}");
+        let diagnostics = crate::ast_semantic::analyze_ast(&ast, &syntax);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM037"),
+            "expected SEM037 for the unreachable local-condition branch, got {diagnostics:?}"
         );
     }
 

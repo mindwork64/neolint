@@ -76,12 +76,19 @@ handlers. Use a value-return only from a user-defined function with a matching
 return type.
 
 SEM037 uses Neolint's bounded control-flow graph to report unreachable
-statements. It reasons about constant conditions, loop exit paths, valid
-jump/label edges, and Firestorm switch dispatch, fallthrough, default and
-break. It can therefore find dead statements inside a branch that is
-provably never taken, after an infinite loop, or after a switch whose possible
-arms all terminate. A reachable break or an unmatched switch path prevents
-that conclusion.
+statements. In addition to literal and built-in constants, it can propagate
+definitely known local numeric values from declarations and assignments.
+After an `if/else`, a value is retained only when every reachable branch that
+falls through agrees; if one branch returns, only the surviving branch matters.
+Mutable globals and parameters are never assumed constant. Values are not
+carried through loops, and local propagation is disabled for code scopes with
+`jump`/label control flow until those incoming states can be merged safely.
+
+The CFG also reasons about loop exit paths, valid jump/label edges, and
+Firestorm switch dispatch, fallthrough, default and break. It can therefore
+find dead statements inside a branch that is provably never taken, after an
+infinite loop, or after a switch whose possible arms all terminate. A reachable
+break or an unmatched switch path prevents that conclusion.
 
 A transition to a different, unique known state terminates an event handler.
 A transition to the current state has no state-change side effect, and unknown
