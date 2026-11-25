@@ -191,9 +191,13 @@ No SEM rule remains Legacy-only in the current matrix.
   evaluates both operands of logical AND/OR; no short-circuit is assumed.
   Non-finite results, unsafe float-to-integer conversions and unsupported
   mixed-operand operators remain unknown. Local facts are capped at 4,096 per
-  environment; side-effect expression scans, CFG edges, switch dispatch work,
-  worklist iterations and cumulative fact-processing work are bounded.
-  Exceeding any analysis budget suppresses conclusions for that body.
+  environment; side-effect/error-expression scans, CFG edges, switch dispatch
+  work, worklist iterations and cumulative fact-processing work are bounded.
+  Oversized expressions are treated as unknown before recursive flow reasoning.
+  Incompatible SEM029 case labels and duplicate SEM028 defaults keep all switch
+  arms reachable; partial case-label evaluation that exhausts its aggregate
+  budget also falls back to every arm. Exceeding any analysis budget suppresses
+  conclusions for the affected body.
   Empty for-loop conditions and malformed conditions retain their distinct
   semantics.
 - This is a deliberate post-migration AST enhancement. Legacy remains frozen;
@@ -206,6 +210,9 @@ No SEM rule remains Legacy-only in the current matrix.
   case. Source-order fallthrough remains intact; unknown values or unsupported
   labels keep all possible arms reachable. Malformed/recovered control-flow
   forms and budget exhaustion still suppress SEM011 for the affected function.
+  Constant dispatch is disabled for semantically invalid switches (SEM028 or
+  incompatible SEM029 labels); an unknown or over-budget label set also keeps
+  all arms reachable rather than inferring a partial dispatch.
 
 ## Phase 6D expression validation and assignment semantics
 
@@ -336,8 +343,12 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   switch break target, while a break inside a loop nested in a switch still
   exits that switch. A switch whose feasible arms all terminate has no
   reachable exit; a reachable break or unmatched path keeps the exit reachable.
-- Per-environment facts, side-effect traversals, switch dispatch, CFG edge
-  visits, worklist iterations and cumulative fact-processing work are bounded.
+- Per-environment facts, side-effect/error-expression traversals, switch
+  dispatch, CFG edge visits, worklist iterations and cumulative fact-processing
+  work are bounded. CFG joins intersect incoming must-states in place, without
+  cloning both maps and allocating a third map for each edge. A disabled input
+  disables the merged environment; a budget overflow never yields a partial
+  reachability result.
   Invalid jump scopes, duplicate/missing labels, unvalidated jumps in unknown
   extension events, parser errors, error nodes, unclosed blocks and budget
   exhaustion suppress SEM037 for the affected body.

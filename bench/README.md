@@ -20,6 +20,11 @@ python3 bench/bench.py --passes 2 --skip-build \
 python3 bench/bench.py --quick --self-test --skip-build
 ```
 
+Quick mode covers startup, the small checked-in corpus, ordinary CFG fact
+propagation, side-effect transfers, deliberate fact-budget exhaustion, constant
+switch dispatch, switch-label budget fallback and stdin. It checks output
+stability across two passes; the timings are informational only.
+
 Results are written to `bench/results/<label>/{summary.md,meta.json,raw.jsonl,raw.jsonl.gz}`.
 `summary.md`, `meta.json` and the compressed `raw.jsonl.gz` are committed;
 uncompressed `raw.jsonl` is regenerated on demand and ignored by git.
@@ -77,6 +82,11 @@ corpus-manifest changes):
 | `malformed` | 500 malformed initializers | recovery path |
 | `diagnostic_flood` | 10,000 undeclared references | rendered-diagnostic cap |
 | `multi_file` | 24 units in one directory | multi-unit aggregation |
+| `flow_worklist` | 300 initialized numeric locals + 300 reads | normal-path CFG fact propagation |
+| `flow_side_effects` | 300 locals updated by `++` and `+=` before reads | side-effect transfer and fact retention |
+| `flow_budget` | 1,200 initialized numeric locals + terminal tail | cumulative fact-work fail-closed path |
+| `switch_dispatch` | 100 constant numeric case arms | value-sensitive switch dispatch |
+| `switch_budget` | 140 constant numeric case arms | bounded case-label evaluation fallback |
 | `stdin` | one small source | stdin preparation path |
 
 Modes: default (AST), explicit `--engine ast`, explicit `--engine legacy`,

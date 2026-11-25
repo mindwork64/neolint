@@ -86,9 +86,11 @@ facts; one nested write is tracked through its containing expression, while
 ambiguous multiple writes invalidate only touched locals. Assignment and
 increment results can determine conditions when known. Mutable globals and
 parameters are never assumed constant. Per-environment fact storage, side
-effect scans, worklist iterations, CFG edge visits, switch dispatch and total
-fact-processing work are bounded; exhaustion suppresses conclusions for the
-affected body.
+effect/error-expression scans, worklist iterations, CFG edge visits, switch
+dispatch and total fact-processing work are bounded; oversized expressions or
+budget exhaustion suppress conclusions for the affected body. CFG joins
+intersect incoming must-states in place to avoid cloning whole fact maps for
+each edge.
 
 The CFG also reasons about loop exit paths, valid jump/label edges, and
 Firestorm constant switch dispatch. It uses scalar/composite equality for
@@ -96,7 +98,9 @@ integer/float, string/key, vector/rotation and list-length values; numeric local
 facts can also select cases. When the switch value and every case label are
 known, only matching cases are entered and source-order fallthrough is
 preserved; a known unmatched value selects default or the no-match exit.
-Unknown values and unsupported labels retain all possible arms. Break always
+Unknown values, unsupported/over-budget labels, incompatible case types and
+multiple default labels retain all possible arms. This prevents invalid
+switch syntax/types from becoming false reachability proofs. Break always
 targets the innermost switch, even when nested
 inside a loop; a nested switch owns its own break target. This allows Neolint
 to find dead statements after a switch whose feasible arms all terminate, while

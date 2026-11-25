@@ -3819,8 +3819,9 @@ switch expressions can additionally use definitely known local integer/float
 facts from the CFG data-flow environment. Only matching case entries are
 selected, then execution follows source-order fallthrough. A known value with
 no matching case selects default or the no-match exit. If the value or any
-case label is unknown/unsupported, every possible arm and the appropriate
-default/no-match path remain reachable. Break targets the
+case label is unknown, unsupported or over budget, every possible arm and the
+appropriate default/no-match path remain reachable. Incompatible SEM029 case
+types and multiple SEM028 defaults also disable pruning. Break targets the
 innermost switch even when nested inside if/for/while/do-while; a nested switch
 shadows that target, so its break does not escape its enclosing loop/switch.
 This replaces the previous blanket SEM011 suppression for switch-containing
@@ -4215,17 +4216,22 @@ tracked through its containing expression; multiple writes with unspecified
 relative evaluation order invalidate only potentially written local facts.
 Direct assignment and increment results can determine an enclosing condition
 when their values are known. Mutable globals/parameters and call results remain
-unknown. Side-effect expression traversal, per-environment fact storage,
-worklist iterations, CFG edge visits, switch dispatch and cumulative
-fact-processing work are bounded.
+unknown. Side-effect and error-expression traversal, per-environment fact
+storage, worklist iterations, CFG edge visits, switch dispatch and cumulative
+fact-processing work are bounded. Oversized expressions fail closed before
+recursive flow reasoning. CFG joins intersect incoming must-states in place
+rather than cloning both maps and allocating a third map on every edge. A
+disabled input disables the merged environment; budget exhaustion suppresses
+conclusions for the affected body.
 
 The CFG models zero- and many-iteration loop paths, valid jump edges, and
 Firestorm constant switch dispatch. The shared evaluator applies integer/float,
 string/key, vector/rotation and list-length equality semantics from SEM028–SEM033;
-numeric switches can additionally use local data-flow facts. Only matching
-entries are dispatched and source-order fallthrough is preserved. A known
-unmatched value selects default or the no-match exit. Unknown values or
-unsupported case labels retain all possible arms. Break targets the innermost
+numeric switches can additionally use local data-flow facts. Unknown,
+unsupported or over-budget labels, incompatible SEM029 types and multiple
+SEM028 defaults keep all possible arms reachable. Only matching entries are
+dispatched and source-order fallthrough is preserved. A known unmatched value
+selects default or the no-match exit. Break targets the innermost
 switch, including when nested in if/for/while/do-while; a nested switch shadows
 that target. It can prove a
 branch body unreachable when its condition is constant, code after a loop

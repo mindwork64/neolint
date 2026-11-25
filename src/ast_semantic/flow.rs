@@ -648,16 +648,7 @@ impl FlowGraph {
                         *target_state = Some(output.clone());
                         true
                     }
-                    Some(existing) => {
-                        let merged =
-                            merge_constant_environments(&[existing.clone(), output.clone()]);
-                        if merged != *existing {
-                            *existing = merged;
-                            true
-                        } else {
-                            false
-                        }
-                    }
+                    Some(existing) => merge_constant_environment(existing, &output),
                 };
                 if changed && !queued[edge.target] {
                     pending.push_back(edge.target);
@@ -1364,6 +1355,9 @@ fn switch_dispatch_targets(
     defaults: &[usize],
     unmatched_exit: usize,
 ) -> HashSet<usize> {
+    if defaults.len() > 1 {
+        return all_switch_targets(cases, defaults, unmatched_exit);
+    }
     if let Some(switch_value) = evaluate_expression_result(expression, scope, scopes, constants) {
         return numeric_switch_dispatch_targets(
             switch_value,
@@ -1402,6 +1396,11 @@ fn switch_dispatch_targets(
         else {
             return all_switch_targets(cases, defaults, unmatched_exit);
         };
+        if !switch_value.is_compatible_with(&case_value) {
+            // SEM029 reports incompatible case/switch types. Keep all arms
+            // reachable instead of treating an invalid label as a no-match.
+            return all_switch_targets(cases, defaults, unmatched_exit);
+        }
         if switch_value.equals(&case_value) {
             targets.insert(*target);
         }
@@ -1481,33 +1480,92 @@ fn connect_exits(graph: &mut FlowGraph, exits: &[usize], target: usize) -> bool 
 }
 
 fn contains_error(expression: &Expression) -> bool {
-    match &expression.kind {
-        ExpressionKind::Error(_) => true,
-        ExpressionKind::Parenthesized(inner) => contains_error(inner),
-        ExpressionKind::Call(call) => {
-            contains_error(&call.callee) || call.arguments.iter().any(contains_error)
-        }
-        ExpressionKind::Component(component) => contains_error(&component.base),
-        ExpressionKind::Unary(unary) => contains_error(&unary.operand),
-        ExpressionKind::Binary(binary) => {
-            contains_error(&binary.left) || contains_error(&binary.right)
-        }
-        ExpressionKind::Assignment(assignment) => {
-            contains_error(&assignment.target) || contains_error(&assignment.value)
-        }
-        ExpressionKind::Cast(cast) => contains_error(&cast.operand),
-        ExpressionKind::Increment(increment) => contains_error(&increment.operand),
-        ExpressionKind::LazyIndex(lazy) => {
-            contains_error(&lazy.base) || lazy.indices.iter().any(contains_error)
-        }
-        ExpressionKind::List(list) => list.elements.iter().any(contains_error),
-        ExpressionKind::Vector(vector) => vector.components.iter().any(contains_error),
-        ExpressionKind::Rotation(rotation) => rotation.components.iter().any(contains_error),
-        ExpressionKind::Identifier(_)
-        | ExpressionKind::Integer(_)
-        | ExpressionKind::Float(_)
-        | ExpressionKind::String(_) => false,
+    // Recovered expressions and expressions beyond the evaluator's budget
+    // must not enter flow-sensitive reasoning. Use an explicit stack so the
+    // guard itself stays bounded and cannot recurse through a huge AST.
+    let mut pending = vec![(expression, 0usize)];
+    let mut visited = 0usize;
+    macro_rules! queue_child {
+        ($child:expr, $child_depth:expr) => {
+            if !queue_expression_child(&mut pending, $child, $child_depth, visited) {
+                return true;
+            }
+        };
     }
+    while let Some((expression, depth)) = pending.pop() {
+        visited = visited.saturating_add(1);
+        if depth > MAX_CONSTANT_DEPTH || visited > MAX_CONSTANT_NODES {
+            return true;
+        }
+        let next_depth = depth + 1;
+        match &expression.kind {
+            ExpressionKind::Error(_) => return true,
+            ExpressionKind::Parenthesized(inner)
+            | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+            | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+                queue_child!(inner, next_depth);
+            }
+            ExpressionKind::Binary(binary) => {
+                queue_child!(&binary.left, next_depth);
+                queue_child!(&binary.right, next_depth);
+            }
+            ExpressionKind::Assignment(assignment) => {
+                queue_child!(&assignment.target, next_depth);
+                queue_child!(&assignment.value, next_depth);
+            }
+            ExpressionKind::Increment(increment) => {
+                queue_child!(&increment.operand, next_depth);
+            }
+            ExpressionKind::Call(call) => {
+                queue_child!(&call.callee, next_depth);
+                for argument in &call.arguments {
+                    queue_child!(argument, next_depth);
+                }
+            }
+            ExpressionKind::Component(component) => {
+                queue_child!(&component.base, next_depth);
+            }
+            ExpressionKind::LazyIndex(lazy) => {
+                queue_child!(&lazy.base, next_depth);
+                for index in &lazy.indices {
+                    queue_child!(index, next_depth);
+                }
+            }
+            ExpressionKind::List(list) => {
+                for element in &list.elements {
+                    queue_child!(element, next_depth);
+                }
+            }
+            ExpressionKind::Vector(vector) => {
+                for component in &vector.components {
+                    queue_child!(component, next_depth);
+                }
+            }
+            ExpressionKind::Rotation(rotation) => {
+                for component in &rotation.components {
+                    queue_child!(component, next_depth);
+                }
+            }
+            ExpressionKind::Identifier(_)
+            | ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::String(_) => {}
+        }
+    }
+    false
+}
+
+fn queue_expression_child<'a>(
+    pending: &mut Vec<(&'a Expression, usize)>,
+    child: &'a Expression,
+    depth: usize,
+    visited: usize,
+) -> bool {
+    if visited.saturating_add(pending.len()) >= MAX_CONSTANT_NODES {
+        return false;
+    }
+    pending.push((child, depth));
+    true
 }
 
 fn is_constant_propagation_disabled(constants: &ConstantEnvironment) -> bool {
@@ -1543,6 +1601,25 @@ fn insert_constant_fact(constants: &mut ConstantEnvironment, key: usize, value: 
     } else {
         constants.insert(key, value);
     }
+}
+
+/// Intersect an existing must-analysis state with a new incoming state
+/// without allocating/cloning whole hash maps on every CFG edge.
+fn merge_constant_environment(
+    existing: &mut ConstantEnvironment,
+    incoming: &ConstantEnvironment,
+) -> bool {
+    if is_constant_propagation_disabled(existing) {
+        return false;
+    }
+    if is_constant_propagation_disabled(incoming) {
+        clear_constant_facts(existing);
+        existing.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+        return true;
+    }
+    let previous_len = existing.len();
+    existing.retain(|key, value| incoming.get(key) == Some(value));
+    existing.len() != previous_len
 }
 
 fn merge_constant_environments(environments: &[ConstantEnvironment]) -> ConstantEnvironment {
@@ -2523,6 +2600,63 @@ mod constant_environment_tests {
 }
 
 #[cfg(test)]
+mod constant_environment_merge_tests {
+    use std::collections::HashMap;
+
+    use super::{
+        is_constant_propagation_disabled, merge_constant_environment, ConstantEnvironment,
+        ConstantNumber, CONSTANT_PROPAGATION_DISABLED,
+    };
+
+    #[test]
+    fn in_place_merge_keeps_only_equal_facts() {
+        let mut existing = ConstantEnvironment::new();
+        existing.insert(1, ConstantNumber::Integer(10));
+        existing.insert(2, ConstantNumber::Integer(20));
+        existing.insert(3, ConstantNumber::Integer(30));
+        let mut incoming = HashMap::new();
+        incoming.insert(1, ConstantNumber::Integer(10));
+        incoming.insert(2, ConstantNumber::Integer(99));
+        incoming.insert(4, ConstantNumber::Integer(40));
+
+        assert!(merge_constant_environment(&mut existing, &incoming));
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing.get(&1), Some(&ConstantNumber::Integer(10)));
+    }
+
+    #[test]
+    fn in_place_merge_is_stable_when_all_facts_agree_or_state_is_already_empty() {
+        let mut existing = ConstantEnvironment::new();
+        existing.insert(1, ConstantNumber::Integer(10));
+        let incoming = existing.clone();
+
+        assert!(!merge_constant_environment(&mut existing, &incoming));
+        assert_eq!(existing, incoming);
+
+        let empty = ConstantEnvironment::new();
+        assert!(merge_constant_environment(&mut existing, &empty));
+        assert!(existing.is_empty());
+        assert!(!merge_constant_environment(&mut existing, &empty));
+    }
+
+    #[test]
+    fn disabled_incoming_state_disables_the_join_without_partial_facts() {
+        let mut existing = ConstantEnvironment::new();
+        existing.insert(1, ConstantNumber::Integer(10));
+        let mut disabled = ConstantEnvironment::new();
+        disabled.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
+
+        assert!(merge_constant_environment(&mut existing, &disabled));
+        assert!(is_constant_propagation_disabled(&existing));
+        assert_eq!(existing.len(), 1);
+        assert!(!merge_constant_environment(
+            &mut existing,
+            &ConstantEnvironment::new()
+        ));
+    }
+}
+
+#[cfg(test)]
 mod constant_condition_tests {
     use crate::ast::{parse_ast, parse_ast_with_options, AstParseOptions};
     use crate::diagnostic::Diagnostic;
@@ -2927,6 +3061,59 @@ mod constant_condition_tests {
     }
 
     #[test]
+    fn dataflow_fact_work_budget_suppresses_partial_reachability_results() {
+        let mut source = String::from("integer dataflow_budget() {\n");
+        for index in 0..1_200 {
+            source.push_str(&format!("integer local_{index} = {index};\n"));
+        }
+        source.push_str("return 1;\nllSay(0, \"must not be guessed unreachable after budget exhaustion\");\n}\n");
+        source.push_str("default { state_entry() { } }\n");
+
+        let (tokens, lexical) = lex(&source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast(&tokens);
+        assert!(syntax.is_empty(), "{syntax:?}");
+        let diagnostics = crate::ast_semantic::analyze_ast(&ast, &syntax);
+        assert!(
+            diagnostics.iter().all(|diagnostic| diagnostic.code != "SEM037"),
+            "data-flow budget exhaustion must suppress all partial SEM037 conclusions: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_condition_expression_fails_closed_before_recursive_analysis() {
+        let mut condition = String::from("(value = 1)");
+        for _ in 0..150 {
+            condition.push_str(" + 1");
+        }
+        let source = format!(
+            "integer oversized_condition() {{\ninteger value = 0;\nif ({condition}) return 1;\n}}\ndefault {{ state_entry() {{ }} }}\n"
+        );
+
+        assert!(
+            missing_return_functions(&source).is_empty(),
+            "an expression beyond the structural budget must suppress partial SEM011 proofs"
+        );
+    }
+
+    #[test]
+    fn oversized_side_effect_expression_does_not_produce_a_constant_fact() {
+        let mut expression = String::from("(value = 1)");
+        for _ in 0..150 {
+            expression.push_str(" + 1");
+        }
+        let source = format!(
+            "integer side_effect_budget() {{\ninteger value = 0;\n{expression};\nif (value) return 1;\n}}\ndefault {{ state_entry() {{ }} }}\n"
+        );
+
+        assert_eq!(
+            missing_return_functions(&source),
+            vec!["function side_effect_budget may reach the end without returning a value",],
+            "the bounded side-effect scan must not apply only part of a too-large expression"
+        );
+    }
+
+    #[test]
     fn worklist_reaches_a_fixed_point_for_loop_carried_values_and_for_clauses() {
         let source = r#"
             integer loop_condition_changes_after_iteration() {
@@ -3120,6 +3307,52 @@ mod constant_condition_tests {
     }
 
     #[test]
+    fn semantically_invalid_switch_labels_fail_open() {
+        let source = r#"
+            integer incompatible_case_type_is_not_pruned() {
+                switch (1) {
+                    case "alpha": return 1;
+                }
+            }
+            integer multiple_defaults_are_not_pruned() {
+                switch (1) {
+                    case 1: return 1;
+                    default: return 2;
+                    default: ;
+                }
+            }
+            default { state_entry() { } }
+        "#;
+
+        let diagnostics = switch_diagnostics(source);
+        let missing_returns: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM011")
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(
+            missing_returns,
+            vec![
+                "function incompatible_case_type_is_not_pruned may reach the end without returning a value",
+                "function multiple_defaults_are_not_pruned may reach the end without returning a value",
+            ],
+            "invalid SEM028/SEM029 switch constructs must not produce reachability proofs: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM029"),
+            "the incompatible case label should still receive SEM029: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM028"),
+            "multiple defaults should still receive SEM028: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn nonnumeric_constant_switch_values_use_firestorm_equality() {
         let source = r#"
             integer string_switch_dispatches_one_case() {
@@ -3173,6 +3406,37 @@ mod constant_condition_tests {
                 "expected the constant nonmatching arm {phrase:?} to be unreachable: {diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn switch_case_label_budget_falls_back_to_all_arms() {
+        let cases = 140;
+        let selected = cases / 2;
+        let mut source = format!(
+            "integer switch_label_budget() {{ integer selected = {selected}; switch (selected) {{\n"
+        );
+        for index in 0..cases {
+            source.push_str(&format!("case {index}: return {index};\n"));
+        }
+        source.push_str("} }\ndefault { state_entry() { } }\n");
+
+        let diagnostics = switch_diagnostics(&source);
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "SEM011"
+                    && diagnostic.message
+                        == "function switch_label_budget may reach the end without returning a value"
+            }),
+            "the unmatched path must remain possible when aggregate case evaluation exhausts its budget: {diagnostics:?}"
+        );
+        let unreachable_cases = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM037")
+            .count();
+        assert_eq!(
+            unreachable_cases, 0,
+            "a switch with partially evaluated labels must keep every arm reachable: {diagnostics:?}"
+        );
     }
 
     #[test]

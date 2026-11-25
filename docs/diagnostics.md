@@ -138,7 +138,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM008` | Invalid explicit return presence/type. | error | Only explicit returns are checked. |
 | `SEM009` | Duplicate jump label in one function/event scope. | error | Labels in different code scopes are independent. |
 | `SEM010` | Undefined or inaccessible jump target. | error | Jumping into a nested block is rejected. |
-| `SEM011` | Value-returning function may reach the end without returning. | error | AST-only CFG folds bounded finite integer/float expressions and propagates definitely known local integer/float values with a forward worklist to a fixed point. Safe scalar increments, arithmetic compound assignments, single nested writes and direct assignment/increment condition results are tracked when provable; ambiguous multiple writes invalidate only touched locals. Constant Firestorm switch dispatch uses scalar/composite equality (including string/key, vector/rotation and list-length equality); local flow facts can select numeric cases. Source-order fallthrough is preserved and unknown/unsupported values or labels keep all possible arms reachable. Per-environment facts, expression scans, worklist iterations, edge visits, switch dispatch and cumulative fact processing are bounded; budget exhaustion suppresses conclusions for that body. Mutable globals/parameters and call results remain unknown. |
+| `SEM011` | Value-returning function may reach the end without returning. | error | AST-only CFG folds bounded finite integer/float expressions and propagates definitely known local integer/float values with a forward worklist to a fixed point. Safe scalar increments, arithmetic compound assignments, single nested writes and direct assignment/increment condition results are tracked when provable; ambiguous multiple writes invalidate only touched locals. Constant Firestorm switch dispatch uses scalar/composite equality (including string/key, vector/rotation and list-length equality); local flow facts can select numeric cases. Source-order fallthrough is preserved. Unknown/unsupported/over-budget labels, incompatible SEM029 case types, and multiple SEM028 defaults keep all possible arms reachable. Per-environment facts, bounded expression scans, worklist iterations, edge visits, switch dispatch and cumulative fact processing are bounded; budget exhaustion suppresses conclusions for that body. Mutable globals/parameters and call results remain unknown. |
 | `SEM012` | Unresolved variable reference. | warning / semantic | Unknown extension calls and unknown extension event bodies are skipped. Warnings do not fail unless escalated. |
 | `SEM013` | Call to a canonical deprecated LSL function. | warning / lint | SLua-only metadata and replacement hints are excluded. |
 | `SEM014` | Unsupported explicit cast. | error | Only known source/target type pairs are checked. |
@@ -164,7 +164,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM034` | A state change occurs inside a global user-defined function. | error / semantic | AST-only. Mono rejects state changes from global functions. The narrow direct `if`-without-`else` form is reported as SEM035 instead. Malformed statements, unclosed function bodies, unreliable environments and budget overflow are skipped. |
 | `SEM035` | A state change relies on the historical Mono `if`-without-`else` workaround. | warning / lint | AST-only. Matches only a direct unbraced state-change then-branch with no `else`; this is an unsupported compatibility behavior, not portable LSL. |
 | `SEM036` | An event handler returns a value. | error / semantic | AST-only. The compiler may accept this, but the official LSL reference says it crashes at runtime. Applies to canonical and extension event handlers; malformed bodies and unreliable units are skipped. For compatibility, bodies containing jump/label control flow are conservatively skipped for this check. |
-| `SEM037` | A statement is unreachable according to the control-flow graph. | warning / lint | AST-only. Uses the bounded shared CFG, including constant conditions, loops, valid jump edges, and Firestorm switch dispatch using supported scalar/composite equality (integer/float, string/key, vector/rotation and list-length equality). Numeric local flow facts can also select cases. Source-order fallthrough/default and break to the innermost switch are preserved; unknown/unsupported switch values preserve all arms. Reports the first unreachable non-empty statement in each straight-line sequence. Invalid jump scopes, parser errors, malformed nodes and budget exhaustion suppress the affected body. |
+| `SEM037` | A statement is unreachable according to the control-flow graph. | warning / lint | AST-only. Uses the bounded shared CFG, including constant conditions, loops, valid jump edges, and Firestorm switch dispatch using supported scalar/composite equality (integer/float, string/key, vector/rotation and list-length equality). Numeric local flow facts can also select cases. Source-order fallthrough/default and break to the innermost switch are preserved; unknown/unsupported/over-budget labels, incompatible SEM029 types and multiple SEM028 defaults preserve all arms. Reports the first unreachable non-empty statement in each straight-line sequence. Invalid jump scopes, parser errors, malformed nodes and budget exhaustion suppress the affected body. |
 | `SEM038` | A state has no event handlers. | error / semantic | AST-only. Checks complete `default` and named states; malformed states and states overlapped by parser errors are skipped. |
 | `SEM039` | A list element has list type. | error / semantic | AST-only. Checks nested literals, visible list variables, list-returning calls and other expressions whose type is provably `list`. Unknown types and malformed expressions are skipped. |
 | `SEM040` | Equality/inequality compares two lists. | warning / lint | AST-only. Reports only when both operand types are known to be `list`. `==` compares lengths only; `!=` returns their length difference. |
@@ -423,9 +423,11 @@ default { state_entry() { integer value; float result = value.x; } }
   vector/rotation component equality and list-length equality. Numeric
   switch values can additionally use definite local data-flow facts.
   Source-order fallthrough remains intact. If the value or any label is
-  unknown/unsupported, all possible arms are retained. A known value with no
-  matching case selects default or preserves an unmatched path when there is
-  no default. Break targets the innermost switch even through loop nesting;
+  unknown, unsupported or over budget, all possible arms are retained.
+  Incompatible SEM029 case types and multiple SEM028 defaults also disable
+  dispatch pruning. A known value with no matching case selects default or
+  preserves an unmatched path when there is no default. Break targets the
+  innermost switch even through loop nesting;
   a nested switch owns its own break target.
 - SEM036 reports a value-return from an event handler because the official Second Life Wiki documents that the compiler can accept it even though executing it crashes the script. `return;` remains valid. Parser-damaged bodies and unreliable lexical/preprocessor units are skipped.
 - SEM037 uses the shared bounded CFG to report the first unreachable
@@ -436,9 +438,11 @@ default { state_entry() { integer value; float result = value.x; } }
   arithmetic compound assignments update facts; ambiguous multiple writes
   invalidate only potentially written locals. Assignment/increment results can
   determine conditions when known. Mutable globals and parameters stay unknown.
-  Per-environment facts, side-effect expression scans, worklist iterations, CFG
-  edge visits, switch dispatch and cumulative fact processing are bounded.
-  Constant switch dispatch uses the Firestorm evaluator's integer/float,
+  Per-environment facts, side-effect/error-expression scans, worklist
+  iterations, CFG edge visits, switch dispatch and cumulative fact processing
+  are bounded. Oversized expressions fail closed before recursive flow
+  analysis. CFG joins intersect incoming must-states in place instead of
+  cloning whole maps for each edge. Constant switch dispatch uses the Firestorm evaluator's integer/float,
   string/key, vector/rotation and list-length equality semantics. Numeric local
   facts can additionally select a case; unknown or unsupported values keep all
   possible arms reachable. Source-order fallthrough and default/no-match rules

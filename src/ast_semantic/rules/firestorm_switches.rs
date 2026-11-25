@@ -33,6 +33,23 @@ enum ConstantValue {
 pub(crate) struct SwitchConstantValue(ConstantValue);
 
 impl SwitchConstantValue {
+    pub(crate) fn is_compatible_with(&self, other: &Self) -> bool {
+        matches!(
+            (&self.0, &other.0),
+            (ConstantValue::Integer(_), ConstantValue::Integer(_))
+                | (ConstantValue::Integer(_), ConstantValue::Float(_))
+                | (ConstantValue::Float(_), ConstantValue::Integer(_))
+                | (ConstantValue::Float(_), ConstantValue::Float(_))
+                | (ConstantValue::String(_), ConstantValue::String(_))
+                | (ConstantValue::String(_), ConstantValue::Key(_))
+                | (ConstantValue::Key(_), ConstantValue::String(_))
+                | (ConstantValue::Key(_), ConstantValue::Key(_))
+                | (ConstantValue::Vector(_), ConstantValue::Vector(_))
+                | (ConstantValue::Rotation(_), ConstantValue::Rotation(_))
+                | (ConstantValue::ListLength(_), ConstantValue::ListLength(_))
+        )
+    }
+
     pub(crate) fn equals(&self, other: &Self) -> bool {
         self.0.equals(&other.0)
     }
