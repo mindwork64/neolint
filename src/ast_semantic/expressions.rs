@@ -41,6 +41,7 @@ pub(crate) struct InitializerSite<'a> {
     pub(crate) declarator: &'a VariableDeclarator,
     pub(crate) expected: TypeKind,
     pub(crate) scope: ScopeId,
+    pub(crate) is_global: bool,
 }
 
 /// All expression and initializer occurrences in deterministic source order.
@@ -71,7 +72,7 @@ pub(crate) fn collect_facts<'a>(ast: &'a Ast, scopes: &ScopeTree) -> ExpressionF
         match item {
             TopLevel::Global(global) => {
                 for declarator in global.declarators.iter().rev() {
-                    push_initializer(&mut work, declarator, global.ty.kind, scopes.root());
+                    push_initializer(&mut work, declarator, global.ty.kind, scopes.root(), true);
                 }
             }
             TopLevel::Function(function) => {
@@ -114,7 +115,13 @@ pub(crate) fn collect_facts<'a>(ast: &'a Ast, scopes: &ScopeTree) -> ExpressionF
             WorkItem::Statement(statement, current_scope) => match &statement.kind {
                 StatementKind::Local(local) => {
                     for declarator in local.declarators.iter().rev() {
-                        push_initializer(&mut work, declarator, local.ty.kind, current_scope);
+                        push_initializer(
+                            &mut work,
+                            declarator,
+                            local.ty.kind,
+                            current_scope,
+                            false,
+                        );
                     }
                 }
                 StatementKind::Block(inner) => {
@@ -230,6 +237,7 @@ fn push_initializer<'a>(
     declarator: &'a VariableDeclarator,
     expected: TypeKind,
     scope: ScopeId,
+    is_global: bool,
 ) {
     let Some(initializer) = &declarator.initializer else {
         return;
@@ -241,6 +249,7 @@ fn push_initializer<'a>(
         declarator,
         expected,
         scope,
+        is_global,
     }));
 }
 

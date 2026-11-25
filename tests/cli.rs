@@ -60,6 +60,67 @@ fn assert_default_matches_explicit_ast(args: &[&str]) {
 }
 
 #[test]
+fn sem027_is_ast_only_and_can_be_disabled_and_serialized() {
+    let directory = temporary_directory();
+    let source = directory.join("global_initializer.lsl");
+    fs::write(
+        &source,
+        "float sampled = llGetTime();\ndefault { state_entry() { } }\n",
+    )
+    .unwrap();
+    let source_arg = source.to_str().unwrap();
+
+    let default_output = run_args(&[source_arg]);
+    let explicit_ast = run_args(&["--engine", "ast", source_arg]);
+    for output in [&default_output, &explicit_ast] {
+        assert_eq!(output.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("error[SEM027]"), "{stdout}");
+        assert!(
+            stdout.contains("global initializer for variable 'sampled' must be a simple value, not an expression"),
+            "{stdout}"
+        );
+    }
+    assert_eq!(default_output.stdout, explicit_ast.stdout);
+    assert_eq!(default_output.stderr, explicit_ast.stderr);
+
+    let legacy = run_args(&["--engine", "legacy", source_arg]);
+    assert_eq!(legacy.status.code(), Some(0));
+    let legacy_stdout = String::from_utf8(legacy.stdout).unwrap();
+    assert!(!legacy_stdout.contains("SEM027"), "{legacy_stdout}");
+
+    let disabled = run_args(&["--disable", "SEM027", source_arg]);
+    assert_eq!(disabled.status.code(), Some(0));
+    let disabled_stdout = String::from_utf8(disabled.stdout).unwrap();
+    assert!(!disabled_stdout.contains("SEM027"), "{disabled_stdout}");
+    assert!(
+        disabled_stdout.contains("warning[SEM024]"),
+        "{disabled_stdout}"
+    );
+    assert!(
+        !disabled_stdout.contains("error[SEM027]"),
+        "{disabled_stdout}"
+    );
+
+    let json = run_args(&["--format", "json", source_arg]);
+    assert_eq!(json.status.code(), Some(1));
+    let json_stdout = String::from_utf8(json.stdout).unwrap();
+    for field in [
+        "\"code\":\"SEM027\"",
+        "\"severity\":\"error\"",
+        "\"kind\":\"semantic\"",
+        "global initializer for variable 'sampled' must be a simple value, not an expression",
+    ] {
+        assert!(
+            json_stdout.contains(field),
+            "missing {field}: {json_stdout}"
+        );
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn unresolved_variable_warning_does_not_fail_cli_by_default() {
     let directory = temporary_directory();
     let source = directory.join("unresolved.lsl");
@@ -379,19 +440,75 @@ fn sem025_and_sem026_appear_in_json_output_with_the_existing_schema() {
 }
 
 #[test]
-fn compare_ignores_sem024_sem025_and_sem026() {
+fn firestorm_switch_diagnostics_are_ast_only_and_keep_json_v1() {
+    let directory = temporary_directory();
+    let source = write_file(
+        &directory,
+        "switches.lsl",
+        "#define USE_SWITCHES\ndefault { state_entry() { switch (1) { case 1: ; case 1.0: ; default: ; default: ; } switch (1) { case \"x\": ; } switch (1 + 2) { case 3: ; } list values = [1]; switch (values) { case [2]: ; default: ; } } }\n",
+    );
+    let source_arg = source.to_str().unwrap();
+
+    let ast = run_args(&["--dialect", "firestorm", source_arg]);
+    assert_eq!(ast.status.code(), Some(1));
+    let stdout = String::from_utf8(ast.stdout).unwrap();
+    for code in ["SEM028", "SEM029", "SEM030", "SEM031", "SEM032", "SEM033"] {
+        assert!(stdout.contains(code), "missing {code}: {stdout}");
+    }
+    assert!(stdout.contains("error[SEM028]"), "{stdout}");
+    assert!(stdout.contains("error[SEM029]"), "{stdout}");
+    for code in ["SEM030", "SEM031", "SEM032", "SEM033"] {
+        assert!(stdout.contains(&format!("warning[{code}]")), "{stdout}");
+    }
+
+    let json = run_args(&["--dialect", "firestorm", "--format", "json", source_arg]);
+    assert_eq!(json.status.code(), Some(1));
+    let json_stdout = String::from_utf8(json.stdout).unwrap();
+    for field in [
+        "\"code\":\"SEM028\"",
+        "\"code\":\"SEM029\"",
+        "\"code\":\"SEM030\"",
+        "\"code\":\"SEM031\"",
+        "\"code\":\"SEM032\"",
+        "\"code\":\"SEM033\"",
+        "\"kind\":\"semantic\"",
+        "\"kind\":\"lint\"",
+    ] {
+        assert!(
+            json_stdout.contains(field),
+            "missing {field}: {json_stdout}"
+        );
+    }
+
+    let compare = run_args(&["--engine", "compare", "--dialect", "firestorm", source_arg]);
+    assert_eq!(compare.status.code(), Some(3));
+    let compare_stdout = String::from_utf8(compare.stdout).unwrap();
+    let compare_stderr = String::from_utf8(compare.stderr).unwrap();
+    for code in ["SEM028", "SEM029", "SEM030", "SEM031", "SEM032", "SEM033"] {
+        assert!(!compare_stdout.contains(code), "{compare_stdout}");
+        assert!(!compare_stderr.contains(code), "{compare_stderr}");
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_ignores_ast_only_sem024_through_sem033() {
     let directory = temporary_directory();
     let source = write_file(
         &directory,
         "unused-analysis.lsl",
-        "integer callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); } }\n",
+        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); } }\n",
     );
     let source = source.to_str().unwrap();
 
     let output = run_args(&["--engine", "compare", source]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for code in ["SEM024", "SEM025", "SEM026"] {
+    for code in [
+        "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
+        "SEM033",
+    ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
     assert_eq!(
@@ -404,6 +521,12 @@ fn compare_ignores_sem024_sem025_and_sem026() {
     assert!(stderr.contains("complete=true"), "{stderr}");
     assert!(!stderr.contains("SEM025"), "{stderr}");
     assert!(!stderr.contains("SEM026"), "{stderr}");
+    for code in [
+        "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
+        "SEM033",
+    ] {
+        assert!(!stderr.contains(code), "{stderr}");
+    }
 
     fs::remove_dir_all(directory).unwrap();
 }

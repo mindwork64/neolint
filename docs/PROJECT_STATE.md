@@ -22,6 +22,10 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   engine selection, and AST default.
 - Phase 7: AST-native `SEM024` (unread variables), `SEM025` (unread parameters)
   and `SEM026` (unreachable user functions).
+- Follow-up semantic coverage: AST-only `SEM027` validates simple assignable
+  values in global variable initializers, plus Firestorm switch diagnostics
+  `SEM028`–`SEM033` and switch-aware return-flow analysis; Legacy and Compare
+  remain unchanged.
 - Phase 8: reproducible benchmark harness, resource-limit reconciliation and
   profile-guided fixes.
 - Phase 8 follow-ups #108–#111 are integrated and closed:
@@ -30,7 +34,7 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM026` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM033` are AST-only.
 
 ## Architecture
 

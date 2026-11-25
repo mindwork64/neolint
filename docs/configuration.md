@@ -50,7 +50,10 @@ signatures are unchanged.
   restore the historical v1.0.0 Legacy pipeline.
 - AST adds the AST-only lint rules `SEM024` (unused variables), `SEM025`
   (unused parameters), and `SEM026` (unreachable user functions). Their default
-  severity is warning.
+  severity is warning. AST also reports `SEM027` for non-simple global
+  initializers and `SEM028`–`SEM029` for Firestorm switch errors. The Firestorm
+  switch lint diagnostics `SEM030`–`SEM033` are warnings and appear only when
+  the switches feature gate is enabled.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both

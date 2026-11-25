@@ -3757,6 +3757,43 @@ over exit-status parity for a suppressed diagnostic.
 
 ---
 
+### Post-v1.1.0 Firestorm switch semantics (SEM028–SEM033)
+
+The Firestorm switch AST now has semantic validation when the independent
+switches gate is enabled. `SEM028` rejects a second `default`; `SEM029` rejects
+provably incompatible equality operand types; `SEM030` warns on duplicate
+constant case values (including supported scalar and simple composite constants); `SEM031` warns when no default arm exists; `SEM032` warns
+on a constant switch expression; and `SEM033` warns when a list is switched on,
+because LSL list equality compares lengths. Constant evaluation and duplicate
+checking are bounded and fail closed on malformed switch expressions, parser
+errors in the switch, or an unreliable lexical/preprocessor environment.
+
+The value-return CFG now models switch dispatch to each case/default arm,
+source-order fallthrough, a no-match path when default is absent, and `break` to
+the innermost switch's exit node. This replaces the previous blanket SEM011
+suppression for every function containing a switch or break. Legacy remains
+unchanged, and the SEM001–SEM023 Compare contract does not include SEM028–SEM033.
+
+### Post-v1.1.0 AST-only semantic addition: SEM027
+
+The stable AST semantic pass now includes `SEM027`, a bounded structural check
+for global variable initializers. It uses the shared initializer facts but only
+visits top-level declarations (locals remain governed by SEM015 type checking).
+Simple scalar literals, visible global-variable references, built-in constants,
+numeric vector/rotation components and flat lists are accepted. It does not
+constant-fold operators or calls. Parenthesized expressions, nested list
+literals and non-numeric vector/rotation components are rejected. Malformed
+expressions, unreliable lexical/preprocessor environments, and initializers
+exceeding 128 nodes or 64 levels are skipped.
+
+SEM027 is an AST-only semantic error: the default and explicit AST engine emit
+it, while Legacy remains frozen and Compare continues to compare only
+SEM001–SEM023. The rule does not change preprocessing, parsing, JSON schema,
+source-map behavior, engine selection, or the Legacy implementation. Focused
+AST, CLI, corpus and comparator tests pin these boundaries.
+
+---
+
 ## 16. Module structure (proposed, not created in Phase 0)
 
 ```
