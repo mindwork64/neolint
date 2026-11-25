@@ -130,6 +130,73 @@ fn reports_each_operator_and_uses_the_operator_span() {
 }
 
 #[test]
+fn warns_on_sqrt_of_statically_negative_values() {
+    let source = "default { state_entry() { \
+        float a = llSqrt(-1.0); \
+        float b = llSqrt(-(2.0)); \
+        float c = llSqrt((float)-3); \
+        float safe = llSqrt(-0.0); \
+    } }";
+    let diagnostics = sem043(source);
+
+    assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.message.contains("llSqrt")
+            && diagnostic.message.contains("NaN in Mono")
+            && diagnostic.message.contains("Math Error in LSO")
+    }));
+    let callee = source.find("llSqrt").unwrap();
+    assert_eq!(diagnostics[0].span.start, callee);
+}
+
+#[test]
+fn warns_on_pow_with_negative_base_and_non_integer_exponent() {
+    let diagnostics = sem043(
+        "default { state_entry() { \
+            float a = llPow(-2.0, 0.5); \
+            float b = llPow(-(1.0 + 1.0), 3.0 - 2.5); \
+            float safe_integer = llPow(-2.0, 3.0); \
+            float safe_negative_integer = llPow(-2.0, -3); \
+            float safe_positive_base = llPow(2.0, 0.5); \
+        } }",
+    );
+
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.message.contains("llPow") && diagnostic.message.contains("non-integer exponent")
+    }));
+}
+
+#[test]
+fn does_not_evaluate_variables_or_user_functions_for_math_domains() {
+    let diagnostics = sem043(
+        "float llSqrt(float value) { return value; } \
+         float llPow(float base, float exponent) { return base; } \
+         default { state_entry() { \
+             float negative = -1.0; \
+             float a = llSqrt(negative); \
+             float b = llPow(-2.0, 0.5); \
+         } }",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn skips_unknown_and_invalid_builtin_math_arguments() {
+    let diagnostics = sem043(
+        "default { state_entry() { \
+            float input = -1.0; \
+            float unknown_sqrt = llSqrt(input); \
+            float unknown_power = llPow(-2.0, input); \
+            float invalid_sqrt = llSqrt(\"not numeric\"); \
+        } }",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn parser_errors_and_unreliable_environments_suppress_the_rule() {
     let source = "default { state_entry() { integer value = 1 / 0; integer broken = ; } }";
     let (tokens, lexical) = lex(source);

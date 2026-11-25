@@ -63,8 +63,8 @@ signatures are unchanged.
   `SEM041` warns on a bare plain assignment in an `if` condition; an extra pair
   of parentheses marks the assignment as intentional. `SEM042` warns when
   detection-context functions can be reached from events that do not provide
-  the required detection data. `SEM043` warns on division or integer remainder
-  by a statically known zero value; `SEM044` warns when a populated named state
+  the required detection data. `SEM043` warns on statically provable math-domain hazards, including zero
+  divisors and invalid `llSqrt`/`llPow` arguments; `SEM044` warns when a populated named state
   has no transition path from `default`; `SEM045` reports known-invalid operator
   operand types; `SEM046` rejects known-incompatible arithmetic and comparison
   operand pairs.

@@ -151,28 +151,36 @@ References: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wik
 [On damage](https://wiki.secondlife.com/wiki/On_damage), and
 [Final damage](https://wiki.secondlife.com/wiki/Final_damage).
 
-### Statically provable division by zero
+### Statically provable math-domain hazards
 
 LSL integer/float division and integer remainder by zero cause a runtime
-`Math Error` that halts script execution. This includes compound assignments
-such as `/=` and `%=`. The AST engine reports warning `SEM043` when it can prove
-the divisor is zero from a numeric literal, unshadowed numeric built-in
-constant (for example `FALSE`), parentheses, unary operators,
-zero-preserving numeric casts, or side-effect-free constant arithmetic:
+`Math Error`; this includes `/=`, `%=` and vector division by a scalar zero.
+The AST engine reports warning `SEM043` when a bounded constant evaluator can
+prove the divisor is zero. It also checks the built-ins `llSqrt` and `llPow`:
+a negative square-root argument, or a negative power base with a non-integer
+exponent, produces an imaginary result. The documented runtime difference is
+important: Mono returns `NaN`, while legacy LSO triggers a `Math Error`.
 
 ```lsl
 integer quotient = 10 / (3 - 3); // SEM043
 integer remainder = 10 % FALSE; // SEM043
 float negative_zero = 1.0 / -0.0; // SEM043
+float invalid_root = llSqrt(-1.0); // SEM043
+float invalid_power = llPow(-2.0, 0.5); // SEM043
 ```
 
-Variables and function calls are not constant-folded, even when their current
-initializer or implementation appears to return zero. The rule first checks
-the LSL operand type matrix, so vector `%` cross products are not mistaken for
-integer remainders. Evaluation is bounded and fails closed on parser errors or
-unreliable lexical/preprocessor input.
+The evaluator understands literals, unshadowed numeric built-in constants,
+parentheses, unary numeric operators, numeric casts and side-effect-free
+constant arithmetic. Mutable variables and user-defined function calls are
+never guessed. `llPow` is warned on only when both arguments are known and the
+exponent is provably non-integral; out-of-range or non-finite exponent values
+are left unknown. Built-in name shadowing and invalid/malformed calls are
+respected. Vector `%` cross products are not mistaken for integer remainders.
+Evaluation is bounded and fails closed on parser errors or unreliable
+lexical/preprocessor input.
 
 References: [LSL Errors — Math Error](https://wiki.secondlife.com/wiki/LSL_Errors),
+[llSqrt](https://wiki.secondlife.com/wiki/LlSqrt), [llPow](https://wiki.secondlife.com/wiki/LlPow),
 [LSL Operators — modulus](https://wiki.secondlife.com/wiki/LSL_Operators), and
 [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
 

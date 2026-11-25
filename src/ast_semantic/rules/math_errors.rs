@@ -1,4 +1,4 @@
-//! SEM043: statically provable division or remainder by zero.
+//! SEM043: statically provable division and imaginary math-domain hazards.
 
 use std::collections::HashMap;
 
@@ -10,7 +10,9 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::expressions::ExpressionSite;
 use super::super::scopes::ScopeTree;
-use super::super::types::{infer_binary_result_type, infer_expression_type, UserFunctionSignature};
+use super::super::types::{
+    can_implicitly_convert, infer_binary_result_type, infer_expression_type, UserFunctionSignature,
+};
 
 const MAX_MATH_WORK: usize = 32_768;
 const MAX_CONSTANT_DEPTH: usize = 64;
@@ -35,6 +37,27 @@ impl Number {
             Self::Float(value) => value == 0.0,
         }
     }
+
+    fn is_finite(self) -> bool {
+        match self {
+            Self::Integer(_) => true,
+            Self::Float(value) => value.is_finite(),
+        }
+    }
+
+    fn is_integral(self) -> Option<bool> {
+        match self {
+            Self::Integer(_) => Some(true),
+            Self::Float(value)
+                if value.is_finite()
+                    && (value as f64) >= i32::MIN as f64
+                    && (value as f64) <= i32::MAX as f64 =>
+            {
+                Some(value.fract() == 0.0)
+            }
+            Self::Float(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,8 +67,8 @@ enum Evaluation {
     Exhausted,
 }
 
-/// Warn when a division or integer remainder has a statically known zero
-/// denominator. Mutable variables and calls are deliberately not evaluated.
+/// Warn on statically provable division-by-zero and imaginary math hazards.
+/// Mutable variables and user-defined calls are deliberately not evaluated.
 pub(crate) fn check(
     sites: &[ExpressionSite<'_>],
     scopes: &ScopeTree,
@@ -131,6 +154,85 @@ pub(crate) fn check(
                     Evaluation::Constant(_) | Evaluation::Unknown => {}
                 }
             }
+            ExpressionKind::Call(call) => {
+                let ExpressionKind::Identifier(callee) = &call.callee.kind else {
+                    continue;
+                };
+                if !matches!(callee.name.as_str(), "llSqrt" | "llPow")
+                    || functions.contains_key(callee.name.as_str())
+                    || !call.matched_close
+                    || !call.arguments_complete
+                    || call.declared_argument_count != call.arguments.len()
+                {
+                    continue;
+                }
+
+                let Some(signature) = builtins::definitions().functions.get(callee.name.as_str())
+                else {
+                    continue;
+                };
+                let expected_argument_count = if callee.name == "llSqrt" { 1 } else { 2 };
+                if signature.parameters.len() != expected_argument_count
+                    || call.arguments.len() != expected_argument_count
+                {
+                    continue;
+                }
+                if call.arguments.len() > work {
+                    return Vec::new();
+                }
+                work -= call.arguments.len();
+
+                let arguments_valid = call.arguments.iter().zip(&signature.parameters).all(
+                    |(argument, parameter)| {
+                        infer_expression_type(argument, scopes, site.scope, functions).is_some_and(
+                            |actual| can_implicitly_convert(&actual, &parameter.type_name),
+                        )
+                    },
+                );
+                if !arguments_valid {
+                    continue;
+                }
+
+                let mut values = Vec::with_capacity(call.arguments.len());
+                let mut unknown_argument = false;
+                for argument in &call.arguments {
+                    match evaluate_number(argument, site.scope, scopes, 0, &mut work) {
+                        Evaluation::Constant(value) if value.is_finite() => values.push(value),
+                        Evaluation::Constant(_) | Evaluation::Unknown => {
+                            unknown_argument = true;
+                            break;
+                        }
+                        Evaluation::Exhausted => return Vec::new(),
+                    }
+                }
+                if unknown_argument {
+                    continue;
+                }
+
+                let message = match callee.name.as_str() {
+                    "llSqrt" if values.first().is_some_and(|value| value.as_float() < 0.0) => Some(
+                        "llSqrt has a statically negative argument; this returns NaN in Mono and triggers a Math Error in LSO",
+                    ),
+                    "llPow"
+                        if values.first().is_some_and(|value| value.as_float() < 0.0)
+                            && values.get(1).is_some_and(|value| value.is_integral() == Some(false)) =>
+                    {
+                        Some(
+                            "llPow has a statically negative base and non-integer exponent; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM043",
+                        severity: Severity::Warning,
+                        kind: DiagnosticKind::Lint,
+                        message: message.to_owned(),
+                        span: callee.span,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -180,6 +282,7 @@ fn evaluate_number(
             .text
             .parse::<f32>()
             .ok()
+            .filter(|value| value.is_finite())
             .map(Number::Float)
             .map_or(Evaluation::Unknown, Evaluation::Constant),
         ExpressionKind::Identifier(identifier) => {
@@ -200,6 +303,7 @@ fn evaluate_number(
                     .value
                     .parse::<f32>()
                     .ok()
+                    .filter(|value| value.is_finite())
                     .map(Number::Float)
                     .map_or(Evaluation::Unknown, Evaluation::Constant),
                 _ => Evaluation::Unknown,
@@ -243,6 +347,7 @@ fn evaluate_number(
                 return Evaluation::Unknown;
             };
             evaluate_binary(binary.operator, left, right)
+                .filter(|value| value.is_finite())
                 .map_or(Evaluation::Unknown, Evaluation::Constant)
         }
         ExpressionKind::Cast(cast) => {
@@ -257,7 +362,9 @@ fn evaluate_number(
                 (TypeKind::Float, Number::Float(value)) => {
                     Evaluation::Constant(Number::Float(value))
                 }
-                (TypeKind::Float, Number::Integer(0)) => Evaluation::Constant(Number::Float(0.0)),
+                (TypeKind::Float, Number::Integer(value)) => {
+                    Evaluation::Constant(Number::Float(value as f32))
+                }
                 (TypeKind::Integer, Number::Float(value)) if value.abs() == 0.0 => {
                     Evaluation::Constant(Number::Integer(0))
                 }

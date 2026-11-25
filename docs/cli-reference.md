@@ -52,7 +52,7 @@ to event handlers and user-defined function bodies. State/list checks
 `SEM038`–`SEM040` validate event presence, nested lists and list comparisons;
 `SEM041` warns on bare assignments in `if` conditions; `SEM042` warns when
 context-bound detection functions are reachable from incompatible events;
-`SEM043` warns on division/remainder by statically known zero; `SEM044` warns
+`SEM043` warns on statically provable math-domain hazards; `SEM044` warns
 when a populated state has no transition path from `default`; `SEM045` rejects
 known-invalid operator operand types; `SEM046` rejects known-incompatible
 arithmetic and comparison operands. These codes appear in
