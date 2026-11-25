@@ -1,0 +1,79 @@
+---
+import SiteHeader from '../components/SiteHeader.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import '../styles/home.css';
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#070810" />
+    <meta name="description" content="A deterministic, offline-by-default linter for Linden Scripting Language. Catch lexical, syntax, preprocessor, and semantic issues before they reach the viewer." />
+    <title>neolint — Code Quality Linter for LSL</title>
+    <link rel="icon" href={`${base}favicon.ico`} sizes="any" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <SiteHeader />
+      <main>
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow"><span></span> LINDEN SCRIPTING LANGUAGE · STATIC ANALYSIS</div>
+            <img class="wordmark" src={`${base}assets/neolint-logo.png`} alt="neolint — code quality linter" />
+            <h1>Catch problems <em>before</em> they reach the viewer.</h1>
+            <p class="hero-lead">A deterministic, offline-by-default linter for LSL. Find lexical, syntax, preprocessor, and conservative semantic issues before you upload a script.</p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="https://github.com/mindwork64/neolint/releases/latest">Download latest release <span aria-hidden="true">↗</span></a>
+              <a class="button button-quiet" href={`${base}docs/`}>Explore documentation <span aria-hidden="true">→</span></a>
+            </div>
+            <div class="hero-meta"><span><i></i> Offline during normal lint runs</span><span>Linux · Windows</span><span>MIT / Apache-2.0</span></div>
+          </div>
+          <div class="hero-visual" aria-label="Illustrative neolint diagnostics preview">
+            <div class="visual-orbit orbit-one"></div>
+            <div class="visual-orbit orbit-two"></div>
+            <div class="code-window">
+              <div class="window-top"><div class="window-lights"><i></i><i></i><i></i></div><span>example.lsl</span><span class="window-status">ANALYSIS COMPLETE</span></div>
+              <div class="code-body">
+                <div class="code-line"><span class="line-number">01</span><code><b>default</b></code></div>
+                <div class="code-line"><span class="line-number">02</span><code>&#123;</code></div>
+                <div class="code-line"><span class="line-number">03</span><code>&nbsp;&nbsp;<b>state_entry</b>()</code></div>
+                <div class="code-line"><span class="line-number">04</span><code>&nbsp;&nbsp;&#123;</code></div>
+                <div class="code-line issue"><span class="line-number">05</span><code>&nbsp;&nbsp;&nbsp;&nbsp;<b>integer</b> unused;</code></div>
+                <div class="code-line issue"><span class="line-number">06</span><code>&nbsp;&nbsp;&nbsp;&nbsp;llOwnerSay(<strong>42</strong>);</code></div>
+                <div class="code-line"><span class="line-number">07</span><code>&nbsp;&nbsp;&#125;</code></div>
+                <div class="code-line"><span class="line-number">08</span><code>&#125;</code></div>
+              </div>
+              <div class="diagnostic-list">
+                <div class="diagnostic-row"><span class="severity error">ERROR</span><span><b>SEM004</b> — Provable argument type mismatch</span><span>06:16</span></div>
+                <div class="diagnostic-row"><span class="severity warning">WARN</span><span><b>SEM024</b> — Variable is declared but never read</span><span>05:13</span></div>
+              </div>
+            </div>
+            <div class="visual-caption"><span></span> A focused view of what matters: useful diagnostics, not noise.</div>
+          </div>
+        </section>
+        <section class="proof-strip" aria-label="Project facts">
+          <div><strong>AST</strong><span>Default analysis engine</span></div>
+          <div><strong>OFFLINE</strong><span>Normal lint runs need no network</span></div>
+          <div><strong>LSL</strong><span>Built specifically for Linden Scripting Language</span></div>
+          <div><strong>WIN / LINUX</strong><span>Prebuilt x86_64 releases</span></div>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><div class="eyebrow">BUILT FOR LSL WORKFLOWS</div><h2>More than a syntax check.</h2><p>Neolint combines multiple analysis stages while keeping uncertain cases conservative instead of guessing.</p></div>
+          <div class="feature-grid">
+            <article class="feature-card"><span class="feature-mark mark-cyan">01</span><h3>Deep diagnostics</h3><p>Lexical, parser, preprocessor, and semantic checks with precise source locations and related locations where available.</p><a href={`${base}diagnostics/`}>Browse diagnostics →</a></article>
+            <article class="feature-card"><span class="feature-mark mark-purple">02</span><h3>Two analysis engines</h3><p>AST is the default. The Legacy engine remains available for compatibility and investigation.</p><a href={`${base}docs/configuration/`}>Configure the engine →</a></article>
+            <article class="feature-card"><span class="feature-mark mark-pink">03</span><h3>Built for real projects</h3><p>Project-wide configuration, include directories, macro expansion, JSON output, and reproducible command-line checks.</p><a href={`${base}docs/cli-reference/`}>Read the CLI reference →</a></article>
+          </div>
+        </section>
+        <section class="next-step">
+          <div><div class="eyebrow">GET STARTED</div><h2>Keep the feedback loop local.</h2><p>Run neolint from your terminal, add it to your workflow, and review exactly what each diagnostic means.</p></div>
+          <div class="next-actions"><a class="button button-primary" href={`${base}docs/getting-started/`}>Installation guide →</a><a class="button button-quiet" href="https://github.com/mindwork64/neolint">View source on GitHub ↗</a></div>
+        </section>
+      </main>
+      <SiteFooter />
+    </div>
+  </body>
+</html>
