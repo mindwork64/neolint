@@ -318,3 +318,34 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   inequality. It reports at the operator and skips malformed or syntax-damaged
   expressions.
 - All three rules are AST-only and remain outside the SEM001–SEM023 Compare parity contract. Legacy output is unchanged.
+
+
+## AST-only operator and LSL hazard rules (SEM041–SEM045)
+
+- SEM041 checks only a bare top-level plain assignment used as an `if`
+  condition. An extra pair of grouping parentheses marks an intentional
+  assignment. Compound assignments and assignments nested in larger
+  expressions are outside the rule.
+- SEM042 propagates known event contexts through matched direct calls to
+  user-defined functions. Detection-only built-ins are checked against their
+  documented event contexts; unknown extension events and unreachable helper
+  functions do not contribute guessed contexts.
+- SEM043 reports division and integer remainder only when the operation is
+  type-valid and a bounded, side-effect-free evaluator proves the divisor is
+  zero. Mutable variables and calls are not evaluated; vector `%` remains a
+  cross product.
+- SEM044 constructs a bounded over-approximation of state transitions from
+  event-handler bodies, rooted at `default`. Conditional and textually
+  unreachable state changes count as possible edges. Global-function state
+  changes remain under SEM034/SEM035, and empty states remain under SEM038.
+- SEM045 validates only confirmed operator/type constraints: unary `-` accepts
+  integer/float/vector/rotation, `!` and `~` require integer, logical,
+  bitwise and shift operators require two integer operands,
+  and `++`/`--` require a known integer/float variable. Built-in constants are
+  not writable. Unary plus is intentionally outside the rule. Unknown
+  expression types are skipped rather than guessed.
+- SEM041–SEM045 are AST-only and remain outside the SEM001–SEM023 differential
+  Compare contract. They do not change Legacy output. Rules that depend on
+  complete lexical/preprocessor and parser input fail closed when that input
+  is unreliable; their individual resource limits are documented alongside
+  each rule.

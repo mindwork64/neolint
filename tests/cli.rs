@@ -493,12 +493,12 @@ fn firestorm_switch_diagnostics_are_ast_only_and_keep_json_v1() {
 }
 
 #[test]
-fn compare_ignores_ast_only_sem024_through_sem044() {
+fn compare_ignores_ast_only_sem024_through_sem045() {
     let directory = temporary_directory();
     let source = write_file(
         &directory,
         "unused-analysis.lsl",
-        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\ndetection_helper() { llDetectedKey(0); }\nlist source_list = [1];\ninteger condition_target;\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; llDetectedName(0); detection_helper(); integer math_hazard = 4 / 0; llOwnerSay((string)math_hazard); if (condition_target = 1) { } if (condition_target == 1) { } if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } touch_start(integer detected_total) { if (detected_total > 0) detection_helper(); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
+        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\ndetection_helper() { llDetectedKey(0); }\nlist source_list = [1];\ninteger condition_target;\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; llDetectedName(0); detection_helper(); integer math_hazard = 4 / 0; integer invalid_operator = !calculated; llOwnerSay((string)math_hazard); if (condition_target = 1) { } if (condition_target == 1) { } if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } touch_start(integer detected_total) { if (detected_total > 0) detection_helper(); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
     );
     let source = source.to_str().unwrap();
 
@@ -516,6 +516,7 @@ fn compare_ignores_ast_only_sem024_through_sem044() {
     assert!(ast_stdout.contains("warning[SEM042]"), "{ast_stdout}");
     assert!(ast_stdout.contains("warning[SEM043]"), "{ast_stdout}");
     assert!(ast_stdout.contains("warning[SEM044]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("error[SEM045]"), "{ast_stdout}");
     let ast_json = run_args(&["--format", "json", source]);
     let ast_json_stdout = String::from_utf8(ast_json.stdout).unwrap();
     for field in [
@@ -530,6 +531,7 @@ fn compare_ignores_ast_only_sem024_through_sem044() {
         "\"code\":\"SEM042\"",
         "\"code\":\"SEM043\"",
         "\"code\":\"SEM044\"",
+        "\"code\":\"SEM045\"",
         "\"severity\":\"error\"",
         "\"severity\":\"warning\"",
         "\"kind\":\"semantic\"",
@@ -547,7 +549,7 @@ fn compare_ignores_ast_only_sem024_through_sem044() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044",
+        "SEM042", "SEM043", "SEM044", "SEM045",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -564,7 +566,7 @@ fn compare_ignores_ast_only_sem024_through_sem044() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044",
+        "SEM042", "SEM043", "SEM044", "SEM045",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }

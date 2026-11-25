@@ -40,8 +40,9 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
 /// dropped before parsing in that case, so the unused-variable, unused-parameter,
 /// unreachable-function, global-initializer, state/list semantic, Firestorm-switch,
 /// Mono state-transition-context, return/control-flow hazard, if-condition
-/// assignment, detection-context, constant-math and state-reachability checks
-/// fail closed instead of treating the surviving text as complete. The flag affects
+/// assignment, detection-context, constant-math, state-reachability and
+/// operator-type checks fail closed instead of treating the surviving text as
+/// complete. The flag affects
 /// only these AST-only rules; all SEM001–SEM023 diagnostics are computed exactly
 /// as before.
 pub fn analyze_ast_with_environment(
@@ -152,6 +153,13 @@ pub fn analyze_ast_with_environment(
         environment_reliable,
     ));
     diagnostics.extend(rules::math_errors::check(
+        &expressions.expressions,
+        &scopes,
+        &functions,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::operator_types::check(
         &expressions.expressions,
         &scopes,
         &functions,

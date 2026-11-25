@@ -65,7 +65,8 @@ signatures are unchanged.
   detection-context functions can be reached from events that do not provide
   the required detection data. `SEM043` warns on division or integer remainder
   by a statically known zero value; `SEM044` warns when a populated named state
-  has no transition path from `default`.
+  has no transition path from `default`; `SEM045` reports known-invalid operator
+  operand types.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both
