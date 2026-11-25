@@ -47,7 +47,6 @@ struct BodyFacts<'a> {
     labels: Vec<LabelSite<'a>>,
     jumps: Vec<JumpSite<'a>>,
     returns: Vec<(&'a ReturnStatement, ScopeId)>,
-    has_switch_or_break: bool,
     has_error_statement: bool,
 }
 
@@ -209,7 +208,7 @@ pub(crate) fn check_missing_returns(
         }
         let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
         let facts = walk_body(body, scope, scopes);
-        if facts.has_switch_or_break || facts.has_error_statement {
+        if facts.has_error_statement {
             continue;
         }
         let Some(reaches_end) = analyze_function_body(body, scope, scopes) else {
@@ -295,7 +294,6 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
         labels: Vec::new(),
         jumps: Vec::new(),
         returns: Vec::new(),
-        has_switch_or_break: false,
         has_error_statement: false,
     };
     let mut work: Vec<(&Statement, ScopeId)> = body
@@ -373,7 +371,6 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
                 work.push((&do_while.body, current));
             }
             StatementKind::Switch(switch) => {
-                facts.has_switch_or_break = true;
                 let switch_scope = scopes.scope_for_switch(switch).unwrap_or(current);
                 for arm in switch.arms.iter().rev() {
                     for statement in arm.statements.iter().rev() {
@@ -381,7 +378,7 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
                     }
                 }
             }
-            StatementKind::Break(_) => facts.has_switch_or_break = true,
+            StatementKind::Break(_) => {}
             StatementKind::Error(_) => facts.has_error_statement = true,
             StatementKind::Empty
             | StatementKind::Local(_)
@@ -463,7 +460,7 @@ fn analyze_function_body(body: &Block, scope: ScopeId, scopes: &ScopeTree) -> Op
         work: 0,
         failed: false,
     };
-    let fragment = build_statements(&body.statements, scope, scopes, &mut graph, 0)?;
+    let fragment = build_statements(&body.statements, scope, scopes, &mut graph, None, 0)?;
     let exit = graph.node()?;
     if !connect_exits(&mut graph, &fragment.exits, exit) {
         return None;
@@ -485,6 +482,7 @@ fn build_statements(
     scope: ScopeId,
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
+    break_target: Option<usize>,
     depth: usize,
 ) -> Option<Fragment> {
     if depth > MAX_CFG_DEPTH {
@@ -501,7 +499,7 @@ fn build_statements(
     let mut entry = None;
     let mut exits = Vec::new();
     for statement in statements {
-        let fragment = build_statement(statement, scope, scopes, graph, depth + 1)?;
+        let fragment = build_statement(statement, scope, scopes, graph, break_target, depth + 1)?;
         if entry.is_some() {
             if !connect_exits(graph, &exits, fragment.entry) {
                 return None;
@@ -522,6 +520,7 @@ fn build_statement(
     scope: ScopeId,
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
+    break_target: Option<usize>,
     depth: usize,
 ) -> Option<Fragment> {
     if depth > MAX_CFG_DEPTH {
@@ -536,15 +535,26 @@ fn build_statement(
     match &statement.kind {
         StatementKind::Block(block) => {
             let child = scopes.scope_for_block(block).unwrap_or(scope);
-            build_statements(&block.statements, child, scopes, graph, depth)
+            build_statements(&block.statements, child, scopes, graph, break_target, depth)
         }
-        StatementKind::If(if_statement) => build_if(if_statement, scope, scopes, graph, depth),
-        StatementKind::For(for_statement) => build_for(for_statement, scope, scopes, graph, depth),
+        StatementKind::If(if_statement) => {
+            build_if(if_statement, scope, scopes, graph, break_target, depth)
+        }
+        StatementKind::For(for_statement) => {
+            build_for(for_statement, scope, scopes, graph, break_target, depth)
+        }
         StatementKind::While(while_statement) => {
-            build_while(while_statement, scope, scopes, graph, depth)
+            build_while(while_statement, scope, scopes, graph, break_target, depth)
         }
         StatementKind::DoWhile(do_while) => {
-            let body = build_statement(&do_while.body, scope, scopes, graph, depth + 1)?;
+            let body = build_statement(
+                &do_while.body,
+                scope,
+                scopes,
+                graph,
+                break_target,
+                depth + 1,
+            )?;
             let condition = graph.node()?;
             if !connect_exits(graph, &body.exits, condition) {
                 return None;
@@ -586,7 +596,22 @@ fn build_statement(
                 exits: vec![node],
             })
         }
-        StatementKind::Switch(_) | StatementKind::Break(_) | StatementKind::Error(_) => {
+        StatementKind::Switch(switch) => build_switch(switch, scope, scopes, graph, depth),
+        StatementKind::Break(_) => {
+            let node = graph.node()?;
+            let Some(target) = break_target else {
+                graph.failed = true;
+                return None;
+            };
+            if !graph.edge(node, target) {
+                return None;
+            }
+            Some(Fragment {
+                entry: node,
+                exits: Vec::new(),
+            })
+        }
+        StatementKind::Error(_) => {
             graph.failed = true;
             None
         }
@@ -608,12 +633,20 @@ fn build_if(
     scope: ScopeId,
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
+    break_target: Option<usize>,
     depth: usize,
 ) -> Option<Fragment> {
     let condition = graph.node()?;
     let (may_true, may_false) =
         condition_possibilities(&if_statement.condition, false, scope, scopes)?;
-    let then_branch = build_statement(&if_statement.then_branch, scope, scopes, graph, depth + 1)?;
+    let then_branch = build_statement(
+        &if_statement.then_branch,
+        scope,
+        scopes,
+        graph,
+        break_target,
+        depth + 1,
+    )?;
     let mut exits = Vec::new();
     if may_true {
         if !graph.edge(condition, then_branch.entry) {
@@ -622,7 +655,8 @@ fn build_if(
         exits.extend(then_branch.exits);
     }
     if let Some(else_branch) = &if_statement.else_branch {
-        let else_fragment = build_statement(else_branch, scope, scopes, graph, depth + 1)?;
+        let else_fragment =
+            build_statement(else_branch, scope, scopes, graph, break_target, depth + 1)?;
         if may_false {
             if !graph.edge(condition, else_fragment.entry) {
                 return None;
@@ -643,6 +677,7 @@ fn build_for(
     scope: ScopeId,
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
+    break_target: Option<usize>,
     depth: usize,
 ) -> Option<Fragment> {
     let condition = graph.node()?;
@@ -653,7 +688,14 @@ fn build_for(
     } else {
         condition_possibilities(&for_statement.condition, false, scope, scopes)?
     };
-    let body = build_statement(&for_statement.body, scope, scopes, graph, depth + 1)?;
+    let body = build_statement(
+        &for_statement.body,
+        scope,
+        scopes,
+        graph,
+        break_target,
+        depth + 1,
+    )?;
     if may_enter && !graph.edge(condition, body.entry) {
         return None;
     }
@@ -675,12 +717,20 @@ fn build_while(
     scope: ScopeId,
     scopes: &ScopeTree,
     graph: &mut FlowGraph,
+    break_target: Option<usize>,
     depth: usize,
 ) -> Option<Fragment> {
     let condition = graph.node()?;
     let (may_enter, may_exit) =
         condition_possibilities(&while_statement.condition, false, scope, scopes)?;
-    let body = build_statement(&while_statement.body, scope, scopes, graph, depth + 1)?;
+    let body = build_statement(
+        &while_statement.body,
+        scope,
+        scopes,
+        graph,
+        break_target,
+        depth + 1,
+    )?;
     if may_enter && !graph.edge(condition, body.entry) {
         return None;
     }
@@ -694,6 +744,76 @@ fn build_while(
         } else {
             Vec::new()
         },
+    })
+}
+
+fn build_switch(
+    switch: &crate::ast::SwitchStatement,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    graph: &mut FlowGraph,
+    depth: usize,
+) -> Option<Fragment> {
+    if depth > MAX_CFG_DEPTH {
+        graph.failed = true;
+        return None;
+    }
+    // A switch owns its break target. Breaks in nested blocks and control-flow
+    // bodies resolve here; a nested switch shadows this target with its own.
+    let switch_exit = graph.node()?;
+    let switch_scope = scopes.scope_for_switch(switch).unwrap_or(scope);
+    let mut arms = Vec::with_capacity(switch.arms.len());
+    let mut has_default = false;
+
+    for arm in &switch.arms {
+        if matches!(arm.label, crate::ast::SwitchLabel::Error(_)) {
+            graph.failed = true;
+            return None;
+        }
+        has_default |= matches!(arm.label, crate::ast::SwitchLabel::Default);
+        arms.push(build_statements(
+            &arm.statements,
+            switch_scope,
+            scopes,
+            graph,
+            Some(switch_exit),
+            depth + 1,
+        )?);
+    }
+
+    // Arms fall through in source order. Break statements already have a
+    // direct edge to switch_exit and therefore do not appear among exits.
+    for index in 0..arms.len() {
+        let next = arms.get(index + 1).map_or(switch_exit, |arm| arm.entry);
+        if !connect_exits(graph, &arms[index].exits, next) {
+            return None;
+        }
+    }
+
+    let dispatch = graph.node()?;
+    for (arm, fragment) in switch.arms.iter().zip(&arms) {
+        match arm.label {
+            crate::ast::SwitchLabel::Case(_) | crate::ast::SwitchLabel::Default => {
+                if !graph.edge(dispatch, fragment.entry) {
+                    return None;
+                }
+            }
+            crate::ast::SwitchLabel::Error(_) => {
+                graph.failed = true;
+                return None;
+            }
+        }
+    }
+    if !has_default && !graph.edge(dispatch, switch_exit) {
+        return None;
+    }
+
+    // Keep the structural switch exit even when it is currently unreachable.
+    // Deferred `jump` edges are resolved after the enclosing function is built
+    // and may make the exit reachable later.
+    Some(Fragment {
+        entry: dispatch,
+        exits: vec![switch_exit],
     })
 }
 

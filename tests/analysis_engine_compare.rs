@@ -521,7 +521,7 @@ fn incomplete_report_keeps_per_rule_counts_exact() {
 
 #[test]
 fn near_miss_codes_are_not_compared_or_budgeted() {
-    let near_misses = ["SEM01", "SEM0001", "sem001", "SEM024"];
+    let near_misses = ["SEM01", "SEM0001", "sem001", "SEM024", "SEM027"];
     let input: Vec<Diagnostic> = (0..=MAX_COMPARE_FINGERPRINTS_PER_ENGINE)
         .map(|index| diagnostic(near_misses[index % near_misses.len()]))
         .collect();
@@ -543,9 +543,12 @@ fn near_miss_codes_are_not_compared_or_budgeted() {
 }
 
 #[test]
-fn ast_only_lint_codes_are_ignored_by_the_comparator() {
+fn ast_only_codes_are_ignored_by_the_comparator() {
     assert_eq!(SEM_CODES.len(), 23);
-    for code in ["SEM024", "SEM025", "SEM026"] {
+    for code in [
+        "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
+        "SEM033",
+    ] {
         assert!(
             !SEM_CODES.contains(&code),
             "{code} must stay outside the compared Legacy rule set"
@@ -569,6 +572,29 @@ fn ast_only_lint_codes_are_ignored_by_the_comparator() {
             kind: DiagnosticKind::Lint,
             message: "function 'helper' is never called".to_owned(),
             ..diagnostic("SEM026")
+        },
+        diagnostic("SEM027"),
+        diagnostic("SEM028"),
+        diagnostic("SEM029"),
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM030")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM031")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM032")
+        },
+        Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Lint,
+            ..diagnostic("SEM033")
         },
     ];
 

@@ -1304,20 +1304,51 @@ fn parser_preserves_return_keyword_and_empty_for_condition() {
 }
 
 #[test]
-fn firestorm_switch_and_break_suppress_missing_return_conservatively() {
+fn firestorm_switch_cfg_models_fallthrough_break_and_unmatched_paths() {
     use neolint::ast::{parse_ast_with_options, AstParseOptions};
-    let source = "integer choose(integer value) { switch (value) { case 1: break; } } default { state_entry() { } }";
+
+    let source = r#"
+        integer exhaustive(integer value) {
+            switch (value) {
+                case 1: return 1;
+                case 2: return 2;
+                default: return 3;
+            }
+        }
+        integer missing_default(integer value) {
+            switch (value) { case 1: return 1; }
+        }
+        integer break_path(integer value) {
+            switch (value) { case 1: return 1; default: { break; } }
+        }
+        integer nested_break(integer value) {
+            switch (value) {
+                case 1: {
+                    switch (value) { case 2: break; default: return 2; }
+                    return 1;
+                }
+                default: return 3;
+            }
+        }
+        default { state_entry() { } }
+    "#;
     let (tokens, lexical) = lex(source);
-    assert!(lexical.is_empty());
+    assert!(lexical.is_empty(), "{lexical:?}");
     let (ast, syntax) =
         parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
     assert!(syntax.is_empty(), "{syntax:?}");
     let diagnostics = analyze_ast(&ast, &syntax);
-    assert!(
-        !diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "SEM011"),
-        "{diagnostics:?}"
+    let missing_return_functions: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "SEM011")
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    assert_eq!(
+        missing_return_functions,
+        vec![
+            "function missing_default may reach the end without returning a value".to_owned(),
+            "function break_path may reach the end without returning a value".to_owned()
+        ]
     );
 }
 

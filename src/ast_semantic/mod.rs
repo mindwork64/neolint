@@ -36,10 +36,11 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
 /// `syntax_diagnostics` must be the AST parser diagnostics for the same parse.
 /// `environment_reliable` is false when the same analysis unit produced an
 /// error-severity preprocessor or lexical diagnostic. Code may have been
-/// dropped before parsing in that case, so the unused-variable, unused-parameter
-/// and unreachable-function rules fail closed instead of treating the surviving
-/// text as complete. The flag affects only those three Phase 7 rules; all
-/// SEM001–SEM023 diagnostics are computed exactly as before.
+/// dropped before parsing in that case, so the unused-variable, unused-parameter,
+/// unreachable-function, global-initializer and Firestorm-switch rules fail
+/// closed instead of treating the surviving text as complete. The flag affects
+/// only these AST-only rules; all SEM001–SEM023 diagnostics are computed exactly
+/// as before.
 pub fn analyze_ast_with_environment(
     ast: &Ast,
     syntax_diagnostics: &[Diagnostic],
@@ -76,6 +77,18 @@ pub fn analyze_ast_with_environment(
         &expressions.initializers,
         &scopes,
         &functions,
+    ));
+    diagnostics.extend(rules::global_initializers::check(
+        &expressions.initializers,
+        &scopes,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::firestorm_switches::check(
+        ast,
+        &scopes,
+        &functions,
+        syntax_diagnostics,
+        environment_reliable,
     ));
     diagnostics.extend(rules::assignments::check(
         &expressions.expressions,

@@ -84,11 +84,20 @@ switch (value)
 ```
 
 Case order and fallthrough are preserved. Missing `break` is therefore not an
-error and is not converted into an isolated block. `default` is optional,
-duplicate cases/defaults are retained as separate AST arms, and nested switches
-and case blocks are supported. `break;` is contextual: inside a switch it is a
-break statement (including inside nested blocks); outside a switch it remains an
-ordinary identifier expression.
+error and is not converted into an isolated block. `default` is optional; a
+missing label produces the AST-only `SEM031` completeness warning. Duplicate
+constant cases (`SEM030`), repeated `default` labels (`SEM028`), incompatible
+case types (`SEM029`), constant switch expressions (`SEM032`), and list switch
+comparisons (`SEM033`) receive semantic diagnostics when they can be determined
+reliably. Unknown or malformed expressions are not guessed. Nested switches
+and case blocks are supported. `break;` is contextual: inside a switch it exits
+the innermost switch, including when nested in another block or control-flow
+statement; outside a switch it remains an ordinary identifier expression.
+
+The AST control-flow graph models case dispatch, fallthrough, `default`, and
+`break`. Value-returning functions that contain a switch can therefore receive
+`SEM011` when an unmatched path or a `break` can reach the function end, rather
+than having their return analysis disabled for the entire function.
 
 ### Lazy lists
 
@@ -187,6 +196,21 @@ optimistically. Informational and warning preprocessor notices do not suppress.
 nodes, 8,192 edges, 16,384 work steps) are exceeded, rather than reporting a
 partial result. The exact messages, spans, defaults, and boundaries are in the
 [diagnostic reference](diagnostics.md).
+
+## Global variable initializers
+
+Global variables may be initialized from a simple value rather than a runtime
+expression. The AST engine reports `SEM027` when it can prove that a global
+initializer is not such a value. Accepted forms include scalar literals,
+visible global-variable references, built-in constants, vectors/rotations whose
+components are simple numeric values, and flat lists of simple values.
+
+Arithmetic and logical operators, function calls, casts, parenthesized forms,
+nested list literals, and non-numeric vector/rotation components are not treated
+as simple global values. Local-variable initializers are unaffected. This is a
+static syntactic check, not constant folding and not a guarantee that the target
+viewer/compiler will accept every script; see the [diagnostic reference](diagnostics.md)
+for its conservative boundaries.
 
 ## Important limitations
 

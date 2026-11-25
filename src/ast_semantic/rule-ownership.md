@@ -50,6 +50,38 @@ No SEM rule remains Legacy-only in the current matrix.
 | SEM022 | `analyze_state_topology` | `ast_semantic::rules::state_targets` | migrated in 6F | exact | none | `sem022_exact_message_and_target_span`, full corpus |
 | SEM023 | `analyze_discarded_comparison_expressions` | `ast_semantic::rules::discarded_comparisons` | migrated in 6F | exact | none | `sem023_exact_warning_operator_span`, full corpus |
 
+## AST-only global initializer validation (SEM027)
+
+- `ast_semantic::rules::global_initializers` checks only top-level global
+  declarator initializers. It does not change SEM015's global/local type checks.
+- The rule accepts scalar literals, visible global-variable references,
+  canonical built-in constants, vectors/rotations with simple numeric
+  components, and flat lists of simple values. It does not evaluate operators
+  or calls; parenthesized forms and nested list literals are rejected.
+- Malformed/Error expressions, unreliable lexical/preprocessor environments,
+  and expressions exceeding the 128-node or 64-level budget are skipped rather
+  than diagnosed.
+- SEM027 has no Legacy counterpart. It is emitted by the AST default and
+  explicit AST engine only; Legacy and the SEM001–SEM023 Compare contract are
+  unchanged.
+
+## Firestorm switch semantics (SEM028–SEM033)
+
+- `ast_semantic::rules::firestorm_switches` checks only typed AST switch nodes;
+  it therefore runs only when the Firestorm switches feature gate was enabled.
+- The rule reports duplicate `default` labels and provably incompatible case
+  types as semantic errors. It warns on duplicate constant case values, a
+  missing `default`, constant switch expressions, and list comparisons.
+- Duplicate detection and constant evaluation are bounded. Dynamic or unknown
+  case expressions are not guessed; malformed switches and switches overlapped
+  by parser errors are skipped. An unreliable lexical/preprocessor environment
+  suppresses the rule.
+- These diagnostics are AST-only and remain outside the SEM001–SEM023 Compare
+  parity set. Legacy remains unchanged.
+- The flow graph models switch dispatch, source-order fallthrough, the optional
+  no-match path, and `break` to the innermost switch exit. This allows SEM011 to
+  analyze switch-containing functions instead of suppressing all such functions.
+
 ## AST scope semantics
 
 - Root scope: all global variable declarators and user-defined functions.

@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025` and `SEM026` default to **warning**; the rest default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, and `SEM030`–`SEM033`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, and `SEM030`–`SEM033` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -154,6 +154,13 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM024` | Variable is declared but never read. | warning / lint | Syntactic read/use analysis, not runtime liveness. Plain assignment targets and call callees are not reads; compound assignments, increments/decrements and component reads are. Emits nothing when the unit has AST parser diagnostics, recovered function signatures, error nodes, missing/unclosed function/event/state bodies, or error-severity preprocessor/lexical diagnostics. |
 | `SEM025` | Parameter is declared but never read. | warning / lint | Syntactic read/use analysis over user-function and canonical event parameters. Unknown extension-event parameters and malformed/recovered parameters are excluded. Emits nothing when the unit has AST parser diagnostics, recovered function signatures, error nodes, missing/unclosed function/event/state bodies, or error-severity preprocessor/lexical diagnostics. |
 | `SEM026` | User function is never called from an event handler or global initializer. | warning / lint | Reachability over matched direct identifier calls only; built-in callees, indirect calls and calls without a closing parenthesis create no edges. A function called only from another unreachable function is still reported. Prototypes, recovered signatures and duplicate declarations after the first definition are never nodes. Suppressed by the same fail-closed conditions as SEM024/SEM025 (AST parser diagnostics, recovered signatures, error nodes, missing/unclosed bodies, or error-severity preprocessor/lexical diagnostics) and by budget overflow. |
+| `SEM027` | Global initializer is not a simple assignable value. | error / semantic | AST-only. Checks global declarations, not locals. Accepts literals, visible global variables, built-in constants, numeric vector/rotation components and flat list values. Rejects operators, calls, parenthesized expressions, nested list literals and non-numeric vector/rotation components. Malformed/Error expressions, an unreliable lexical/preprocessor environment, and resource-limit exhaustion are skipped. |
+| `SEM028` | A Firestorm switch has more than one `default` label. | error / semantic | AST-only and emitted only when the Firestorm switches gate is enabled. Reports the second `default`; malformed switch bodies are skipped. |
+| `SEM029` | A statically typed `case` expression cannot be compared with the switch expression. | error / semantic | AST-only. Uses the existing LSL equality-operator type matrix; unknown types are not guessed. |
+| `SEM030` | Two constant `case` expressions have the same value. | warning / lint | AST-only. Constant-folds bounded scalar expressions and recognizes built-in constants; simple vector, rotation, and list literals can also be compared. Unknown/dynamic expressions are skipped. Numeric integer/float values are compared using LSL float coercion. |
+| `SEM031` | A Firestorm switch has no `default` label. | warning / lint | AST-only. `default` is optional syntax; this is a completeness warning, not a parser error. |
+| `SEM032` | The switch expression is a compile-time constant. | warning / lint | AST-only. Reports once on the switch expression; evaluation is bounded and conservative. |
+| `SEM033` | The switch expression has list type. | warning / lint | AST-only. Firestorm switch lowering compares the list value; LSL list equality compares list lengths rather than element contents. |
 
 ## Illustrative minimal examples
 
@@ -225,6 +232,12 @@ default { state_entry() { llOwnerSay((string)unusedParameter(1)); } }
 ```lsl
 // SEM026: function is never called from any event or global initializer
 unusedFunction() { }
+default { state_entry() { } }
+```
+
+```lsl
+// SEM027: a global initializer cannot call a runtime function
+float sampled = llGetTime();
 default { state_entry() { } }
 ```
 
@@ -314,6 +327,8 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM024 is a syntactic read/use analysis, not runtime liveness: a read counts even when reachable only from a function that later call-graph analysis may prove is never invoked. SEM024 fails closed and emits nothing when the same unit has an error-severity preprocessor or lexical diagnostic, or when syntax errors, recovered function signatures, error nodes, missing bodies or unclosed function/event/state bodies make reads unreliable.
 - SEM025 uses the same syntactic read/use model and the same fail-closed gate. Because the scope model registers parameters only for user functions and canonical events, unknown extension-event parameters are excluded structurally rather than by a second policy.
 - SEM026 is reachability, not dead-code elimination: roots are matched direct identifier calls in event bodies and global initializers, and edges are matched direct identifier calls in user-function bodies. Built-in callees, indirect calls and calls without a real closing parenthesis never create edges; first-definition duplicate handling follows SEM001. A function called only from another unreachable function is still reported, because this is reachability, not a claim that no call sites exist. The graph is bounded and any node/edge/work overflow emits no SEM026 rather than reporting a partial result; error-severity preprocessor or lexical diagnostics suppress it through the same fail-closed gate as SEM024/SEM025.
+- SEM027 is an AST-only semantic error for global initializers that are definitely not simple values. It accepts scalar literals, visible global-variable references, built-in constants, vectors/rotations made from simple numeric components, and flat lists made from simple values. It does not constant-fold operators or function calls. Parenthesized forms and nested list literals are rejected to match the simple-assignable grammar; malformed expressions and inputs that exceed the bounded 128-node/64-depth check, or units with error-severity preprocessor/lexical diagnostics, are skipped.
+- SEM028–SEM033 are Firestorm-switch-only AST diagnostics. They are active only when the switch feature gate is enabled. The CFG models case dispatch, source-order fallthrough, `default`, and `break` to the innermost switch exit, so SEM011 can analyze value-returning functions containing switches instead of suppressing the whole function. A switch with no `default` retains an unmatched path; a `break` retains a path to the statement after the switch.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 
