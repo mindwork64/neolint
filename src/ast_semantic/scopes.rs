@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::ast::{
     Ast, Block, EventHandler, Statement, StatementKind, SwitchStatement, TopLevel, TypeKind,
 };
-use crate::builtins;
+use crate::builtins::{self, Signature};
 
 /// Stable index of one lexical scope in a [`ScopeTree`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -69,11 +69,21 @@ pub struct ScopeTree {
     /// binary search, which keeps resolution near O(log n) instead of O(n) per
     /// use when a scope holds many declarations.
     name_index: Vec<HashMap<String, Vec<u32>>>,
+    /// Built-in function signatures selected for this analysis target.
+    builtin_functions: &'static HashMap<String, Signature>,
 }
 
 impl ScopeTree {
-    /// Build scopes and bindings from a parsed AST.
+    /// Build scopes and bindings from a parsed AST using canonical Second Life LSL built-ins.
     pub fn build(ast: &Ast) -> Self {
+        Self::build_with_builtins(ast, &builtins::definitions().functions)
+    }
+
+    /// Build scopes with the built-in function catalogue for the selected target.
+    pub(crate) fn build_with_builtins(
+        ast: &Ast,
+        builtin_functions: &'static HashMap<String, Signature>,
+    ) -> Self {
         let mut tree = Self {
             scopes: vec![Scope {
                 parent: None,
@@ -83,6 +93,7 @@ impl ScopeTree {
             block_scopes: HashMap::new(),
             switch_scopes: HashMap::new(),
             name_index: vec![HashMap::new()],
+            builtin_functions,
         };
         for item in &ast.items {
             match item {
@@ -155,6 +166,11 @@ impl ScopeTree {
             }
         }
         tree
+    }
+
+    /// Built-in function signatures selected for this tree's target.
+    pub(crate) fn builtin_functions(&self) -> &'static HashMap<String, Signature> {
+        self.builtin_functions
     }
 
     /// Root/global scope.

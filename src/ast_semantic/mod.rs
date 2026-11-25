@@ -90,7 +90,7 @@ pub fn analyze_ast_with_target_options(
     ossl_allowlist: &OsslAllowlist,
 ) -> Vec<Diagnostic> {
     let builtin_functions = builtins::functions_for_target(target);
-    let scopes = scopes::ScopeTree::build(ast);
+    let scopes = scopes::ScopeTree::build_with_builtins(ast, builtin_functions);
     let functions = types::collect_user_functions(ast);
     let expressions = expressions::collect_facts(ast, &scopes);
     let calls = calls::collect_calls(ast, &scopes);

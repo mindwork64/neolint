@@ -47,7 +47,7 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 `SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, and `SEM048` are AST-only lint diagnostics.
-`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, `SEM046`, and `SEM047` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning. The Firestorm switch
+`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, and `SEM045`–`SEM047` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
 user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply

@@ -92,7 +92,7 @@ region. With an explicit allowlist, SEM048 warns when a known OSSL call is
 not listed. This does not inspect the live region's threat levels, security
 configuration or permissions. No OSSL allowlist means no availability claim.
 
-The current OpenSim snapshots cover function names and a narrow set of
+The selected OpenSim function catalogue is also used by expression return-type inference, so calls to functions absent from an OpenSim runtime are not assigned a Second Life return type. The current OpenSim snapshots cover function names and a narrow set of
 signature adaptations. Runtime-specific event and constant catalogs,
 comprehensive API signature differences, and in-world verification in both
 OpenSim engines remain outstanding. Second Life Mono, LSO and LSL-on-Luau use

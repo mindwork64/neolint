@@ -78,7 +78,7 @@ pub(crate) fn infer_expression_type(
         scopes,
         scope,
         functions,
-        &builtins::definitions().functions,
+        scopes.builtin_functions(),
     )
 }
 

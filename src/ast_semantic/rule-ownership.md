@@ -415,3 +415,19 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   complete lexical/preprocessor and parser input fail closed when that input
   is unreliable; their individual resource limits are documented alongside
   each rule.
+
+
+## Target-aware API compatibility rules (SEM047–SEM048)
+
+- SEM047 reports only calls whose names are present in the canonical Second
+  Life LSL function catalogue but absent from the selected OpenSim interface.
+  Unknown names and OSSL calls are not treated as missing LSL APIs. A user
+  function with the same name shadows the built-in and is not reported.
+- SEM048 checks known OSSL calls only when the project explicitly enables
+  its allowlist (ossl_allowlist = strict / --strict-ossl, optionally with
+  repeated ossl_function / --ossl-function entries). An empty strict
+  allowlist warns for every known OSSL call. The rule does not claim knowledge
+  of the target region's security configuration or permissions.
+- Both checks fail closed if parser diagnostics exist or the lexical/
+  preprocessing environment is unreliable. They are AST-only and do not
+  change the frozen SEM001–SEM023 Compare parity contract.

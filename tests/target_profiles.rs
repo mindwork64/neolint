@@ -105,6 +105,28 @@ default { state_entry() { helper(); } }
 }
 
 #[test]
+fn expression_type_inference_uses_the_selected_runtime_builtin_catalogue() {
+    let source = r#"
+default {
+    state_entry() {
+        float value = llGetCameraFOV() + ZERO_VECTOR;
+    }
+}
+"#;
+    let xengine = codes(
+        source,
+        TargetProfile::parse("opensim-xengine").unwrap(),
+        &OsslAllowlist::default(),
+    );
+    assert!(has_code(&xengine, "SEM047"), "{xengine:?}");
+    assert!(!has_code(&xengine, "SEM046"), "{xengine:?}");
+
+    let mono = codes(source, TargetProfile::default(), &OsslAllowlist::default());
+    assert!(has_code(&mono, "SEM046"), "{mono:?}");
+    assert!(!has_code(&mono, "SEM047"), "{mono:?}");
+}
+
+#[test]
 fn yengine_only_lsl_functions_and_overloads_are_target_aware() {
     let three_argument_call = r#"
 default {

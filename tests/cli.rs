@@ -575,7 +575,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046",
+        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -592,7 +592,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046",
+        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }
