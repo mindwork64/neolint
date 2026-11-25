@@ -30,6 +30,8 @@ pub(crate) struct CallSite<'a> {
     pub(crate) call: &'a CallExpression,
     pub(crate) scope: ScopeId,
     pub(crate) owner: CallOwner,
+    /// Event name when this call appears directly inside an event handler.
+    pub(crate) event_name: Option<&'a str>,
 }
 
 /// Collect every call expression exactly once, including nested arguments,
@@ -45,6 +47,7 @@ pub(crate) fn collect_calls<'a>(ast: &'a Ast, scopes: &ScopeTree) -> Vec<CallSit
                             initializer,
                             scopes.root(),
                             CallOwner::GlobalInitializer,
+                            None,
                             &mut calls,
                         );
                     }
@@ -56,7 +59,7 @@ pub(crate) fn collect_calls<'a>(ast: &'a Ast, scopes: &ScopeTree) -> Vec<CallSit
                 };
                 let owner = CallOwner::Function(function.name_span.start);
                 let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
-                walk_block(body, scope, owner, scopes, &mut calls);
+                walk_block(body, scope, owner, None, scopes, &mut calls);
             }
             TopLevel::State(state) => {
                 for event in &state.events {
@@ -64,7 +67,14 @@ pub(crate) fn collect_calls<'a>(ast: &'a Ast, scopes: &ScopeTree) -> Vec<CallSit
                         continue;
                     };
                     let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
-                    walk_block(body, scope, CallOwner::EventHandler, scopes, &mut calls);
+                    walk_block(
+                        body,
+                        scope,
+                        CallOwner::EventHandler,
+                        Some(event.name.as_str()),
+                        scopes,
+                        &mut calls,
+                    );
                 }
             }
             TopLevel::Error(_) => {}
@@ -77,6 +87,7 @@ fn walk_block<'a>(
     block: &'a Block,
     scope: ScopeId,
     owner: CallOwner,
+    event_name: Option<&'a str>,
     scopes: &ScopeTree,
     calls: &mut Vec<CallSite<'a>>,
 ) {
@@ -91,7 +102,7 @@ fn walk_block<'a>(
             StatementKind::Local(local) => {
                 for declarator in &local.declarators {
                     if let Some(initializer) = &declarator.initializer {
-                        collect_in_expression(initializer, current_scope, owner, calls);
+                        collect_in_expression(initializer, current_scope, owner, event_name, calls);
                     }
                 }
             }
@@ -102,7 +113,13 @@ fn walk_block<'a>(
                 }
             }
             StatementKind::If(if_statement) => {
-                collect_in_expression(&if_statement.condition, current_scope, owner, calls);
+                collect_in_expression(
+                    &if_statement.condition,
+                    current_scope,
+                    owner,
+                    event_name,
+                    calls,
+                );
                 work.push((&if_statement.then_branch, current_scope));
                 if let Some(else_branch) = &if_statement.else_branch {
                     work.push((else_branch, current_scope));
@@ -110,36 +127,54 @@ fn walk_block<'a>(
             }
             StatementKind::For(for_statement) => {
                 for initializer in &for_statement.initializer {
-                    collect_in_expression(initializer, current_scope, owner, calls);
+                    collect_in_expression(initializer, current_scope, owner, event_name, calls);
                 }
-                collect_in_expression(&for_statement.condition, current_scope, owner, calls);
+                collect_in_expression(
+                    &for_statement.condition,
+                    current_scope,
+                    owner,
+                    event_name,
+                    calls,
+                );
                 for increment in &for_statement.increment {
-                    collect_in_expression(increment, current_scope, owner, calls);
+                    collect_in_expression(increment, current_scope, owner, event_name, calls);
                 }
                 work.push((&for_statement.body, current_scope));
             }
             StatementKind::While(while_statement) => {
-                collect_in_expression(&while_statement.condition, current_scope, owner, calls);
+                collect_in_expression(
+                    &while_statement.condition,
+                    current_scope,
+                    owner,
+                    event_name,
+                    calls,
+                );
                 work.push((&while_statement.body, current_scope));
             }
             StatementKind::DoWhile(do_while) => {
-                collect_in_expression(&do_while.condition, current_scope, owner, calls);
+                collect_in_expression(&do_while.condition, current_scope, owner, event_name, calls);
                 work.push((&do_while.body, current_scope));
             }
             StatementKind::Return(return_statement) => {
                 if let Some(value) = &return_statement.value {
-                    collect_in_expression(value, current_scope, owner, calls);
+                    collect_in_expression(value, current_scope, owner, event_name, calls);
                 }
             }
             StatementKind::Expression(expression) => {
-                collect_in_expression(&expression.expression, current_scope, owner, calls);
+                collect_in_expression(
+                    &expression.expression,
+                    current_scope,
+                    owner,
+                    event_name,
+                    calls,
+                );
             }
             StatementKind::Switch(switch) => {
-                collect_in_expression(&switch.condition, current_scope, owner, calls);
+                collect_in_expression(&switch.condition, current_scope, owner, event_name, calls);
                 let switch_scope = scopes.scope_for_switch(switch).unwrap_or(current_scope);
                 for arm in &switch.arms {
                     if let crate::ast::SwitchLabel::Case(expression) = &arm.label {
-                        collect_in_expression(expression, switch_scope, owner, calls);
+                        collect_in_expression(expression, switch_scope, owner, event_name, calls);
                     }
                     for statement in arm.statements.iter().rev() {
                         work.push((statement, switch_scope));
@@ -160,13 +195,19 @@ fn collect_in_expression<'a>(
     expression: &'a Expression,
     scope: ScopeId,
     owner: CallOwner,
+    event_name: Option<&'a str>,
     calls: &mut Vec<CallSite<'a>>,
 ) {
     let mut work: Vec<(&Expression, ScopeId)> = vec![(expression, scope)];
     while let Some((expression, scope)) = work.pop() {
         match &expression.kind {
             ExpressionKind::Call(call) => {
-                calls.push(CallSite { call, scope, owner });
+                calls.push(CallSite {
+                    call,
+                    scope,
+                    owner,
+                    event_name,
+                });
                 work.push((&call.callee, scope));
                 for argument in call.arguments.iter().rev() {
                     work.push((argument, scope));
@@ -271,6 +312,17 @@ mod tests {
         assert_eq!(
             calls.iter().map(|site| site.owner).collect::<Vec<_>>(),
             expected
+        );
+        assert_eq!(
+            calls.iter().map(|site| site.event_name).collect::<Vec<_>>(),
+            vec![
+                None,
+                None,
+                Some("state_entry"),
+                Some("state_entry"),
+                Some("custom_event"),
+                Some("state_entry"),
+            ]
         );
 
         // Every call still resolves through the lexical scope it appeared in.

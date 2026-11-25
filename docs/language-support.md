@@ -119,6 +119,38 @@ narrow: it checks only bare plain assignments in `if` conditions, not compound
 assignments or assignments nested inside larger expressions. This follows the
 [Second Life Wiki guidance for the `=`/`==` mistake](https://wiki.secondlife.com/wiki/If#The_=/==_Mistakes).
 
+### Detection functions and event context
+
+The `llDetected*` family reads data supplied by detection events. General
+functions such as `llDetectedKey`, `llDetectedName` and `llDetectedPos` are
+meaningful in `collision`, `collision_start`, `collision_end`, `sensor`,
+`touch`, `touch_start`, `touch_end`, `on_damage` and `final_damage` handlers,
+or in user-defined functions called from those handlers. Calling them from an
+unrelated event silently produces unusable data.
+
+Some functions have narrower contracts: `llDetectedGrab` and every
+`llDetectedTouch*` function are touch-only; `llDetectedLinkNumber` requires a
+touch or collision event context; `llDetectedDamage` is available in
+`on_damage` and `final_damage`; and `llAdjustDamage` is available only in
+`on_damage`.
+
+The AST engine reports an incompatible reachable call as warning `SEM042`.
+It propagates contexts through direct user-function calls, so a helper used
+only from a touch/collision/sensor/damage handler is accepted, while a helper
+also called from `state_entry` is warned. Unknown extension events do not
+supply an assumed context, and unreferenced helpers are not diagnosed. Parser
+errors, unreliable lexical/preprocessor input and graph-budget exhaustion
+suppress the rule rather than producing partial findings.
+
+References: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wiki/LlDetectedKey),
+[llDetectedGrab](https://wiki.secondlife.com/wiki/LlDetectedGrab),
+[llDetectedLinkNumber](https://wiki.secondlife.com/wiki/LlDetectedLinkNumber),
+[llDetectedTouchFace](https://wiki.secondlife.com/wiki/LlDetectedTouchFace),
+[llDetectedDamage](https://wiki.secondlife.com/wiki/LlDetectedDamage),
+[llAdjustDamage](https://wiki.secondlife.com/wiki/LlAdjustDamage),
+[On damage](https://wiki.secondlife.com/wiki/On_damage), and
+[Final damage](https://wiki.secondlife.com/wiki/Final_damage).
+
 ### Lists and comparisons
 
 LSL lists cannot contain other lists. This includes a nested list literal, a
