@@ -498,7 +498,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     let source = write_file(
         &directory,
         "unused-analysis.lsl",
-        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\ndetection_helper() { llDetectedKey(0); }\nlist source_list = [1];\ninteger condition_target;\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; llDetectedName(0); detection_helper(); integer math_hazard = 4 / 0; float invalid_root = llSqrt(-1.0); float invalid_power = llPow(-2.0, 0.5); integer invalid_operator = !calculated; integer invalid_binary = \"bad\" - 1; llOwnerSay((string)math_hazard); if (condition_target = 1) { } if (condition_target == 1) { } if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } touch_start(integer detected_total) { if (detected_total > 0) detection_helper(); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
+        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\ndetection_helper() { llDetectedKey(0); }\nlist source_list = [1];\ninteger condition_target;\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; llDetectedName(0); detection_helper(); integer math_hazard = 4 / 0; float invalid_root = llSqrt(-1.0); float invalid_power = llPow(-2.0, 0.5); float invalid_acos = llAcos(1.5); float invalid_asin = llAsin(-1.5); float invalid_log = llLog(0.0); float invalid_log10 = llLog10(-1.0); integer invalid_operator = !calculated; integer invalid_binary = \"bad\" - 1; llOwnerSay((string)math_hazard); if (condition_target = 1) { } if (condition_target == 1) { } if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } touch_start(integer detected_total) { if (detected_total > 0) detection_helper(); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
     );
     let source = source.to_str().unwrap();
 
@@ -521,6 +521,22 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     );
     assert!(
         ast_stdout.contains("llPow has a statically negative base"),
+        "{ast_stdout}"
+    );
+    assert!(
+        ast_stdout.contains("llAcos has a statically out-of-range argument"),
+        "{ast_stdout}"
+    );
+    assert!(
+        ast_stdout.contains("llAsin has a statically out-of-range argument"),
+        "{ast_stdout}"
+    );
+    assert!(
+        ast_stdout.contains("llLog has a statically non-positive argument"),
+        "{ast_stdout}"
+    );
+    assert!(
+        ast_stdout.contains("llLog10 has a statically non-positive argument"),
         "{ast_stdout}"
     );
     assert!(ast_stdout.contains("warning[SEM044]"), "{ast_stdout}");

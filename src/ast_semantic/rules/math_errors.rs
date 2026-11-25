@@ -1,4 +1,4 @@
-//! SEM043: statically provable division and imaginary math-domain hazards.
+//! SEM043: statically provable division and mathematical-domain hazards.
 
 use std::collections::HashMap;
 
@@ -158,8 +158,10 @@ pub(crate) fn check(
                 let ExpressionKind::Identifier(callee) = &call.callee.kind else {
                     continue;
                 };
-                if !matches!(callee.name.as_str(), "llSqrt" | "llPow")
-                    || functions.contains_key(callee.name.as_str())
+                if !matches!(
+                    callee.name.as_str(),
+                    "llSqrt" | "llPow" | "llAcos" | "llAsin" | "llLog" | "llLog10"
+                ) || functions.contains_key(callee.name.as_str())
                     || !call.matched_close
                     || !call.arguments_complete
                     || call.declared_argument_count != call.arguments.len()
@@ -171,7 +173,7 @@ pub(crate) fn check(
                 else {
                     continue;
                 };
-                let expected_argument_count = if callee.name == "llSqrt" { 1 } else { 2 };
+                let expected_argument_count = if callee.name == "llPow" { 2 } else { 1 };
                 if signature.parameters.len() != expected_argument_count
                     || call.arguments.len() != expected_argument_count
                 {
@@ -219,6 +221,26 @@ pub(crate) fn check(
                     {
                         Some(
                             "llPow has a statically negative base and non-integer exponent; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llAcos" if values.first().is_some_and(|value| !(-1.0..=1.0).contains(&value.as_float())) => {
+                        Some(
+                            "llAcos has a statically out-of-range argument outside [-1.0, 1.0]; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llAsin" if values.first().is_some_and(|value| !(-1.0..=1.0).contains(&value.as_float())) => {
+                        Some(
+                            "llAsin has a statically out-of-range argument outside [-1.0, 1.0]; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llLog" if values.first().is_some_and(|value| value.as_float() <= 0.0) => {
+                        Some(
+                            "llLog has a statically non-positive argument; LSL returns 0.0 instead of the natural logarithm",
+                        )
+                    }
+                    "llLog10" if values.first().is_some_and(|value| value.as_float() <= 0.0) => {
+                        Some(
+                            "llLog10 has a statically non-positive argument; LSL returns 0.0 instead of the base-10 logarithm",
                         )
                     }
                     _ => None,

@@ -168,6 +168,119 @@ fn warns_on_pow_with_negative_base_and_non_integer_exponent() {
 }
 
 #[test]
+fn warns_on_asin_and_acos_arguments_outside_the_documented_interval() {
+    let source = "default { state_entry() { \
+        float a = llAcos(2.0); \
+        float b = llAcos(-1.0 - 0.25); \
+        float c = llAsin(-2); \
+        float d = llAsin((float)3); \
+        float safe_min = llAcos(-1.0); \
+        float safe_max = llAcos(1.0); \
+        float safe_asin_min = llAsin(-1.0); \
+        float safe_asin_max = llAsin(1.0); \
+        float safe_middle = llAsin(0.5); \
+    } }";
+    let diagnostics = sem043(source);
+
+    assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+    assert!(diagnostics[0].message.contains("llAcos"), "{diagnostics:?}");
+    assert!(diagnostics[1].message.contains("llAcos"), "{diagnostics:?}");
+    assert!(diagnostics[2].message.contains("llAsin"), "{diagnostics:?}");
+    assert!(diagnostics[3].message.contains("llAsin"), "{diagnostics:?}");
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.message.contains("outside [-1.0, 1.0]")
+            && diagnostic.message.contains("NaN in Mono")
+            && diagnostic.message.contains("Math Error in LSO")
+    }));
+    for diagnostic in &diagnostics {
+        let callee = if diagnostic.message.contains("llAcos") {
+            "llAcos"
+        } else {
+            "llAsin"
+        };
+        assert!(
+            source[diagnostic.span.start..].starts_with(callee),
+            "wrong primary span for {diagnostic:?}"
+        );
+    }
+}
+
+#[test]
+fn warns_on_logarithms_with_non_positive_arguments_that_return_zero() {
+    let source = "default { state_entry() { \
+        float a = llLog(-1.0); \
+        float b = llLog(0.0); \
+        float c = llLog10(-(2.0 - 2.0)); \
+        float d = llLog10(-1.0); \
+        float safe_natural = llLog(0.5); \
+        float safe_base10 = llLog10(10.0); \
+    } }";
+    let diagnostics = sem043(source);
+
+    assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+    assert!(diagnostics[0].message.contains("llLog "), "{diagnostics:?}");
+    assert!(diagnostics[1].message.contains("llLog "), "{diagnostics:?}");
+    assert!(
+        diagnostics[2].message.contains("llLog10 "),
+        "{diagnostics:?}"
+    );
+    assert!(
+        diagnostics[3].message.contains("llLog10 "),
+        "{diagnostics:?}"
+    );
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.message.contains("non-positive argument")
+            && diagnostic.message.contains("returns 0.0")
+    }));
+    for diagnostic in &diagnostics {
+        let callee = if diagnostic.message.contains("llLog10") {
+            "llLog10"
+        } else {
+            "llLog"
+        };
+        assert!(
+            source[diagnostic.span.start..].starts_with(callee),
+            "wrong primary span for {diagnostic:?}"
+        );
+    }
+}
+
+#[test]
+fn does_not_guess_unknown_or_shadowed_math_builtin_calls() {
+    let diagnostics = sem043(
+        "float llAcos(float value) { return value; } \
+         float llAsin(float value) { return value; } \
+         float llLog(float value) { return value; } \
+         float llLog10(float value) { return value; } \
+         default { state_entry() { \
+             float input = 2.0; \
+             float unknown_acos = llAcos(input); \
+             float unknown_asin = llAsin(input); \
+             float shadowed_acos = llAcos(2.0); \
+             float shadowed_asin = llAsin(-2.0); \
+             float shadowed_log = llLog(-1.0); \
+             float shadowed_log10 = llLog10(0.0); \
+         } }",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn skips_math_builtin_calls_with_invalid_signatures() {
+    let diagnostics = sem043(
+        "default { state_entry() { \
+            float wrong_arity = llAcos(2.0, 0.0); \
+            float wrong_type = llAsin(\"not numeric\"); \
+            float wrong_log_arity = llLog(0.0, 1.0); \
+            float wrong_log_type = llLog10(\"not numeric\"); \
+        } }",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn does_not_evaluate_variables_or_user_functions_for_math_domains() {
     let diagnostics = sem043(
         "float llSqrt(float value) { return value; } \

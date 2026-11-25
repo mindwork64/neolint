@@ -31,7 +31,8 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   follow-up adds `SEM038` (empty states), `SEM039` (nested lists), and `SEM040`
   (list equality/inequality hazards), `SEM041` (bare assignments in `if`
   conditions), `SEM042` (detection-context-only calls), and `SEM043`
-  (zero divisors and invalid `llSqrt`/`llPow` domains). `SEM044` warns on populated
+  (zero divisors, invalid `llSqrt`/`llPow`/`llAcos`/`llAsin` domains and
+  non-positive `llLog`/`llLog10` arguments). `SEM044` warns on populated
   states with no transition path from `default`, and `SEM045` validates known
   operand types for unary, logical, bitwise/shift and increment/decrement operators;
   `SEM046` validates known-incompatible arithmetic and comparison operand

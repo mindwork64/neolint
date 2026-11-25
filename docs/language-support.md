@@ -185,10 +185,13 @@ References: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wik
 LSL integer/float division and integer remainder by zero cause a runtime
 `Math Error`; this includes `/=`, `%=` and vector division by a scalar zero.
 The AST engine reports warning `SEM043` when a bounded constant evaluator can
-prove the divisor is zero. It also checks the built-ins `llSqrt` and `llPow`:
-a negative square-root argument, or a negative power base with a non-integer
-exponent, produces an imaginary result. The documented runtime difference is
-important: Mono returns `NaN`, while legacy LSO triggers a `Math Error`.
+prove the divisor is zero. It also checks `llSqrt`, `llPow`, `llAcos` and `llAsin`:
+a negative square-root argument, a negative power base with a non-integer
+exponent, or an `llAcos`/`llAsin` argument outside `[-1.0, 1.0]` produces an
+imaginary result. The documented runtime difference is important: Mono returns
+`NaN`, while legacy LSO triggers a `Math Error`. The logarithm built-ins
+`llLog` and `llLog10` are also checked: for arguments `<= 0.0`, LSL returns
+`0.0` instead of a logarithm, which can silently corrupt a calculation.
 
 ```lsl
 integer quotient = 10 / (3 - 3); // SEM043
@@ -196,6 +199,10 @@ integer remainder = 10 % FALSE; // SEM043
 float negative_zero = 1.0 / -0.0; // SEM043
 float invalid_root = llSqrt(-1.0); // SEM043
 float invalid_power = llPow(-2.0, 0.5); // SEM043
+float invalid_acos = llAcos(1.5); // SEM043
+float invalid_asin = llAsin(-1.5); // SEM043
+float invalid_log = llLog(0.0); // SEM043: LSL returns 0.0
+float invalid_log10 = llLog10(-1.0); // SEM043: LSL returns 0.0
 ```
 
 The evaluator understands literals, unshadowed numeric built-in constants,

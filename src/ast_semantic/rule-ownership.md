@@ -386,11 +386,14 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   documented event contexts; unknown extension events and unreachable helper
   functions do not contribute guessed contexts.
 - SEM043 reports type-valid division and integer remainder when a bounded,
-  side-effect-free evaluator proves the divisor is zero. It also checks the
-  built-ins `llSqrt` and `llPow` for statically imaginary results. Mutable
-  variables and user-defined calls are not evaluated, built-in shadowing is
-  respected, and vector `%` remains a cross product. Mono returns `NaN` for
-  these imaginary results; legacy LSO triggers a Math Error.
+  side-effect-free evaluator proves the divisor is zero. It also checks
+  `llSqrt`, `llPow`, `llAcos` and `llAsin` for statically imaginary results;
+  inverse sine/cosine arguments must be within `[-1.0, 1.0]`. It warns when
+  `llLog`/`llLog10` receive known non-positive arguments because LSL silently
+  returns `0.0` instead of a logarithm. Mutable variables and user-defined
+  calls are not evaluated, built-in shadowing is respected, and vector `%`
+  remains a cross product. Mono returns `NaN` for imaginary results; legacy LSO
+  triggers a Math Error for those cases.
 - SEM044 constructs a bounded over-approximation of state transitions from
   event-handler bodies, rooted at `default`. Conditional and textually
   unreachable state changes count as possible edges. Global-function state
