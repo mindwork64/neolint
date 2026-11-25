@@ -12,6 +12,11 @@ default
         gCount += total_number;
         llOwnerSay((string)gCount);
     }
+
+    touch_end(integer total_number)
+    {
+        if (total_number > 0) state sleeping;
+    }
 }
 
 state sleeping

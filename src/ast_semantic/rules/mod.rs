@@ -21,6 +21,7 @@ pub(crate) mod state_namespace;
 pub(crate) mod state_targets;
 pub(crate) mod state_transitions;
 pub(crate) mod unreachable_functions;
+pub(crate) mod unreachable_states;
 pub(crate) mod unresolved_variables;
 pub(crate) mod unused_parameters;
 pub(crate) mod unused_variables;

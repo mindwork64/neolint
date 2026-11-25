@@ -35,3 +35,4 @@ medium_list_comparisons|medium|medium/list_comparisons.lsl|original|project-auth
 medium_if_assignment|medium|medium/if_assignment.lsl|original|project-authored|valid|SEM041:1:warning|0|none|Bare assignment in if condition is suspicious; an extra pair of parentheses marks intentional use
 medium_detected_context|medium|medium/detected_context.lsl|original|project-authored|valid|SEM042:2:warning|0|none|Detection-only calls reached from state_entry, directly and through a helper also used by touch_start
 medium_math_errors|medium|medium/math_errors.lsl|original|project-authored|valid|SEM043:4:warning|0|none|Integer/float division, integer remainder and compound division by statically known zero
+medium_state_reachability|medium|medium/state_reachability.lsl|original|project-authored|valid|SEM044:1:warning|0|none|State graph reachability from default through event-handler transitions

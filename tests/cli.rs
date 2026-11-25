@@ -493,7 +493,7 @@ fn firestorm_switch_diagnostics_are_ast_only_and_keep_json_v1() {
 }
 
 #[test]
-fn compare_ignores_ast_only_sem024_through_sem043() {
+fn compare_ignores_ast_only_sem024_through_sem044() {
     let directory = temporary_directory();
     let source = write_file(
         &directory,
@@ -515,6 +515,7 @@ fn compare_ignores_ast_only_sem024_through_sem043() {
     assert!(ast_stdout.contains("warning[SEM041]"), "{ast_stdout}");
     assert!(ast_stdout.contains("warning[SEM042]"), "{ast_stdout}");
     assert!(ast_stdout.contains("warning[SEM043]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("warning[SEM044]"), "{ast_stdout}");
     let ast_json = run_args(&["--format", "json", source]);
     let ast_json_stdout = String::from_utf8(ast_json.stdout).unwrap();
     for field in [
@@ -528,6 +529,7 @@ fn compare_ignores_ast_only_sem024_through_sem043() {
         "\"code\":\"SEM041\"",
         "\"code\":\"SEM042\"",
         "\"code\":\"SEM043\"",
+        "\"code\":\"SEM044\"",
         "\"severity\":\"error\"",
         "\"severity\":\"warning\"",
         "\"kind\":\"semantic\"",
@@ -545,7 +547,7 @@ fn compare_ignores_ast_only_sem024_through_sem043() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043",
+        "SEM042", "SEM043", "SEM044",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -562,7 +564,7 @@ fn compare_ignores_ast_only_sem024_through_sem043() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043",
+        "SEM042", "SEM043", "SEM044",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }

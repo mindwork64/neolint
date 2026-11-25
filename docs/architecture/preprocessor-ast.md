@@ -4190,3 +4190,22 @@ Evidence: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wiki/
 SEM043 warns on a valid numeric division or integer remainder operation when its denominator is provably zero; compound `/=` and `%=` are included. The bounded evaluator handles integer/float literals, unshadowed numeric built-in constants, parentheses, unary numeric operations, zero-preserving numeric casts, and side-effect-free constant arithmetic. It does not infer mutable variable values or call results. Operator/type validation runs before the check, so vector `%` cross products are excluded. Parser errors, unreliable lexical/preprocessor environments, or evaluator work/depth exhaustion suppress the rule. SEM043 is AST-only; Legacy and Compare continue to compare only SEM001–SEM023.
 
 Evidence: [Second Life Wiki — LSL Errors](https://wiki.secondlife.com/wiki/LSL_Errors), [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), and [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
+
+
+### Post-v1.1.0 state reachability warning (SEM044)
+
+SEM044 warns when a populated named state has no path from `default` through
+state-change statements in event-handler bodies. It builds a bounded directed
+graph and traverses from the unique, populated default state. The graph is an
+over-approximation: all transitions found in event bodies count as possible,
+including conditional branches and statements after returns. This deliberately
+allows false negatives rather than reporting a state unreachable based on
+unknown control-flow conditions. State changes inside global functions are
+not edges because SEM034/SEM035 separately report those non-portable or invalid
+constructs. Empty states remain with SEM038. The graph is bounded to 4,096
+states, 32,768 units of traversal work, and 128 nested statement levels.
+Duplicate or incomplete states, parser errors, unreliable input and any budget
+exhaustion suppress SEM044.
+The diagnostic concerns structural reachability from `default`, not the
+persistence of an already-active state when an object is rezzed from inventory.
+Legacy and Compare remain unchanged; SEM044 is AST-only.
