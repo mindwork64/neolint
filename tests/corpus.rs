@@ -295,7 +295,7 @@ const ENGINE_VARIANTS: &[&[&str]] = &[&[], &["--engine", "legacy"]];
 /// all other expected diagnostics remain exact for both engines.
 const AST_ONLY_CODES: &[&str] = &[
     "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-    "SEM033",
+    "SEM033", "SEM034", "SEM035", "SEM036", "SEM037",
 ];
 
 fn expected_for_engine(fixture: &Fixture, engine_args: &[&str]) -> BTreeMap<DiagnosticKey, usize> {

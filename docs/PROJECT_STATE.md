@@ -24,7 +24,10 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   and `SEM026` (unreachable user functions).
 - Follow-up semantic coverage: AST-only `SEM027` validates simple assignable
   values in global variable initializers, plus Firestorm switch diagnostics
-  `SEM028`–`SEM033` and switch-aware return-flow analysis; Legacy and Compare
+  `SEM028`–`SEM033` and switch-aware return-flow analysis. The follow-up
+  `SEM034`/`SEM035` adds AST-only Mono state-change context checks. A further
+  AST-only control-flow slice adds `SEM036` (event value-return errors) and
+  `SEM037` (conservative unreachable-statement warnings); Legacy and Compare
   remain unchanged.
 - Phase 8: reproducible benchmark harness, resource-limit reconciliation and
   profile-guided fixes.
@@ -34,7 +37,7 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM033` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM037` are AST-only.
 
 ## Architecture
 

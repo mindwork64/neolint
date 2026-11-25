@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, and `SEM030`–`SEM033`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, and `SEM030`–`SEM033` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, and `SEM035`, `SEM037`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, and `SEM037` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, and `SEM036`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -161,6 +161,10 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM031` | A Firestorm switch has no `default` label. | warning / lint | AST-only. `default` is optional syntax; this is a completeness warning, not a parser error. |
 | `SEM032` | The switch expression is a compile-time constant. | warning / lint | AST-only. Reports once on the switch expression; evaluation is bounded and conservative. |
 | `SEM033` | The switch expression has list type. | warning / lint | AST-only. Firestorm switch lowering compares the list value; LSL list equality compares list lengths rather than element contents. |
+| `SEM034` | A state change occurs inside a global user-defined function. | error / semantic | AST-only. Mono rejects state changes from global functions. The narrow direct `if`-without-`else` form is reported as SEM035 instead. Malformed statements, unclosed function bodies, unreliable environments and budget overflow are skipped. |
+| `SEM035` | A state change relies on the historical Mono `if`-without-`else` workaround. | warning / lint | AST-only. Matches only a direct unbraced state-change then-branch with no `else`; this is an unsupported compatibility behavior, not portable LSL. |
+| `SEM036` | An event handler returns a value. | error / semantic | AST-only. The compiler may accept this, but the official LSL reference says it crashes at runtime. Applies to canonical and extension event handlers; malformed bodies and unreliable units are skipped. |
+| `SEM037` | A statement is unreachable after an unconditional `return` or event state transition. | warning / lint | AST-only. Reports only the first unreachable statement in a straight-line sequence, or after an `if/else` whose both branches terminate. Same-state transitions, unknown state targets, conditional one-sided exits, loops and switch dispatch are not treated as terminating. Any jump/label or malformed body suppresses both rules for that code scope. |
 
 ## Illustrative minimal examples
 
@@ -238,6 +242,33 @@ default { state_entry() { } }
 ```lsl
 // SEM027: a global initializer cannot call a runtime function
 float sampled = llGetTime();
+default { state_entry() { } }
+```
+
+```lsl
+// SEM034: global user-defined functions cannot change state on Mono
+change_state() { state running; }
+default { state_entry() { } }
+state running { state_entry() { } }
+```
+
+```lsl
+// SEM035: historical Mono compiler bugfeature; not guaranteed valid
+// and not portable to LSL-Luau
+change_state(integer should_change) { if (should_change) state running; }
+default { state_entry() { } }
+state running { state_entry() { } }
+```
+
+```lsl
+// SEM036: event handlers cannot return values
+// This can compile but crashes when the return executes.
+default { state_entry() { return 1; } }
+```
+
+```lsl
+// SEM037: code after an unconditional return is unreachable
+integer value() { return 1; llOwnerSay("never executed"); }
 default { state_entry() { } }
 ```
 
@@ -329,6 +360,8 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM026 is reachability, not dead-code elimination: roots are matched direct identifier calls in event bodies and global initializers, and edges are matched direct identifier calls in user-function bodies. Built-in callees, indirect calls and calls without a real closing parenthesis never create edges; first-definition duplicate handling follows SEM001. A function called only from another unreachable function is still reported, because this is reachability, not a claim that no call sites exist. The graph is bounded and any node/edge/work overflow emits no SEM026 rather than reporting a partial result; error-severity preprocessor or lexical diagnostics suppress it through the same fail-closed gate as SEM024/SEM025.
 - SEM027 is an AST-only semantic error for global initializers that are definitely not simple values. It accepts scalar literals, visible global-variable references, built-in constants, vectors/rotations made from simple numeric components, and flat lists made from simple values. It does not constant-fold operators or function calls. Parenthesized forms and nested list literals are rejected to match the simple-assignable grammar; malformed expressions and inputs that exceed the bounded 128-node/64-depth check, or units with error-severity preprocessor/lexical diagnostics, are skipped.
 - SEM028–SEM033 are Firestorm-switch-only AST diagnostics. They are active only when the switch feature gate is enabled. The CFG models case dispatch, source-order fallthrough, `default`, and `break` to the innermost switch exit, so SEM011 can analyze value-returning functions containing switches instead of suppressing the whole function. A switch with no `default` retains an unmatched path; a `break` retains a path to the statement after the switch.
+- SEM036 reports a value-return from an event handler because the official Second Life Wiki documents that the compiler can accept it even though executing it crashes the script. `return;` remains valid. Parser-damaged bodies and unreliable lexical/preprocessor units are skipped.
+- SEM037 reports only the first unreachable statement in a straight-line sequence after a definite return, a two-branch terminating `if/else`, or a transition to a different declared state inside an event. A state statement targeting the current state or an unknown state is not treated as terminal. Loops and switch dispatch remain conservative. Bodies containing `jump`/labels or malformed syntax are skipped for both SEM036 and SEM037; work/depth overflow suppresses the entire rule family.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

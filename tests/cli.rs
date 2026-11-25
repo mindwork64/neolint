@@ -493,21 +493,46 @@ fn firestorm_switch_diagnostics_are_ast_only_and_keep_json_v1() {
 }
 
 #[test]
-fn compare_ignores_ast_only_sem024_through_sem033() {
+fn compare_ignores_ast_only_sem024_through_sem037() {
     let directory = temporary_directory();
     let source = write_file(
         &directory,
         "unused-analysis.lsl",
-        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); } }\n",
+        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\ndefault { state_entry() { integer unused_local; llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } }\nstate running { state_entry() { } }\n",
     );
     let source = source.to_str().unwrap();
+
+    let ast = run_args(&[source]);
+    assert_eq!(ast.status.code(), Some(1));
+    let ast_stdout = String::from_utf8(ast.stdout).unwrap();
+    assert!(ast_stdout.contains("error[SEM034]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("warning[SEM035]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("error[SEM036]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("warning[SEM037]"), "{ast_stdout}");
+    let ast_json = run_args(&["--format", "json", source]);
+    let ast_json_stdout = String::from_utf8(ast_json.stdout).unwrap();
+    for field in [
+        "\"code\":\"SEM034\"",
+        "\"code\":\"SEM035\"",
+        "\"code\":\"SEM036\"",
+        "\"code\":\"SEM037\"",
+        "\"severity\":\"error\"",
+        "\"severity\":\"warning\"",
+        "\"kind\":\"semantic\"",
+        "\"kind\":\"lint\"",
+    ] {
+        assert!(
+            ast_json_stdout.contains(field),
+            "missing {field}: {ast_json_stdout}"
+        );
+    }
 
     let output = run_args(&["--engine", "compare", source]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-        "SEM033",
+        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -523,7 +548,7 @@ fn compare_ignores_ast_only_sem024_through_sem033() {
     assert!(!stderr.contains("SEM026"), "{stderr}");
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-        "SEM033",
+        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }

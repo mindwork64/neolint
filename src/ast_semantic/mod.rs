@@ -1,8 +1,9 @@
 //! Independent semantic analysis over the typed AST.
 //!
 //! Phases 6A–6F implement all existing SEM001–SEM023 diagnostics without token
-//! scanning. The AST engine invokes this analyzer for AST and Compare analysis;
-//! the module remains independent of preprocessor and SourceMap internals.
+//! scanning. Later AST-only rules add diagnostics outside the Legacy/Compare
+//! parity contract; the module remains independent of preprocessor and
+//! SourceMap internals.
 
 pub mod scopes;
 
@@ -37,8 +38,9 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
 /// `environment_reliable` is false when the same analysis unit produced an
 /// error-severity preprocessor or lexical diagnostic. Code may have been
 /// dropped before parsing in that case, so the unused-variable, unused-parameter,
-/// unreachable-function, global-initializer and Firestorm-switch rules fail
-/// closed instead of treating the surviving text as complete. The flag affects
+/// unreachable-function, global-initializer, Firestorm-switch, Mono
+/// state-transition-context and return/control-flow hazard rules fail closed
+/// instead of treating the surviving text as complete. The flag affects
 /// only these AST-only rules; all SEM001–SEM023 diagnostics are computed exactly
 /// as before.
 pub fn analyze_ast_with_environment(
@@ -109,6 +111,16 @@ pub fn analyze_ast_with_environment(
     ));
     diagnostics.extend(rules::deprecated_calls::check(&calls, &functions));
     diagnostics.extend(rules::state_targets::check(ast));
+    diagnostics.extend(rules::state_transitions::check(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::return_hazards::check(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
     diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     let jumps = flow::check_jumps(ast, &scopes);

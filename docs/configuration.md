@@ -53,7 +53,11 @@ signatures are unchanged.
   severity is warning. AST also reports `SEM027` for non-simple global
   initializers and `SEM028`–`SEM029` for Firestorm switch errors. The Firestorm
   switch lint diagnostics `SEM030`–`SEM033` are warnings and appear only when
-  the switches feature gate is enabled.
+  the switches feature gate is enabled. `SEM034` rejects global-function state
+  changes that Mono does not support; `SEM035` warns on the historical
+  if-without-else compatibility workaround. `SEM036` rejects value returns
+  from events, and `SEM037` warns on directly unreachable statements after
+  unconditional returns or event state transitions.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both

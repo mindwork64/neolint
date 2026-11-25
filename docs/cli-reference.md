@@ -43,12 +43,14 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
-`SEM024`–`SEM026` and `SEM030`–`SEM033` are AST-only lint diagnostics.
-`SEM027`–`SEM029` are AST-only semantic errors. The Firestorm switch diagnostics
-`SEM028`–`SEM033` appear only when the switches feature gate is enabled. These
-codes appear in default and explicit `--engine ast` output, are never emitted by
-explicit `--engine legacy`, and are not part of the Compare parity report,
-which continues to cover only `SEM001`–`SEM023`.
+`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, and `SEM037` are AST-only lint diagnostics.
+`SEM027`–`SEM029`, `SEM034`, and `SEM036` are AST-only semantic errors. The Firestorm switch
+diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
+enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
+user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
+to event handlers and user-defined function bodies. These codes appear in default and explicit `--engine ast`
+output, are never emitted by explicit `--engine legacy`, and are not part of the
+Compare parity report, which continues to cover only `SEM001`–`SEM023`.
 
 Without `--preprocess`, `ast` (the default) and `compare` use identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map. Identity preparation is not preprocessing; macros and includes are not expanded. With `--preprocess` (or `--dialect firestorm`), every engine uses the full preprocessor and dialect.
 
