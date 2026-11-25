@@ -2200,8 +2200,9 @@ the guard runs before the allocation or traversal it bounds.
 | Rendered diagnostics (invocation) | `MAX_TOTAL_DIAGNOSTICS` | 10,000 | CLI aggregation (`src/main.rs:582`) | Per CLI invocation | Truncate, append terminal `PRE039` | `global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039`, `invocation_cap_applies_to_ast_and_compare` |
 | AST recursion depth | `MAX_AST_RECURSION_DEPTH` | 256 | Parser entry for statements and expressions (`src/ast/parser.rs:460`, `:1114`) | Per unit | `AST001`, deepest construct skipped | `AST001` cases in `tests/ast_parser.rs`, `tests/ast_firestorm.rs` |
 | AST parser worker stack | `PARSER_STACK_BYTES` | 16 MiB | Dedicated parser thread (`src/ast/parser.rs:2695`) | Per parse | `AST002` if the worker cannot start | `worker_failure_returns_empty_ast_and_one_safe_diagnostic` |
-| AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` growth and traversal (`src/ast_semantic/flow.rs:19-22`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
-| AST flow constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` / `MAX_CONSTANT_FACTS` | 128 / 64 / 4,096 | Bounded expression evaluator and `insert_constant_fact` (`src/ast_semantic/flow.rs`) | Per expression / code body | Expression becomes unknown; local propagation is disabled for the body if the fact cap is exceeded | Phase 6C/6D suites |
+| AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` construction (`src/ast_semantic/flow.rs`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
+| AST flow data-flow solver | `MAX_DATAFLOW_WORK` / `MAX_DATAFLOW_FACT_WORK` | 131,072 / 1,048,576 | `FlowGraph::solve_constants` worklist and cumulative fact processing (`src/ast_semantic/flow.rs`) | Per function | Solver returns unknown; dependent flow rules are suppressed for the body | Fixed-point, loop and jump/label flow tests |
+| AST flow constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` / `MAX_CONSTANT_FACTS` | 128 / 64 / 4,096 | Bounded expression evaluator and `insert_constant_fact` (`src/ast_semantic/flow.rs`) | Per expression / code body | Expression becomes unknown; local environment is disabled if the fact cap is exceeded | Phase 6C/6D suites |
 | Type inference depth | `MAX_TYPE_DEPTH` | 256 | `infer_expression_type` (`src/ast_semantic/types.rs:11`, `:86`) | Per expression | Type inference yields unknown; dependent rules are suppressed | Defensive: the parser cap fires first (see below) |
 | Call-graph analysis | `MAX_CALL_GRAPH_NODES` / `MAX_CALL_GRAPH_EDGES` / `MAX_CALL_GRAPH_WORK` | 4,096 / 8,192 / 16,384 | Graph construction and reachability (`src/ast_semantic/callgraph.rs:24-28`) | Per unit | Whole graph suppressed; `SEM026` emits nothing | `call_graph_budget_overflow_suppresses_sem026`, `production_edge_budget_overflow_suppresses_sem026`, `production_work_budget_overflow_suppresses_sem026` |
 | Legacy control-flow analysis | `MAX_CFG_TOKENS_PER_FUNCTION` / `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` | 16,384 / 4,096 / 8,192 / 128 | Legacy flow scanner (`src/semantic.rs:1684-1687`) | Per function | Flow rule is suppressed | Legacy semantic tests |
@@ -3294,11 +3295,15 @@ not constrain the surviving branch. Reassignments, increments and compound
 assignments update or invalidate facts. Mutable globals and parameters, user
 calls, malformed expressions, non-finite arithmetic, unsupported mixed numeric
 operators, unsafe float-to-integer casts and budget exhaustion remain unknown.
-Loop-carried values are not propagated, and bodies containing `jump`/label
-control flow disable this local propagation until their incoming environments
-can be merged safely. There is no interprocedural propagation. Legacy remains
-frozen, so Compare can show intentional SEM011 differences for paths proved by
-the extended AST analysis but not by Legacy. LSL's eager logical evaluation is documented in
+A bounded forward worklist merges incoming environments at CFG joins and
+iterates to a fixed point through loop back-edges and valid `jump`/label edges.
+Only facts that agree across every reachable input survive. `for` initializers,
+conditions and increments are modeled in execution order. Per-environment fact
+storage, worklist iterations and cumulative fact-processing work are bounded;
+budget exhaustion suppresses conclusions for the affected body. There is no
+interprocedural propagation. Legacy remains frozen, so Compare can show
+intentional SEM011 differences for paths proved by the extended AST analysis
+but not by Legacy. LSL's eager logical evaluation is documented in
 [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators).
 
 #### Phase 6D implementation record
@@ -4177,12 +4182,14 @@ bodies and switch arms.
 
 The same graph models statically provable integer/float conditions, including
 definitely known local numeric values from declarations and assignments.
-Straight-line local values are propagated; at `if/else` joins, only values that
-agree across all reachable fallthrough branches survive, and a terminating
-branch does not constrain the surviving path. Mutable globals/parameters remain
-unknown. Loop-carried values are not propagated, and bodies with `jump`/label
-control flow disable local-value propagation. The CFG also models zero- and
-many-iteration loop paths, valid jump edges and Firestorm switch dispatch,
+A bounded forward worklist propagates local values and merges incoming states
+at every reachable join; only values that agree across all reachable inputs
+survive, and a terminating branch does not constrain the surviving path. The
+solver iterates through loop back-edges and valid jump/label edges to a fixed
+point. `for` initializers, conditions and increments are modeled in execution
+order. Mutable globals/parameters remain unknown. Per-environment fact storage,
+worklist iterations and cumulative fact-processing work are bounded. The CFG
+also models zero- and many-iteration loop paths, valid jump edges and Firestorm switch dispatch,
 fallthrough, default and break. It can prove a branch body unreachable when its
 condition is constant, code after a loop unreachable when no exit edge exists,
 and code after a switch unreachable when every possible arm returns or

@@ -78,11 +78,15 @@ return type.
 SEM037 uses Neolint's bounded control-flow graph to report unreachable
 statements. In addition to literal and built-in constants, it can propagate
 definitely known local numeric values from declarations and assignments.
-After an `if/else`, a value is retained only when every reachable branch that
-falls through agrees; if one branch returns, only the surviving branch matters.
-Mutable globals and parameters are never assumed constant. Values are not
-carried through loops, and local propagation is disabled for code scopes with
-`jump`/label control flow until those incoming states can be merged safely.
+At every reachable CFG join, a value is retained only when all incoming paths
+agree; a branch that returns does not constrain the surviving path. A bounded
+forward worklist iterates through loop back-edges and valid `jump`/label edges
+to a fixed point, so conditions are reconsidered when loop-carried values
+change. `for` initializers execute once before the first condition and increment
+expressions run before each back-edge. Mutable globals and parameters are never
+assumed constant. Per-environment fact storage, worklist iterations and total
+fact-processing work are bounded; exhaustion suppresses conclusions for the
+affected body.
 
 The CFG also reasons about loop exit paths, valid jump/label edges, and
 Firestorm switch dispatch, fallthrough, default and break. It can therefore

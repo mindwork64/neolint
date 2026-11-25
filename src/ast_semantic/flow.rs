@@ -1,6 +1,6 @@
 //! AST-native SEM008-SEM011 flow analysis.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::{
     AssignmentOperator, Ast, BinaryOperator, Block, Expression, ExpressionKind, ForStatement,
@@ -23,6 +23,8 @@ const MAX_CFG_WORK: usize = 16_384;
 const MAX_CONSTANT_NODES: usize = 128;
 const MAX_CONSTANT_DEPTH: usize = 64;
 const MAX_CONSTANT_FACTS: usize = 4_096;
+const MAX_DATAFLOW_WORK: usize = 131_072;
+const MAX_DATAFLOW_FACT_WORK: usize = 1_048_576;
 const CONSTANT_PROPAGATION_DISABLED: usize = usize::MAX;
 
 type ConstantEnvironment = HashMap<usize, ConstantNumber>;
@@ -397,8 +399,41 @@ fn walk_body<'a>(body: &'a Block, scope: ScopeId, scopes: &ScopeTree) -> BodyFac
     facts
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeCondition {
+    Always,
+    True,
+    False,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowEdge {
+    target: usize,
+    condition: EdgeCondition,
+}
+
+enum FlowTransfer {
+    Local {
+        declaration: crate::ast::LocalVariableDeclaration,
+        scope: ScopeId,
+    },
+    Expression {
+        expression: Expression,
+        scope: ScopeId,
+    },
+}
+
+struct FlowCondition {
+    expression: Expression,
+    scope: ScopeId,
+    empty_is_true: bool,
+    malformed: bool,
+}
+
 struct FlowGraph {
-    successors: Vec<Vec<usize>>,
+    successors: Vec<Vec<FlowEdge>>,
+    transfers: Vec<Option<FlowTransfer>>,
+    conditions: Vec<Option<FlowCondition>>,
     labels: HashMap<String, usize>,
     pending_jumps: Vec<(usize, String)>,
     statement_entries: HashMap<(usize, usize), usize>,
@@ -429,15 +464,28 @@ impl FlowGraph {
         }
         let id = self.successors.len();
         self.successors.push(Vec::new());
+        self.transfers.push(None);
+        self.conditions.push(None);
         Some(id)
     }
 
     fn edge(&mut self, from: usize, to: usize) -> bool {
+        self.edge_with_condition(from, to, EdgeCondition::Always)
+    }
+
+    fn conditional_edge(&mut self, from: usize, to: usize, condition: EdgeCondition) -> bool {
+        self.edge_with_condition(from, to, condition)
+    }
+
+    fn edge_with_condition(&mut self, from: usize, to: usize, condition: EdgeCondition) -> bool {
         let Some(edges) = self.successors.get_mut(from) else {
             self.failed = true;
             return false;
         };
-        if edges.contains(&to) {
+        if edges
+            .iter()
+            .any(|edge| edge.target == to && edge.condition == condition)
+        {
             return true;
         }
         if self.edge_count >= MAX_CFG_EDGES {
@@ -445,26 +493,137 @@ impl FlowGraph {
             return false;
         }
         self.edge_count += 1;
-        edges.push(to);
+        edges.push(FlowEdge {
+            target: to,
+            condition,
+        });
         true
     }
 
-    fn reachable_from(&self, start: usize) -> Option<Vec<bool>> {
+    fn set_transfer(&mut self, node: usize, transfer: FlowTransfer) -> bool {
+        let Some(slot) = self.transfers.get_mut(node) else {
+            self.failed = true;
+            return false;
+        };
+        *slot = Some(transfer);
+        true
+    }
+
+    fn set_condition(&mut self, node: usize, condition: FlowCondition) -> bool {
+        let Some(slot) = self.conditions.get_mut(node) else {
+            self.failed = true;
+            return false;
+        };
+        *slot = Some(condition);
+        true
+    }
+
+    /// Forward must-analysis. A state is the set of local numeric values that
+    /// agree on every reachable incoming path. Unknown facts are removed at
+    /// joins; worklist iteration naturally reaches a fixed point through loops
+    /// and non-local jump/label edges.
+    fn solve_constants(
+        &self,
+        start: usize,
+        scopes: &ScopeTree,
+    ) -> Option<Vec<Option<ConstantEnvironment>>> {
         if start >= self.successors.len() {
             return None;
         }
-        let mut visited = vec![false; self.successors.len()];
-        let mut pending = vec![start];
-        while let Some(node) = pending.pop() {
-            if node >= visited.len() || visited[node] {
-                continue;
+        let mut incoming = vec![None; self.successors.len()];
+        let mut queued = vec![false; self.successors.len()];
+        let mut pending = VecDeque::new();
+        incoming[start] = Some(ConstantEnvironment::new());
+        pending.push_back(start);
+        queued[start] = true;
+        let mut work = 0usize;
+        let mut fact_work = 0usize;
+
+        while let Some(node) = pending.pop_front() {
+            queued[node] = false;
+            work = work.saturating_add(1);
+            if work > MAX_DATAFLOW_WORK {
+                return None;
             }
-            visited[node] = true;
-            if let Some(edges) = self.successors.get(node) {
-                pending.extend(edges.iter().copied());
+            let input = incoming.get(node)?.as_ref()?.clone();
+            fact_work = fact_work.saturating_add(input.len());
+            if fact_work > MAX_DATAFLOW_FACT_WORK {
+                return None;
+            }
+            let mut output = input.clone();
+            let (may_true, may_false) = if let Some(condition) = self.conditions.get(node)?.as_ref()
+            {
+                let possibilities = if condition.malformed {
+                    Some((true, true))
+                } else {
+                    condition_possibilities(
+                        &condition.expression,
+                        condition.empty_is_true,
+                        condition.scope,
+                        scopes,
+                        &input,
+                    )
+                }?;
+                if !condition.empty_is_true {
+                    apply_expression_effects(
+                        &condition.expression,
+                        condition.scope,
+                        scopes,
+                        &mut output,
+                    );
+                }
+                possibilities
+            } else {
+                if let Some(transfer) = self.transfers.get(node)?.as_ref() {
+                    match transfer {
+                        FlowTransfer::Local { declaration, scope } => {
+                            apply_local_declaration(declaration, *scope, scopes, &mut output);
+                        }
+                        FlowTransfer::Expression { expression, scope } => {
+                            apply_expression_effects(expression, *scope, scopes, &mut output);
+                        }
+                    }
+                }
+                (true, true)
+            };
+
+            for edge in self.successors.get(node)? {
+                let allowed = match edge.condition {
+                    EdgeCondition::Always => true,
+                    EdgeCondition::True => may_true,
+                    EdgeCondition::False => may_false,
+                };
+                if !allowed {
+                    continue;
+                }
+                fact_work = fact_work.saturating_add(output.len());
+                if fact_work > MAX_DATAFLOW_FACT_WORK {
+                    return None;
+                }
+                let target_state = incoming.get_mut(edge.target)?;
+                let changed = match target_state {
+                    None => {
+                        *target_state = Some(output.clone());
+                        true
+                    }
+                    Some(existing) => {
+                        let merged =
+                            merge_constant_environments(&[existing.clone(), output.clone()]);
+                        if merged != *existing {
+                            *existing = merged;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if changed && !queued[edge.target] {
+                    pending.push_back(edge.target);
+                    queued[edge.target] = true;
+                }
             }
         }
-        Some(visited)
+        Some(incoming)
     }
 }
 
@@ -482,6 +641,8 @@ pub(crate) fn analyze_body(
 ) -> Option<FlowAnalysis> {
     let mut graph = FlowGraph {
         successors: Vec::new(),
+        transfers: Vec::new(),
+        conditions: Vec::new(),
         labels: HashMap::new(),
         pending_jumps: Vec::new(),
         statement_entries: HashMap::new(),
@@ -490,15 +651,9 @@ pub(crate) fn analyze_body(
         work: 0,
         failed: false,
     };
-    // Functions with non-local jumps are deliberately analyzed without local
-    // value propagation: a jump may enter a label with values from a path that
-    // the structured builder cannot represent as one environment.
+    // The builder records transfer operations; a separate CFG worklist pass
+    // computes local values across joins, loops, and jump/label edges.
     let mut constants = ConstantEnvironment::new();
-    if contains_nonlocal_control_transfer(&body.statements) {
-        // A label can be entered from a different source path even when its
-        // matching jump occurs later. Keep the entire code scope conservative.
-        constants.insert(CONSTANT_PROPAGATION_DISABLED, ConstantNumber::Integer(0));
-    }
     let fragment = build_statements(
         &body.statements,
         scope,
@@ -521,12 +676,17 @@ pub(crate) fn analyze_body(
     if graph.failed {
         return None;
     }
-    let reachable = graph.reachable_from(fragment.entry)?;
-    let reaches_end = *reachable.get(exit)?;
+    let incoming = graph.solve_constants(fragment.entry, scopes)?;
+    let reaches_end = incoming.get(exit)?.is_some();
     let unreachable_statements = graph
         .statement_entries
         .iter()
-        .filter_map(|(key, node)| (!reachable.get(*node).copied().unwrap_or(true)).then_some(*key))
+        .filter_map(|(key, node)| {
+            incoming
+                .get(*node)
+                .is_some_and(Option::is_none)
+                .then_some(*key)
+        })
         .collect();
     Some(FlowAnalysis {
         reaches_end,
@@ -690,27 +850,28 @@ fn build_statement_inner(
                 &mut body_constants,
             )?;
             let condition = graph.node()?;
-            if !connect_exits(graph, &body.exits, condition) {
+            if !graph.set_condition(
+                condition,
+                FlowCondition {
+                    expression: do_while.condition.clone(),
+                    scope,
+                    empty_is_true: false,
+                    malformed: false,
+                },
+            ) || !connect_exits(graph, &body.exits, condition)
+            {
                 return None;
             }
-            let (may_repeat, may_exit) = condition_possibilities(
-                &do_while.condition,
-                false,
-                scope,
-                scopes,
-                &empty_constant_environment_like(constants),
-            )?;
-            if may_repeat && !graph.edge(condition, body.entry) {
+            let loop_exit = graph.node()?;
+            if !graph.conditional_edge(condition, body.entry, EdgeCondition::True)
+                || !graph.conditional_edge(condition, loop_exit, EdgeCondition::False)
+            {
                 return None;
             }
             clear_constant_facts(constants);
             Some(Fragment {
                 entry: body.entry,
-                exits: if may_exit {
-                    vec![condition]
-                } else {
-                    Vec::new()
-                },
+                exits: vec![loop_exit],
             })
         }
         StatementKind::Return(_) => {
@@ -741,6 +902,15 @@ fn build_statement_inner(
         StatementKind::Local(local) => {
             apply_local_declaration(local, scope, scopes, constants);
             let node = graph.node()?;
+            if !graph.set_transfer(
+                node,
+                FlowTransfer::Local {
+                    declaration: local.clone(),
+                    scope,
+                },
+            ) {
+                return None;
+            }
             Some(Fragment {
                 entry: node,
                 exits: vec![node],
@@ -749,6 +919,15 @@ fn build_statement_inner(
         StatementKind::Expression(expression) => {
             apply_expression_effects(&expression.expression, scope, scopes, constants);
             let node = graph.node()?;
+            if !graph.set_transfer(
+                node,
+                FlowTransfer::Expression {
+                    expression: expression.expression.clone(),
+                    scope,
+                },
+            ) {
+                return None;
+            }
             Some(Fragment {
                 entry: node,
                 exits: vec![node],
@@ -807,8 +986,20 @@ fn build_if(
     let condition = graph.node()?;
     let (may_true, may_false) =
         condition_possibilities(&if_statement.condition, false, scope, scopes, constants)?;
-    // Conditions are evaluated before entering either branch. Side effects
-    // invalidate or update the environment shared by both possible paths.
+    // The worklist pass decides which edge is feasible for the final incoming
+    // state. Both edges must exist here because a later CFG predecessor may
+    // weaken an initially-known local fact.
+    if !graph.set_condition(
+        condition,
+        FlowCondition {
+            expression: if_statement.condition.clone(),
+            scope,
+            empty_is_true: false,
+            malformed: false,
+        },
+    ) {
+        return None;
+    }
     apply_expression_effects(&if_statement.condition, scope, scopes, constants);
     let branch_input = constants.clone();
 
@@ -822,17 +1013,15 @@ fn build_if(
         depth + 1,
         &mut then_constants,
     )?;
-    let mut exits = Vec::new();
-    let mut live_environments = Vec::new();
-    if may_true {
-        if !graph.edge(condition, then_branch.entry) {
-            return None;
-        }
-        if !then_branch.exits.is_empty() {
-            live_environments.push(then_constants);
-        }
-        exits.extend(then_branch.exits);
+    if !graph.conditional_edge(condition, then_branch.entry, EdgeCondition::True) {
+        return None;
     }
+    let mut exits = then_branch.exits.clone();
+    let mut live_environments = Vec::new();
+    if may_true && !then_branch.exits.is_empty() {
+        live_environments.push(then_constants);
+    }
+
     if let Some(else_branch) = &if_statement.else_branch {
         let mut else_constants = branch_input.clone();
         let else_fragment = build_statement(
@@ -844,18 +1033,22 @@ fn build_if(
             depth + 1,
             &mut else_constants,
         )?;
-        if may_false {
-            if !graph.edge(condition, else_fragment.entry) {
-                return None;
-            }
-            if !else_fragment.exits.is_empty() {
-                live_environments.push(else_constants);
-            }
-            exits.extend(else_fragment.exits);
+        if !graph.conditional_edge(condition, else_fragment.entry, EdgeCondition::False) {
+            return None;
         }
-    } else if may_false {
-        exits.push(condition);
-        live_environments.push(branch_input);
+        exits.extend(else_fragment.exits.iter().copied());
+        if may_false && !else_fragment.exits.is_empty() {
+            live_environments.push(else_constants);
+        }
+    } else {
+        let fallthrough = graph.node()?;
+        if !graph.conditional_edge(condition, fallthrough, EdgeCondition::False) {
+            return None;
+        }
+        exits.push(fallthrough);
+        if may_false {
+            live_environments.push(branch_input);
+        }
     }
 
     *constants = merge_constant_environments(&live_environments);
@@ -874,26 +1067,51 @@ fn build_for(
     depth: usize,
     constants: &mut ConstantEnvironment,
 ) -> Option<Fragment> {
-    // A loop condition may be evaluated repeatedly after body/increment writes.
-    // Until loop-carried data-flow reaches a fixed point, do not use incoming
-    // local values to prune either edge.
     clear_constant_facts(constants);
     let mut loop_constants = empty_constant_environment_like(constants);
+
+    // `for` initializers execute exactly once before the first condition.
+    let mut initializer_entry = None;
+    let mut initializer_exits = Vec::new();
+    for expression in &for_statement.initializer {
+        apply_expression_effects(expression, scope, scopes, &mut loop_constants);
+        let node = graph.node()?;
+        if !graph.set_transfer(
+            node,
+            FlowTransfer::Expression {
+                expression: expression.clone(),
+                scope,
+            },
+        ) {
+            return None;
+        }
+        if initializer_entry.is_none() {
+            initializer_entry = Some(node);
+        }
+        if !initializer_exits.is_empty() && !connect_exits(graph, &initializer_exits, node) {
+            return None;
+        }
+        initializer_exits = vec![node];
+    }
+
     let condition = graph.node()?;
-    let (may_enter, may_exit) = if for_statement.condition_missing {
-        (true, false)
-    } else if for_statement.condition_malformed {
-        (true, true)
-    } else {
-        condition_possibilities(
-            &for_statement.condition,
-            false,
+    if !initializer_exits.is_empty() && !connect_exits(graph, &initializer_exits, condition) {
+        return None;
+    }
+    if !graph.set_condition(
+        condition,
+        FlowCondition {
+            expression: for_statement.condition.clone(),
             scope,
-            scopes,
-            &loop_constants,
-        )?
-    };
-    apply_expression_effects(&for_statement.condition, scope, scopes, &mut loop_constants);
+            empty_is_true: for_statement.condition_missing,
+            malformed: for_statement.condition_malformed,
+        },
+    ) {
+        return None;
+    }
+    if !for_statement.condition_missing {
+        apply_expression_effects(&for_statement.condition, scope, scopes, &mut loop_constants);
+    }
     let body = build_statement(
         &for_statement.body,
         scope,
@@ -903,20 +1121,52 @@ fn build_for(
         depth + 1,
         &mut loop_constants,
     )?;
-    if may_enter && !graph.edge(condition, body.entry) {
+    if !graph.conditional_edge(condition, body.entry, EdgeCondition::True) {
         return None;
     }
-    if !connect_exits(graph, &body.exits, condition) {
+
+    // Increment expressions run after each normally-completing body iteration,
+    // immediately before the next condition evaluation.
+    let mut increment_entry = None;
+    let mut increment_exits = Vec::new();
+    for expression in &for_statement.increment {
+        apply_expression_effects(expression, scope, scopes, &mut loop_constants);
+        let node = graph.node()?;
+        if !graph.set_transfer(
+            node,
+            FlowTransfer::Expression {
+                expression: expression.clone(),
+                scope,
+            },
+        ) {
+            return None;
+        }
+        if increment_entry.is_none() {
+            increment_entry = Some(node);
+        }
+        if !increment_exits.is_empty() && !connect_exits(graph, &increment_exits, node) {
+            return None;
+        }
+        increment_exits = vec![node];
+    }
+    if let Some(increment) = increment_entry {
+        if !connect_exits(graph, &body.exits, increment)
+            || !connect_exits(graph, &increment_exits, condition)
+        {
+            return None;
+        }
+    } else if !connect_exits(graph, &body.exits, condition) {
+        return None;
+    }
+
+    let loop_exit = graph.node()?;
+    if !graph.conditional_edge(condition, loop_exit, EdgeCondition::False) {
         return None;
     }
     clear_constant_facts(constants);
     Some(Fragment {
-        entry: condition,
-        exits: if may_exit {
-            vec![condition]
-        } else {
-            Vec::new()
-        },
+        entry: initializer_entry.unwrap_or(condition),
+        exits: vec![loop_exit],
     })
 }
 
@@ -932,19 +1182,17 @@ fn build_while(
     clear_constant_facts(constants);
     let mut loop_constants = empty_constant_environment_like(constants);
     let condition = graph.node()?;
-    let (may_enter, may_exit) = condition_possibilities(
-        &while_statement.condition,
-        false,
-        scope,
-        scopes,
-        &loop_constants,
-    )?;
-    apply_expression_effects(
-        &while_statement.condition,
-        scope,
-        scopes,
-        &mut loop_constants,
-    );
+    if !graph.set_condition(
+        condition,
+        FlowCondition {
+            expression: while_statement.condition.clone(),
+            scope,
+            empty_is_true: false,
+            malformed: false,
+        },
+    ) {
+        return None;
+    }
     let body = build_statement(
         &while_statement.body,
         scope,
@@ -954,20 +1202,19 @@ fn build_while(
         depth + 1,
         &mut loop_constants,
     )?;
-    if may_enter && !graph.edge(condition, body.entry) {
+    if !graph.conditional_edge(condition, body.entry, EdgeCondition::True)
+        || !connect_exits(graph, &body.exits, condition)
+    {
         return None;
     }
-    if !connect_exits(graph, &body.exits, condition) {
+    let loop_exit = graph.node()?;
+    if !graph.conditional_edge(condition, loop_exit, EdgeCondition::False) {
         return None;
     }
     clear_constant_facts(constants);
     Some(Fragment {
         entry: condition,
-        exits: if may_exit {
-            vec![condition]
-        } else {
-            Vec::new()
-        },
+        exits: vec![loop_exit],
     })
 }
 
@@ -1019,6 +1266,15 @@ fn build_switch(
     }
 
     let dispatch = graph.node()?;
+    if !graph.set_transfer(
+        dispatch,
+        FlowTransfer::Expression {
+            expression: switch.condition.clone(),
+            scope: switch_scope,
+        },
+    ) {
+        return None;
+    }
     for (arm, fragment) in switch.arms.iter().zip(&arms) {
         match arm.label {
             crate::ast::SwitchLabel::Case(_) | crate::ast::SwitchLabel::Default => {
@@ -1112,44 +1368,6 @@ fn contains_error(expression: &Expression) -> bool {
         | ExpressionKind::Float(_)
         | ExpressionKind::String(_) => false,
     }
-}
-
-fn contains_nonlocal_control_transfer(statements: &[Statement]) -> bool {
-    let mut pending: Vec<&Statement> = statements.iter().collect();
-    while let Some(statement) = pending.pop() {
-        match &statement.kind {
-            StatementKind::Jump(_) | StatementKind::Label(_) => return true,
-            StatementKind::Return(return_statement)
-                if !return_statement.recovered_labels.is_empty()
-                    || !return_statement.recovered_jumps.is_empty() =>
-            {
-                return true;
-            }
-            StatementKind::Block(block) => pending.extend(&block.statements),
-            StatementKind::If(if_statement) => {
-                pending.push(&if_statement.then_branch);
-                if let Some(branch) = &if_statement.else_branch {
-                    pending.push(branch);
-                }
-            }
-            StatementKind::For(for_statement) => pending.push(&for_statement.body),
-            StatementKind::While(while_statement) => pending.push(&while_statement.body),
-            StatementKind::DoWhile(do_while) => pending.push(&do_while.body),
-            StatementKind::Switch(switch) => {
-                for arm in &switch.arms {
-                    pending.extend(&arm.statements);
-                }
-            }
-            StatementKind::Empty
-            | StatementKind::Local(_)
-            | StatementKind::Return(_)
-            | StatementKind::StateChange(_)
-            | StatementKind::Expression(_)
-            | StatementKind::Break(_)
-            | StatementKind::Error(_) => {}
-        }
-    }
-    false
 }
 
 fn is_constant_propagation_disabled(constants: &ConstantEnvironment) -> bool {
@@ -1959,12 +2177,79 @@ mod constant_condition_tests {
                 "function different_branch_values may reach the end without returning a value",
                 "function parameter_stays_unknown may reach the end without returning a value",
                 "function global_stays_unknown may reach the end without returning a value",
-                "function jump_label_values_stay_unknown may reach the end without returning a value",
                 "function loop_carried_value_stays_unknown may reach the end without returning a value",
                 "function increment_invalidates_value may reach the end without returning a value",
                 "function compound_assignment_invalidates_value may reach the end without returning a value",
                 "function parenthesized_assignment_invalidates_value may reach the end without returning a value",
                 "function unordered_side_effects_stay_unknown may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn worklist_reaches_a_fixed_point_for_loop_carried_values_and_for_clauses() {
+        let source = r#"
+            integer loop_condition_changes_after_iteration() {
+                integer value = 1;
+                while (value == 1) {
+                    value = 2;
+                }
+                if (value == 1) return 1;
+            }
+            integer stable_local_condition_keeps_infinite_loop() {
+                integer value = 1;
+                while (value == 1) { }
+            }
+            integer for_initializer_runs_before_condition() {
+                integer value = 0;
+                for (value = 1; value == 1; ) {
+                    return 1;
+                }
+            }
+            integer for_increment_changes_loop_fact() {
+                integer value = 0;
+                for (; value < 1; value++) { }
+                if (value == 0) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function loop_condition_changes_after_iteration may reach the end without returning a value",
+                "function for_increment_changes_loop_fact may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn jump_label_joins_merge_all_reachable_incoming_constant_states() {
+        let source = r#"
+            integer jump_over_write_preserves_the_incoming_value() {
+                integer value = 0;
+                jump after_write;
+                value = 1;
+                @after_write;
+                if (value == 0) return 1;
+            }
+            integer jump_and_fallthrough_paths_disagree(integer condition) {
+                integer value = 0;
+                if (condition) {
+                    value = 1;
+                    jump joined;
+                }
+                value = 2;
+                @joined;
+                if (value == 1) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function jump_and_fallthrough_paths_disagree may reach the end without returning a value",
             ]
         );
     }
@@ -2016,6 +2301,30 @@ mod constant_condition_tests {
                 .iter()
                 .all(|diagnostic: &Diagnostic| diagnostic.code != "SEM011"),
             "{diagnostics:?}"
+        );
+
+        let source = r#"
+            integer switch_condition_assignment() {
+                integer value = 0;
+                switch (value = 1) {
+                    case 1: break;
+                    default: return 0;
+                }
+                if (value == 1) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) =
+            parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+        assert!(syntax.is_empty(), "{syntax:?}");
+        let diagnostics = crate::ast_semantic::analyze_ast(&ast, &syntax);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic: &Diagnostic| diagnostic.code != "SEM011"),
+            "switch condition side effect was not propagated: {diagnostics:?}"
         );
     }
 }

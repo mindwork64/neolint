@@ -824,6 +824,35 @@ mod tests {
     }
 
     #[test]
+    fn jump_label_constant_state_prunes_sem037_branch() {
+        let source = r#"
+            integer jump_label_preserves_facts_and_prunes_the_other_branch() {
+                integer value = 1;
+                jump after_write;
+                ;
+                @after_write;
+                if (value == 1) {
+                    llOwnerSay("reachable");
+                } else {
+                    llOwnerSay("unreachable");
+                }
+                return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        let diagnostics = hazards(source);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "SEM037");
+        assert!(
+            source[diagnostics[0].span.start..diagnostics[0].span.end]
+                .contains("llOwnerSay(\"unreachable\");"),
+            "unexpected unreachable span: {:?}",
+            &source[diagnostics[0].span.start..diagnostics[0].span.end]
+        );
+    }
+
+    #[test]
     fn constant_branches_and_loops_drive_cfg_reachability() {
         let source = r#"
             integer false_if() {
