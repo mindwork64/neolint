@@ -1,8 +1,12 @@
-//! SEM036/SEM037: event return-value hazards and conservative unreachable code.
+//! SEM036 event-return hazards and CFG-backed SEM037 unreachable-code findings.
 
 use std::collections::HashSet;
 
+use super::super::flow::{self, FlowAnalysis};
+use super::super::scopes::{ScopeId, ScopeTree};
+
 use crate::ast::{Ast, Block, IfStatement, Statement, StatementKind, TopLevel};
+use crate::builtins;
 
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
@@ -15,6 +19,7 @@ enum BodyKind<'a> {
     Event {
         current_state: &'a str,
         known_states: &'a HashSet<String>,
+        jump_scope_validated: bool,
     },
 }
 
@@ -29,28 +34,48 @@ impl BodyKind<'_> {
             Self::Event {
                 current_state,
                 known_states,
+                ..
             } => target != current_state && known_states.contains(target),
+        }
+    }
+
+    fn jump_scope_validated(self) -> bool {
+        match self {
+            Self::Function => true,
+            Self::Event {
+                jump_scope_validated,
+                ..
+            } => jump_scope_validated,
         }
     }
 }
 
 struct BodyFacts {
     has_jump_or_label: bool,
+    has_jump: bool,
     has_error: bool,
     has_unclosed_block: bool,
+    terminating_state_changes: HashSet<(usize, usize)>,
+}
+
+struct BodyValidation<'a> {
+    syntax_diagnostics: &'a [Diagnostic],
+    invalid_code_scopes: &'a HashSet<(usize, usize)>,
 }
 
 /// Analyze return and reachability hazards in complete function/event bodies.
 ///
-/// SEM036 catches a value-return from an event handler, which can compile but
-/// crash at runtime. SEM037 is deliberately narrower: it reports only the
-/// first unreachable statement in a straight-line block after a guaranteed
-/// return or a transition to a different, known state inside an event. Any
-/// jump/label or malformed structure suppresses both rules for the owning body.
+/// SEM036 catches value-returns from event handlers. SEM037 uses the shared CFG
+/// to report the first unreachable non-empty statement in each straight-line
+/// sequence. The graph accounts for constant conditions, loops, valid jumps,
+/// Firestorm switches and event state transitions. Malformed/invalid scopes
+/// fail closed; SEM036 retains its older jump/label suppression.
 pub(crate) fn check(
     ast: &Ast,
+    scopes: &ScopeTree,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    invalid_code_scopes: &HashSet<(usize, usize)>,
 ) -> Vec<Diagnostic> {
     if !environment_reliable {
         return Vec::new();
@@ -89,10 +114,16 @@ pub(crate) fn check(
                 if function.name.is_empty() || !body.closed {
                     continue;
                 }
+                let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
                 if !analyze_body(
                     body,
+                    scope,
                     BodyKind::Function,
-                    syntax_diagnostics,
+                    scopes,
+                    BodyValidation {
+                        syntax_diagnostics,
+                        invalid_code_scopes,
+                    },
                     &mut work,
                     &mut diagnostics,
                 ) {
@@ -115,13 +146,22 @@ pub(crate) fn check(
                     } else {
                         state.name.as_str()
                     };
+                    let scope = scopes.scope_for_block(body).unwrap_or(scopes.root());
                     if !analyze_body(
                         body,
+                        scope,
                         BodyKind::Event {
                             current_state,
                             known_states: &known_states,
+                            jump_scope_validated: builtins::definitions()
+                                .events
+                                .contains_key(event.name.as_str()),
                         },
-                        syntax_diagnostics,
+                        scopes,
+                        BodyValidation {
+                            syntax_diagnostics,
+                            invalid_code_scopes,
+                        },
                         &mut work,
                         &mut diagnostics,
                     ) {
@@ -138,44 +178,68 @@ pub(crate) fn check(
 
 fn analyze_body(
     body: &Block,
+    scope: ScopeId,
     kind: BodyKind<'_>,
-    syntax_diagnostics: &[Diagnostic],
+    scopes: &ScopeTree,
+    validation: BodyValidation<'_>,
     work: &mut usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
-    let Some(facts) = inspect_body(body, work) else {
+    let Some(facts) = inspect_body(body, kind, work) else {
         return false;
     };
 
-    // Parser damage suppresses both rules for this body. A return expression
-    // outside the malformed range is not enough context to trust the recovered
-    // event/function structure as a whole.
-    // Jumps and labels can make a textually dead tail reachable. This first
-    // slice skips the entire code scope instead of approximating jump targets.
-    if facts.has_jump_or_label
+    // Parser damage and invalid jump scopes make the control-flow graph
+    // incomplete. Never infer dead code from a recovered or invalid graph.
+    if (facts.has_jump && !kind.jump_scope_validated())
         || facts.has_error
         || facts.has_unclosed_block
-        || block_has_syntax_error(body, syntax_diagnostics)
+        || validation
+            .invalid_code_scopes
+            .contains(&(body.span.start, body.span.end))
+        || block_has_syntax_error(body, validation.syntax_diagnostics)
     {
         return true;
     }
 
-    scan_sequence(
-        &body.statements,
-        kind,
-        syntax_diagnostics,
-        0,
-        work,
-        diagnostics,
-    )
-    .is_some()
+    let Some(flow) = flow::analyze_body(body, scope, scopes, &facts.terminating_state_changes)
+    else {
+        return true;
+    };
+
+    let mut body_diagnostics = Vec::new();
+    if !report_unreachable_statements(body, &flow, work, &mut body_diagnostics) {
+        return false;
+    }
+
+    // Preserve SEM036's existing suppression rule for code scopes containing
+    // jumps/labels. SEM037 now uses the CFG, which resolves valid jumps and
+    // labels instead of suppressing the whole body.
+    if !facts.has_jump_or_label
+        && scan_sequence(
+            &body.statements,
+            kind,
+            validation.syntax_diagnostics,
+            0,
+            work,
+            &mut body_diagnostics,
+        )
+        .is_none()
+    {
+        return false;
+    }
+
+    diagnostics.extend(body_diagnostics);
+    true
 }
 
-fn inspect_body(body: &Block, work: &mut usize) -> Option<BodyFacts> {
+fn inspect_body(body: &Block, kind: BodyKind<'_>, work: &mut usize) -> Option<BodyFacts> {
     let mut facts = BodyFacts {
         has_jump_or_label: false,
+        has_jump: false,
         has_error: false,
         has_unclosed_block: false,
+        terminating_state_changes: HashSet::new(),
     };
     let mut pending: Vec<(&Statement, usize)> = body
         .statements
@@ -191,7 +255,11 @@ fn inspect_body(body: &Block, work: &mut usize) -> Option<BodyFacts> {
         }
 
         match &statement.kind {
-            StatementKind::Jump(_) | StatementKind::Label(_) => {
+            StatementKind::Jump(_) => {
+                facts.has_jump = true;
+                facts.has_jump_or_label = true;
+            }
+            StatementKind::Label(_) => {
                 facts.has_jump_or_label = true;
             }
             StatementKind::Error(_) => facts.has_error = true,
@@ -227,10 +295,16 @@ fn inspect_body(body: &Block, work: &mut usize) -> Option<BodyFacts> {
                     pending.extend(arm.statements.iter().rev().map(|child| (child, depth + 1)));
                 }
             }
+            StatementKind::StateChange(change) => {
+                if kind.state_change_terminates(&change.state) {
+                    facts
+                        .terminating_state_changes
+                        .insert((statement.span.start, statement.span.end));
+                }
+            }
             StatementKind::Empty
             | StatementKind::Local(_)
             | StatementKind::Return(_)
-            | StatementKind::StateChange(_)
             | StatementKind::Expression(_)
             | StatementKind::Break(_) => {}
         }
@@ -260,16 +334,6 @@ fn scan_sequence(
 
         if terminated {
             if !matches!(statement.kind, StatementKind::Empty) {
-                diagnostics.push(Diagnostic {
-                    code: "SEM037",
-                    severity: Severity::Warning,
-                    kind: DiagnosticKind::Lint,
-                    message: "unreachable statement after an unconditional return or state change"
-                        .to_owned(),
-                    span: statement.span,
-                });
-                // One primary finding per straight-line sequence; don't emit
-                // a cascade for every statement in the dead tail.
                 break;
             }
             continue;
@@ -291,9 +355,127 @@ fn scan_sequence(
     Some(terminated)
 }
 
-/// Inspect nested bodies and determine whether this statement always exits its
-/// enclosing function/event. Loops and switches are intentionally not treated
-/// as guaranteed termination constructs.
+fn report_unreachable_statements(
+    body: &Block,
+    flow: &FlowAnalysis,
+    work: &mut usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    fn scan_sequence(
+        statements: &[Statement],
+        flow: &FlowAnalysis,
+        work: &mut usize,
+        diagnostics: &mut Vec<Diagnostic>,
+        depth: usize,
+    ) -> bool {
+        if depth > MAX_RETURN_HAZARD_DEPTH {
+            return false;
+        }
+        for statement in statements {
+            *work = work.saturating_add(1);
+            if *work > MAX_RETURN_HAZARD_WORK {
+                return false;
+            }
+            if flow.statement_is_unreachable(statement) {
+                if !matches!(statement.kind, StatementKind::Empty) {
+                    diagnostics.push(Diagnostic {
+                        code: "SEM037",
+                        severity: Severity::Warning,
+                        kind: DiagnosticKind::Lint,
+                        message: "unreachable statement".to_owned(),
+                        span: statement.span,
+                    });
+                    // Report only the first actionable dead statement in this
+                    // sequence. Nested statements in its dead subtree would
+                    // only create cascading diagnostics.
+                    break;
+                }
+                continue;
+            }
+            if !scan_nested(statement, flow, work, diagnostics, depth + 1) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn scan_nested(
+        statement: &Statement,
+        flow: &FlowAnalysis,
+        work: &mut usize,
+        diagnostics: &mut Vec<Diagnostic>,
+        depth: usize,
+    ) -> bool {
+        if depth > MAX_RETURN_HAZARD_DEPTH {
+            return false;
+        }
+        *work = work.saturating_add(1);
+        if *work > MAX_RETURN_HAZARD_WORK {
+            return false;
+        }
+        if flow.statement_is_unreachable(statement) {
+            if !matches!(statement.kind, StatementKind::Empty) {
+                diagnostics.push(Diagnostic {
+                    code: "SEM037",
+                    severity: Severity::Warning,
+                    kind: DiagnosticKind::Lint,
+                    message: "unreachable statement".to_owned(),
+                    span: statement.span,
+                });
+            }
+            return true;
+        }
+        match &statement.kind {
+            StatementKind::Block(block) => {
+                scan_sequence(&block.statements, flow, work, diagnostics, depth + 1)
+            }
+            StatementKind::If(if_statement) => {
+                scan_nested(
+                    &if_statement.then_branch,
+                    flow,
+                    work,
+                    diagnostics,
+                    depth + 1,
+                ) && if let Some(else_branch) = &if_statement.else_branch {
+                    scan_nested(else_branch, flow, work, diagnostics, depth + 1)
+                } else {
+                    true
+                }
+            }
+            StatementKind::For(for_statement) => {
+                scan_nested(&for_statement.body, flow, work, diagnostics, depth + 1)
+            }
+            StatementKind::While(while_statement) => {
+                scan_nested(&while_statement.body, flow, work, diagnostics, depth + 1)
+            }
+            StatementKind::DoWhile(do_while) => {
+                scan_nested(&do_while.body, flow, work, diagnostics, depth + 1)
+            }
+            StatementKind::Switch(switch) => {
+                for arm in &switch.arms {
+                    if !scan_sequence(&arm.statements, flow, work, diagnostics, depth + 1) {
+                        return false;
+                    }
+                }
+                true
+            }
+            StatementKind::Empty
+            | StatementKind::Local(_)
+            | StatementKind::Return(_)
+            | StatementKind::Jump(_)
+            | StatementKind::Label(_)
+            | StatementKind::StateChange(_)
+            | StatementKind::Expression(_)
+            | StatementKind::Break(_)
+            | StatementKind::Error(_) => true,
+        }
+    }
+
+    scan_sequence(&body.statements, flow, work, diagnostics, 0)
+}
+
+/// Preserve SEM036's historical source-order scan through bodies without
+/// jumps/labels. SEM037 reachability is computed separately by the CFG.
 fn scan_statement(
     statement: &Statement,
     kind: BodyKind<'_>,
@@ -479,6 +661,14 @@ mod tests {
     }
 
     #[test]
+    fn cfg_reachability_skips_jumps_in_unvalidated_extension_event_scopes() {
+        let source = r#"default { custom_event() { jump nested; { @nested; llOwnerSay("unknown scope"); } } }"#;
+        assert!(hazards(source)
+            .iter()
+            .all(|diagnostic| diagnostic.code != "SEM037"));
+    }
+
+    #[test]
     fn value_returns_in_user_functions_are_not_event_return_errors() {
         assert!(hazards("integer helper() { return 1; } default { state_entry() { } }").is_empty());
     }
@@ -518,7 +708,7 @@ mod tests {
         assert_eq!(direct_diagnostics.len(), 1, "{direct_diagnostics:?}");
         assert_eq!(direct_diagnostics[0].code, "SEM037");
 
-        let conditional = r#"default { state_entry() { if (TRUE) state running; llOwnerSay("may run"); } } state running { state_entry() { } }"#;
+        let conditional = r#"default { state_entry() { if (llGetOwner() != NULL_KEY) state running; llOwnerSay("may run"); } } state running { state_entry() { } }"#;
         assert!(hazards(conditional).is_empty());
     }
 
@@ -548,19 +738,49 @@ mod tests {
     }
 
     #[test]
-    fn jumps_and_labels_suppress_dead_code_inference() {
-        let source = r#"integer helper() { return 1; @later; llOwnerSay("reachable by label"); jump later; } default { state_entry() { } }"#;
-        assert!(hazards(source)
-            .iter()
-            .all(|diagnostic| diagnostic.code != "SEM037"));
+    fn cfg_resolves_valid_jumps_and_reports_only_the_dead_gap() {
+        let source = r#"integer helper() { jump later; llOwnerSay("dead gap"); @later; return 1; } default { state_entry() { } }"#;
+        let diagnostics = hazards(source);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "SEM037");
+        assert_eq!(
+            &source[diagnostics[0].span.start..diagnostics[0].span.end],
+            r#"llOwnerSay("dead gap");"#
+        );
     }
 
     #[test]
-    fn event_return_hazards_are_suppressed_in_jump_label_bodies() {
-        let source = r#"default { state_entry() { return 1; @later; jump later; } }"#;
-        assert!(hazards(source).is_empty());
-    }
+    fn invalid_jump_scopes_suppress_cfg_dead_code_inference() {
+        let missing = r#"integer helper() { jump nowhere; llOwnerSay("unknown target"); } default { state_entry() { } }"#;
+        assert!(hazards(missing)
+            .iter()
+            .all(|diagnostic| diagnostic.code != "SEM037"));
 
+        let duplicate = r#"integer helper() { jump later; @later; @later; return 1; } default { state_entry() { } }"#;
+        assert!(hazards(duplicate)
+            .iter()
+            .all(|diagnostic| diagnostic.code != "SEM037"));
+
+        let inaccessible = r#"integer helper() { jump nested; { @nested; return 1; } } default { state_entry() { } }"#;
+        assert!(hazards(inaccessible)
+            .iter()
+            .all(|diagnostic| diagnostic.code != "SEM037"));
+
+        let reachable =
+            r#"integer helper() { jump later; @later; return 1; } default { state_entry() { } }"#;
+        assert!(hazards(reachable).is_empty());
+    }
+    #[test]
+    fn event_return_hazards_remain_suppressed_in_jump_label_bodies() {
+        let source = r#"default { state_entry() { jump later; return 1; @later; } }"#;
+        let diagnostics = hazards(source);
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "SEM036"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "SEM037"));
+    }
     #[test]
     fn traversal_budget_overflow_suppresses_the_whole_rule_family() {
         let mut source = String::from("default { state_entry() { return 1; ");
@@ -570,8 +790,25 @@ mod tests {
     }
 
     #[test]
-    fn switch_dispatch_is_not_assumed_to_terminate() {
-        let source = r#"integer helper(integer value) { switch (value) { case 1: return 1; default: return 2; } llOwnerSay("conservative"); return 3; } default { state_entry() { } }"#;
+    fn exhaustive_switch_arms_that_return_make_following_code_unreachable() {
+        let source = r#"integer helper(integer value) { switch (value) { case 1: return 1; default: return 2; } llOwnerSay("dead"); } default { state_entry() { } }"#;
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) =
+            parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+        assert!(syntax.is_empty(), "{syntax:?}");
+        let diagnostics = crate::ast_semantic::analyze_ast(&ast, &syntax);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SEM037"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn switch_break_keeps_the_switch_exit_reachable() {
+        let source = r#"integer helper(integer value) { switch (value) { case 1: return 1; default: break; } llOwnerSay("live"); return 2; } default { state_entry() { } }"#;
         let (tokens, lexical) = lex(source);
         assert!(lexical.is_empty(), "{lexical:?}");
         let (ast, syntax) =
@@ -586,6 +823,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn constant_branches_and_loops_drive_cfg_reachability() {
+        let source = r#"
+            integer false_if() {
+                if (FALSE) llOwnerSay("dead");
+                return 1;
+            }
+            integer true_if_return() {
+                if (TRUE) return 1;
+                llOwnerSay("dead");
+            }
+            integer false_while() {
+                while (FALSE) llOwnerSay("dead");
+                return 1;
+            }
+            integer true_while() {
+                while (TRUE) { }
+                llOwnerSay("dead");
+            }
+            integer true_for() {
+                for (; TRUE; ) { }
+                llOwnerSay("dead");
+            }
+            integer false_condition_for() {
+                for (; FALSE; ) llOwnerSay("dead");
+                return 1;
+            }
+            integer do_returns() {
+                do { return 1; } while (FALSE);
+                llOwnerSay("dead");
+            }
+            integer do_forever() {
+                do { llOwnerSay("loop"); } while (TRUE);
+                llOwnerSay("dead");
+            }
+            integer unknown_loop(integer condition) {
+                while (condition) return 1;
+                return 2;
+            }
+            default { state_entry() { } }
+        "#;
+        let diagnostics = hazards(source);
+        let sem037 = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM037")
+            .count();
+        assert_eq!(sem037, 8, "{diagnostics:?}");
+    }
     #[test]
     fn malformed_bodies_and_unreliable_environments_fail_closed() {
         let malformed = r#"default { state_entry() { return 1; llOwnerSay( ; } }"#;

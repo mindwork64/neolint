@@ -23,10 +23,11 @@ const MAX_CFG_WORK: usize = 16_384;
 const MAX_CONSTANT_NODES: usize = 128;
 const MAX_CONSTANT_DEPTH: usize = 64;
 
-/// Per-function jump diagnostics plus the function bodies invalidated for SEM011.
+/// Jump diagnostics and code scopes where an invalid jump graph must be ignored.
 pub(crate) struct JumpReport {
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) invalid_functions: HashSet<(usize, usize)>,
+    pub(crate) invalid_code_scopes: HashSet<(usize, usize)>,
 }
 
 struct LabelSite<'a> {
@@ -126,6 +127,7 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
     let mut report = JumpReport {
         diagnostics: Vec::new(),
         invalid_functions: HashSet::new(),
+        invalid_code_scopes: HashSet::new(),
     };
     for code_scope in collect_code_scopes(ast, scopes) {
         let facts = walk_body(code_scope.body, code_scope.scope, scopes);
@@ -177,10 +179,12 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
                 ));
             }
         }
-        if code_scope.is_function && report.diagnostics.len() != before {
-            report
-                .invalid_functions
-                .insert((code_scope.body.span.start, code_scope.body.span.end));
+        if report.diagnostics.len() != before {
+            let key = (code_scope.body.span.start, code_scope.body.span.end);
+            report.invalid_code_scopes.insert(key);
+            if code_scope.is_function {
+                report.invalid_functions.insert(key);
+            }
         }
     }
     report
@@ -211,10 +215,10 @@ pub(crate) fn check_missing_returns(
         if facts.has_error_statement {
             continue;
         }
-        let Some(reaches_end) = analyze_function_body(body, scope, scopes) else {
+        let Some(flow) = analyze_body(body, scope, scopes, &HashSet::new()) else {
             continue;
         };
-        if reaches_end {
+        if flow.reaches_end {
             diagnostics.push(semantic_error(
                 "SEM011",
                 format!(
@@ -393,9 +397,23 @@ struct FlowGraph {
     successors: Vec<Vec<usize>>,
     labels: HashMap<String, usize>,
     pending_jumps: Vec<(usize, String)>,
+    statement_entries: HashMap<(usize, usize), usize>,
+    terminating_state_changes: HashSet<(usize, usize)>,
     edge_count: usize,
     work: usize,
     failed: bool,
+}
+
+pub(crate) struct FlowAnalysis {
+    pub(crate) reaches_end: bool,
+    unreachable_statements: HashSet<(usize, usize)>,
+}
+
+impl FlowAnalysis {
+    pub(crate) fn statement_is_unreachable(&self, statement: &Statement) -> bool {
+        self.unreachable_statements
+            .contains(&(statement.span.start, statement.span.end))
+    }
 }
 
 impl FlowGraph {
@@ -427,13 +445,13 @@ impl FlowGraph {
         true
     }
 
-    fn can_reach(&self, start: usize, target: usize) -> bool {
+    fn reachable_from(&self, start: usize) -> Option<Vec<bool>> {
+        if start >= self.successors.len() {
+            return None;
+        }
         let mut visited = vec![false; self.successors.len()];
         let mut pending = vec![start];
         while let Some(node) = pending.pop() {
-            if node == target {
-                return true;
-            }
             if node >= visited.len() || visited[node] {
                 continue;
             }
@@ -442,7 +460,7 @@ impl FlowGraph {
                 pending.extend(edges.iter().copied());
             }
         }
-        false
+        Some(visited)
     }
 }
 
@@ -451,11 +469,19 @@ struct Fragment {
     exits: Vec<usize>,
 }
 
-fn analyze_function_body(body: &Block, scope: ScopeId, scopes: &ScopeTree) -> Option<bool> {
+/// Build one bounded CFG and expose statement reachability for SEM011/SEM037.
+pub(crate) fn analyze_body(
+    body: &Block,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    terminating_state_changes: &HashSet<(usize, usize)>,
+) -> Option<FlowAnalysis> {
     let mut graph = FlowGraph {
         successors: Vec::new(),
         labels: HashMap::new(),
         pending_jumps: Vec::new(),
+        statement_entries: HashMap::new(),
+        terminating_state_changes: terminating_state_changes.clone(),
         edge_count: 0,
         work: 0,
         failed: false,
@@ -474,7 +500,17 @@ fn analyze_function_body(body: &Block, scope: ScopeId, scopes: &ScopeTree) -> Op
     if graph.failed {
         return None;
     }
-    Some(graph.can_reach(fragment.entry, exit))
+    let reachable = graph.reachable_from(fragment.entry)?;
+    let reaches_end = *reachable.get(exit)?;
+    let unreachable_statements = graph
+        .statement_entries
+        .iter()
+        .filter_map(|(key, node)| (!reachable.get(*node).copied().unwrap_or(true)).then_some(*key))
+        .collect();
+    Some(FlowAnalysis {
+        reaches_end,
+        unreachable_statements,
+    })
 }
 
 fn build_statements(
@@ -516,6 +552,27 @@ fn build_statements(
 }
 
 fn build_statement(
+    statement: &Statement,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    graph: &mut FlowGraph,
+    break_target: Option<usize>,
+    depth: usize,
+) -> Option<Fragment> {
+    let fragment = build_statement_inner(statement, scope, scopes, graph, break_target, depth)?;
+    let key = (statement.span.start, statement.span.end);
+    if graph
+        .statement_entries
+        .insert(key, fragment.entry)
+        .is_some()
+    {
+        graph.failed = true;
+        return None;
+    }
+    Some(fragment)
+}
+
+fn build_statement_inner(
     statement: &Statement,
     scope: ScopeId,
     scopes: &ScopeTree,
@@ -590,7 +647,10 @@ fn build_statement(
         }
         StatementKind::Label(label) => {
             let node = graph.node()?;
-            graph.labels.entry(label.name.clone()).or_insert(node);
+            if graph.labels.insert(label.name.clone(), node).is_some() {
+                graph.failed = true;
+                return None;
+            }
             Some(Fragment {
                 entry: node,
                 exits: vec![node],
@@ -614,6 +674,17 @@ fn build_statement(
         StatementKind::Error(_) => {
             graph.failed = true;
             None
+        }
+        StatementKind::StateChange(_)
+            if graph
+                .terminating_state_changes
+                .contains(&(statement.span.start, statement.span.end)) =>
+        {
+            let node = graph.node()?;
+            Some(Fragment {
+                entry: node,
+                exits: Vec::new(),
+            })
         }
         StatementKind::Empty
         | StatementKind::Local(_)

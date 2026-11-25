@@ -296,19 +296,23 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   event-handler bodies. `SEM036` reports a value-return from an event handler,
   including unknown extension events. `return;` remains valid; function value
   returns remain governed by SEM008.
-- `SEM037` emits at most one warning per straight-line statement sequence, on
-  its first unreachable statement after an unconditional return, an `if/else`
-  whose two branches both terminate, or an event state change to a different
-  known state. Same-state and unknown-target state statements do not terminate
-  the event. A global function's invalid state statement is not treated as a
-  valid termination edge.
-- Loops and switches are never assumed to terminate their enclosing sequence.
-  A body containing a jump/label, parser error, error node or unclosed nested
-  block suppresses both rules for that code scope. The
-  iterative preflight and bounded recursive sequence scan share a 16,384-work
-  and 128-depth budget. Overflow suppresses the whole rule family.
-- Both diagnostics are AST-only, remain outside the SEM001–SEM023 Compare
-  contract, and do not alter Legacy output.
+- SEM037 uses the shared bounded CFG to report the first unreachable
+  non-empty statement in each straight-line sequence. It covers nested blocks,
+  conditional branches, loop bodies, switch arms and statements following
+  guaranteed termination.
+- The CFG prunes edges for statically known integer/float conditions, models
+  zero-iteration and non-terminating for/while/do-while paths, resolves valid
+  jump edges, and models Firestorm switch dispatch, fallthrough, default and
+  break to the switch exit. A switch whose every possible arm terminates has no
+  reachable exit; a reachable break or unmatched path keeps the exit reachable.
+- A state change to a different, unique known state terminates an event body.
+  Same-state/unknown targets and state changes in global functions are not
+  terminal. Invalid jump scopes, duplicate/missing labels, unvalidated jumps
+  in unknown extension events, parser errors, error nodes, unclosed blocks and
+  graph/work/depth budget exhaustion suppress SEM037 for the affected body.
+- SEM036 retains its earlier conservative suppression in bodies containing
+  jumps/labels. Both diagnostics are AST-only, outside SEM001–SEM023 Compare,
+  and do not alter Legacy output.
 
 
 ## State and list semantics (SEM038–SEM040)

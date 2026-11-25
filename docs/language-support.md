@@ -75,15 +75,21 @@ script. Neolint reports this as `SEM036` for canonical and extension event
 handlers. Use a value-return only from a user-defined function with a matching
 return type.
 
-`SEM037` warns when Neolint can prove that the first following statement is
-unreachable after an unconditional `return`, after an `if/else` whose two
-branches both terminate, or after an event handler changes to a different,
-known state. A transition to the current state is not a terminator because LSL
-performs no state-change side effects in that case. Conditional one-sided
-returns/transitions, loops and switch dispatch are not treated as guaranteed
-terminators. Bodies containing `jump`/labels or malformed syntax are skipped to
-avoid false positives. This is a bounded, conservative check rather than a full
-statement-reachability proof.
+SEM037 uses Neolint's bounded control-flow graph to report unreachable
+statements. It reasons about constant conditions, loop exit paths, valid
+jump/label edges, and Firestorm switch dispatch, fallthrough, default and
+break. It can therefore find dead statements inside a branch that is
+provably never taken, after an infinite loop, or after a switch whose possible
+arms all terminate. A reachable break or an unmatched switch path prevents
+that conclusion.
+
+A transition to a different, unique known state terminates an event handler.
+A transition to the current state has no state-change side effect, and unknown
+targets are not treated as valid transitions. Invalid jump scopes, malformed
+syntax, error nodes, unclosed blocks and analysis-budget exhaustion suppress
+the affected body. The check reports only the first unreachable non-empty
+statement in each straight-line sequence; it is not a general optimizer or
+runtime model.
 
 References: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
 [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and the

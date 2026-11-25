@@ -135,10 +135,13 @@ pub fn analyze_ast_with_environment(
         syntax_diagnostics,
         environment_reliable,
     ));
+    let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(rules::return_hazards::check(
         ast,
+        &scopes,
         syntax_diagnostics,
         environment_reliable,
+        &jumps.invalid_code_scopes,
     ));
     diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
     diagnostics.extend(rules::condition_assignments::check(
@@ -174,7 +177,6 @@ pub fn analyze_ast_with_environment(
         environment_reliable,
     ));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
-    let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);
     diagnostics.extend(flow::check_missing_returns(
         ast,

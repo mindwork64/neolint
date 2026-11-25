@@ -20,7 +20,7 @@ large_rental_controller|large|large/rental_controller.lsl|original|project-autho
 large_combat_hud|large|large/combat_hud.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:5:warning,SEM035:1:warning|0|none|HUD with computed targeting, timers, damage and a historical Mono state-change workaround
 invalid_calls_assignments|invalid|invalid/calls_and_assignments.lsl|original|project-authored|valid|SEM016:1:error,SEM004:3:error,SEM008:1:error,SEM024:1:warning,SEM026:1:warning|1|none|Known call, assignment and return type errors
 invalid_components|invalid|invalid/components.lsl|original|project-authored|invalid|PAR012:1:error,SEM018:1:error,SEM019:2:error|1|none|Invalid component read, write and literal component access
-invalid_control_flow|invalid|invalid/control_flow.lsl|original|project-authored|valid|SEM011:2:error,SEM026:3:warning|1|none|Value-returning functions with reachable fallthrough
+invalid_control_flow|invalid|invalid/control_flow.lsl|original|project-authored|valid|SEM011:2:error,SEM026:3:warning,SEM037:1:warning|1|none|Value-returning functions with reachable fallthrough and a provably dead loop body
 invalid_scope_jumps|invalid|invalid/scope_and_jumps.lsl|original|project-authored|valid|SEM007:1:error,SEM009:1:error,SEM010:2:error,SEM024:1:warning,SEM026:1:warning|1|none|Duplicate local, duplicate label and missing jump targets
 invalid_syntax_unclosed|invalid|invalid/syntax_unclosed.lsl|original|project-authored|invalid|PAR007:1:error|1|none|Unclosed default state
 invalid_duplicate_globals|invalid|invalid/duplicate_globals.lsl|original|project-authored|valid|SEM001:1:error,SEM024:2:warning|1|none|Duplicate top-level declaration

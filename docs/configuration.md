@@ -56,8 +56,9 @@ signatures are unchanged.
   the switches feature gate is enabled. `SEM034` rejects global-function state
   changes that Mono does not support; `SEM035` warns on the historical
   if-without-else compatibility workaround. `SEM036` rejects value returns
-  from events, and `SEM037` warns on directly unreachable statements after
-  unconditional returns or event state transitions. `SEM038` rejects empty
+  from events, and `SEM037` warns on unreachable statements proven by the
+  bounded control-flow graph, including constant branches, loop exits, jumps
+  and Firestorm switch paths. `SEM038` rejects empty
   states, `SEM039` rejects elements with list type inside a list, and `SEM040`
   warns when list equality/inequality compares lengths rather than contents.
   `SEM041` warns on a bare plain assignment in an `if` condition; an extra pair

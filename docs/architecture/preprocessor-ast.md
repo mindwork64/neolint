@@ -4162,18 +4162,28 @@ without a value. The check covers canonical and extension event bodies, skips
 parser-damaged bodies and does not affect ordinary user-function return typing
 (SEM008).
 
-`SEM037` is a deliberately conservative dead-code warning. It reports only the
-first statement in a straight-line block after an unconditional return, an
-`if/else` with two terminating branches, or a state change in an event handler
-to a different, declared state. A same-state transition is not terminal because
-LSL performs no state-change side effects when the target is already current.
-Unknown targets are also not treated as valid transitions. Loops and switch
-dispatch never make their containing sequence terminal in this first slice.
-Any jump/label, syntax diagnostic, error node or unclosed nested block suppresses
-both findings for that body. The rule
-uses a 16,384-work and 128-depth budget and suppresses the whole family on
-overflow. Legacy remains unchanged and Compare continues to include only
-SEM001–SEM023.
+SEM037 now consumes the shared bounded control-flow graph instead of the
+original straight-line termination heuristic. The graph retains a mapping from
+each AST statement span to its entry node and computes reachability from the
+function/event entry. The rule reports the first unreachable non-empty statement
+in each straight-line sequence, including within nested blocks, branches, loop
+bodies and switch arms.
+
+The same graph models statically provable integer/float conditions, zero- and
+many-iteration loop paths, valid jump edges and Firestorm switch dispatch,
+fallthrough, default and break. It can prove a branch body unreachable when its
+condition is constant, code after a loop unreachable when no exit edge exists,
+and code after a switch unreachable when every possible arm returns or
+otherwise terminates. A switch without default retains its unmatched exit;
+a reachable break retains the switch exit. Event state changes to a different,
+unique known state are terminal edges; same-state/unknown targets and global
+function state changes are not.
+
+Invalid jump scopes, missing/duplicate labels, syntax diagnostics, error nodes,
+unclosed nested blocks and CFG/work/depth exhaustion suppress SEM037 for the
+affected body. SEM036 retains its prior conservative suppression for bodies
+containing jumps/labels. Legacy remains unchanged and Compare continues to
+include only SEM001–SEM023.
 
 Evidence: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
 [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and
