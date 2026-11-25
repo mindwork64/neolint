@@ -1,6 +1,7 @@
 //! Focused structural SEM rule implementations for the AST engine.
 
 pub(crate) mod assignments;
+pub(crate) mod binary_operator_types;
 pub(crate) mod builtin_calls;
 pub(crate) mod components;
 pub(crate) mod condition_assignments;

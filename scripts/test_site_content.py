@@ -126,6 +126,7 @@ class SiteContentTests(unittest.TestCase):
         self.assertIn('data-reset', catalog)
         self.assertIn("SEM043", catalog)
         self.assertIn("SEM045", catalog)
+        self.assertIn("SEM046", catalog)
 
         component = (ROOT / "site/src/components/DiagnosticCatalog.astro").read_text(encoding="utf-8")
         self.assertIn("event.key === '/'", component)

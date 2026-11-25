@@ -406,6 +406,42 @@ plus is not currently covered by SEM045.
 
 References: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers), and [LslPlus operator type validation](https://hdiff.luite.com/diff/LslPlus/0.2.0/0.3.0).
 
+## Binary arithmetic and comparison operand types
+
+The AST engine reports semantic error `SEM046` when both operands have known
+types but an ordinary arithmetic or comparison operator has no valid result
+under the shared LSL type matrix. It checks `+`, `-`, `*`, `/`, `%`,
+`==`, `!=`, `<`, `<=`, `>` and `>=`.
+
+The matrix preserves LSL-specific combinations: integer/float arithmetic,
+string and list concatenation with `+`, vector addition/subtraction/dot and
+cross products, rotation addition/subtraction/multiplication/division, and
+vector-scalar or vector-rotation operations. Equality accepts same-type values
+and documented implicit conversions. Relational comparisons require numeric
+operands. List equality remains accepted by the language and is separately
+flagged by `SEM040` because it compares list lengths rather than contents.
+
+For example, the following operation is rejected because subtraction does not
+accept a string and an integer:
+
+```lsl
+default {
+    state_entry() {
+        string label = "distance";
+        integer invalid = label - 1; // SEM046
+    }
+}
+```
+
+The check reuses the same type-result matrix used by expression inference. It
+skips an operation if either operand type is unknown, and fails closed for
+parser errors, unreliable lexical/preprocessor input, or more than 65,536
+collected expression sites. Logical, bitwise and shift operators remain under
+`SEM045`. The rule is AST-only; Legacy and the SEM001–SEM023 Compare parity
+set are unchanged.
+
+References: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators) and [Linden Scripting Language Guide, §3.2–3.3](https://static-secondlife-com.s3.amazonaws.com/downloads/textures/guides/LSLGuide.pdf).
+
 ## Important limitations
 
 Neolint is not a complete LSL compiler or a complete symbol database for every scripting environment. It does not guarantee that a script will compile or behave correctly in Second Life or another simulator. Always use the official compiler and the target runtime to verify scripts that matter.

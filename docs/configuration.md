@@ -66,7 +66,8 @@ signatures are unchanged.
   the required detection data. `SEM043` warns on division or integer remainder
   by a statically known zero value; `SEM044` warns when a populated named state
   has no transition path from `default`; `SEM045` reports known-invalid operator
-  operand types.
+  operand types; `SEM046` rejects known-incompatible arithmetic and comparison
+  operand pairs.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both

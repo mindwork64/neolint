@@ -320,7 +320,7 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
 - All three rules are AST-only and remain outside the SEM001–SEM023 Compare parity contract. Legacy output is unchanged.
 
 
-## AST-only operator and LSL hazard rules (SEM041–SEM045)
+## AST-only operator and LSL hazard rules (SEM041–SEM046)
 
 - SEM041 checks only a bare top-level plain assignment used as an `if`
   condition. An extra pair of grouping parentheses marks an intentional
@@ -344,7 +344,13 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   and `++`/`--` require a known integer/float variable. Built-in constants are
   not writable. Unary plus is intentionally outside the rule. Unknown
   expression types are skipped rather than guessed.
-- SEM041–SEM045 are AST-only and remain outside the SEM001–SEM023 differential
+- SEM046 validates only ordinary arithmetic and comparison operands. It
+  requires both operand types to be known and reuses
+  `types::infer_binary_result_type`, avoiding a second copy of the LSL operator
+  matrix. Unknown operands are skipped. The check is capped at 65,536 collected
+  expression sites and fails closed on parser errors or unreliable lexical/
+  preprocessor input.
+- SEM041–SEM046 are AST-only and remain outside the SEM001–SEM023 differential
   Compare contract. They do not change Legacy output. Rules that depend on
   complete lexical/preprocessor and parser input fail closed when that input
   is unreliable; their individual resource limits are documented alongside

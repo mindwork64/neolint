@@ -4227,3 +4227,22 @@ SEM045 is an AST-only semantic error. It does not enter the SEM001–SEM023
 Compare parity set and does not modify Legacy output.
 
 Evidence: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers), and [LslPlus operator type validation](https://hdiff.luite.com/diff/LslPlus/0.2.0/0.3.0).
+
+
+### Post-v1.1.0 binary operator compatibility validation (SEM046)
+
+SEM046 validates known operand pairs for ordinary arithmetic and comparison
+operators (`+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`). Both
+operand types must be known; the rule then calls the existing
+`infer_binary_result_type` matrix rather than maintaining a second operator
+table. This preserves numeric coercion, string/list concatenation, vector and
+rotation operations, and existing string/key equality conversions. Logical,
+bitwise and shift operators remain covered by SEM045; list/list equality remains
+accepted and receives its separate SEM040 lint warning.
+
+The check is capped at 65,536 collected expression sites and emits no findings
+when parser errors or unreliable lexical/preprocessor input make the unit
+incomplete. SEM046 is an AST-only semantic error and does not change Legacy
+output or the SEM001–SEM023 Compare parity set.
+
+Evidence: [Second Life Wiki — LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators) and [Linden Scripting Language Guide, §3.2–3.3](https://static-secondlife-com.s3.amazonaws.com/downloads/textures/guides/LSLGuide.pdf), especially the vector and rotation operator tables.
