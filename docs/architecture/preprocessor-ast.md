@@ -3792,6 +3792,34 @@ SEM001–SEM023. The rule does not change preprocessing, parsing, JSON schema,
 source-map behavior, engine selection, or the Legacy implementation. Focused
 AST, CLI, corpus and comparator tests pin these boundaries.
 
+### Post-v1.1.0 Mono global-function state-change context (SEM034–SEM035)
+
+The AST semantic pass checks state-change statements in complete top-level
+user-defined function bodies. Mono rejects ordinary state changes from global
+functions. `SEM034` is therefore an AST-only semantic error for such placements,
+regardless of whether the function is reachable from an event.
+
+The LSL State documentation records a historical compiler bugfeature: place the
+state change as the direct, unbraced then-branch of an `if` with no `else`
+(`if (condition) state target;`). That same page notes Rand Linden had previously
+said the workaround was no longer valid. The implementation recognizes only
+this exact shape and reports `SEM035` as a warning—not as supported or portable
+LSL. Braced bodies, `if/else`, and loop bodies remain `SEM034` errors. A 2026
+Mono/LSL-Luau compatibility report demonstrates different state-change
+execution behavior for the workaround pattern across those runtimes.
+
+Event-handler state changes remain valid. SEM022 retains its historical boundary
+and continues to validate undefined targets only in canonical event handlers;
+function-body placements are covered by SEM034/SEM035 instead. The new rules
+fail closed on an unreliable lexical/preprocessor environment, ignore syntax-
+malformed state-change statements and unclosed function bodies, and suppress
+all findings if the 16,384-statement traversal budget is exceeded. They are
+AST-only and remain outside the SEM001–SEM023 Compare contract. Legacy remains
+unchanged.
+
+Evidence: [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State);
+[Second Life feedback — State changes discrepancy in LSL-Luau vs Mono (2026)](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
+
 ---
 
 ## 16. Module structure (proposed, not created in Phase 0)
@@ -4103,3 +4131,30 @@ Decisions and remaining open questions:
   `include/boost/wave/util/interpret_pragma.hpp` and
   `include/boost/wave/wave_config.hpp` (`BOOST_WAVE_SUPPORT_PRAGMA_ONCE`
   defaults to 1) at tag `boost-1.90.0`.
+
+
+### Post-v1.1.0 event-return and unreachable-statement checks (SEM036–SEM037)
+
+The AST semantic engine now reports `SEM036` when an event handler returns a
+value. The Second Life Wiki notes that the compiler can accept this form even
+though executing it crashes the script; event handlers may use `return;` to exit
+without a value. The check covers canonical and extension event bodies, skips
+parser-damaged bodies and does not affect ordinary user-function return typing
+(SEM008).
+
+`SEM037` is a deliberately conservative dead-code warning. It reports only the
+first statement in a straight-line block after an unconditional return, an
+`if/else` with two terminating branches, or a state change in an event handler
+to a different, declared state. A same-state transition is not terminal because
+LSL performs no state-change side effects when the target is already current.
+Unknown targets are also not treated as valid transitions. Loops and switch
+dispatch never make their containing sequence terminal in this first slice.
+Any jump/label, syntax diagnostic, error node or unclosed nested block suppresses
+both findings for that body. The rule
+uses a 16,384-work and 128-depth budget and suppresses the whole family on
+overflow. Legacy remains unchanged and Compare continues to include only
+SEM001–SEM023.
+
+Evidence: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
+[Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and
+[LSL Wiki — Compiler errors](https://www.lslwiki.digiworldz.com/lslwiki/wakka.php?wakka=errors).

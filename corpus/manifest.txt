@@ -17,7 +17,7 @@ medium_dialog_menu|medium|medium/dialog_menu.lsl|original|project-authored|valid
 medium_extension_safe|medium|medium/extension_safe.lsl|original|project-authored|valid|none|0|none|Unknown extension members remain conservative
 large_teleporter|large|large/teleporter.lsl|original|project-authored|valid|SEM024:2:warning,SEM025:5:warning|0|none|Multi-state teleporter with dialogs, lists and movement
 large_rental_controller|large|large/rental_controller.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:4:warning,SEM026:1:warning|0|none|Rental workflow with tenants, inventory, timing and states
-large_combat_hud|large|large/combat_hud.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:5:warning|0|none|HUD with computed targeting, timers, damage and state changes
+large_combat_hud|large|large/combat_hud.lsl|original|project-authored|valid|SEM024:1:warning,SEM025:5:warning,SEM035:1:warning|0|none|HUD with computed targeting, timers, damage and a historical Mono state-change workaround
 invalid_calls_assignments|invalid|invalid/calls_and_assignments.lsl|original|project-authored|valid|SEM016:1:error,SEM004:3:error,SEM008:1:error,SEM024:1:warning,SEM026:1:warning|1|none|Known call, assignment and return type errors
 invalid_components|invalid|invalid/components.lsl|original|project-authored|invalid|PAR012:1:error,SEM018:1:error,SEM019:2:error|1|none|Invalid component read, write and literal component access
 invalid_control_flow|invalid|invalid/control_flow.lsl|original|project-authored|valid|SEM011:2:error,SEM026:3:warning|1|none|Value-returning functions with reachable fallthrough

@@ -35,6 +35,55 @@ User-defined functions can return one of these types or omit a return type when 
 
 Neolint recognizes blocks, empty statements, local declarations, expression statements, assignments, function calls, `if`/`else`, `for`, `while`, `do-while`, `return`, `jump` labels, and state changes.
 
+### State changes and Mono compatibility
+
+A `state target;` statement is valid in an event handler. A top-level
+user-defined (global) function is a different context: the Mono compiler
+rejects ordinary state changes from these functions with the diagnostic
+`Global functions can't change state`. Neolint's AST engine reports
+`SEM034` for these placements, whether or not the function is currently
+reachable from an event handler.
+
+The Second Life Wiki documents one historical compiler bugfeature:
+`if (condition) state target;` with the state change as the direct, unbraced
+then-branch and no `else`. The same page records that Rand Linden had previously
+said this workaround was no longer valid. A 2026 Mono/LSL-Luau compatibility
+report demonstrates different execution behavior for this exact pattern.
+Neolint therefore reports this narrow shape as `SEM035`, a warning—not as a
+supported workaround or portable LSL. Do not use it in new code; perform state
+transitions in event handlers. Braced branches, `if/else`, and loop bodies do
+not qualify and receive `SEM034`.
+
+These are AST-only diagnostics. Legacy output remains frozen, and Compare still
+compares only `SEM001`–`SEM023`. The rule skips malformed state-change
+statements, incomplete function bodies, unreliable lexical/preprocessor units,
+and inputs exceeding its bounded traversal budget. The official references are
+the [LSL State documentation](https://wiki.secondlife.com/wiki/State) and the
+[2026 Mono/LSL-Luau state-change compatibility report](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
+
+### Return statements and unreachable code
+
+A bare `return;` is valid in a function or event handler. A value-return such as
+`return 1;` inside an event handler is not valid LSL behavior: the compiler may
+accept it, but the official reference warns that executing it crashes the
+script. Neolint reports this as `SEM036` for canonical and extension event
+handlers. Use a value-return only from a user-defined function with a matching
+return type.
+
+`SEM037` warns when Neolint can prove that the first following statement is
+unreachable after an unconditional `return`, after an `if/else` whose two
+branches both terminate, or after an event handler changes to a different,
+known state. A transition to the current state is not a terminator because LSL
+performs no state-change side effects in that case. Conditional one-sided
+returns/transitions, loops and switch dispatch are not treated as guaranteed
+terminators. Bodies containing `jump`/labels or malformed syntax are skipped to
+avoid false positives. This is a bounded, conservative check rather than a full
+statement-reachability proof.
+
+References: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
+[Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and the
+[LSL Wiki compiler error list](https://www.lslwiki.digiworldz.com/lslwiki/wakka.php?wakka=errors).
+
 The `for` condition is required. Its initializer and increment clauses may be empty and may contain comma-separated expressions. A variable declaration is not allowed in the initializer; declare the loop variable before the loop:
 
 ```lsl

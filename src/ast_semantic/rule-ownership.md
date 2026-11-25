@@ -257,3 +257,46 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
 - All three fail closed on malformed units. `SEM026` also suppresses the whole
   rule when its call-graph node, edge, or work budget overflows, rather than
   reporting a partial reachability result.
+
+
+## Mono global-function state-change context (SEM034/SEM035)
+
+- `ast_semantic::rules::state_transitions` scans complete top-level
+  user-defined function bodies, not event-handler bodies. This is lexical
+  context validation, not call-graph reachability: an unused helper is still a
+  global function and is checked even if no event can reach it.
+- `SEM034` is an error for a state change in a global function. The one
+  historical Mono compatibility shape recognized separately is an unbraced
+  state-change statement used as the direct then-branch of an `if` with no
+  `else`; it receives `SEM035` warning because it is unsupported and not
+  portable behavior. An `if/else`, a block body, and loop bodies do not qualify.
+- Event-handler state changes remain valid and continue to use SEM022 for
+  undefined targets. SEM022's Legacy/AST parity contract is unchanged; it still
+  does not inspect ordinary function bodies.
+- The rule fails closed on unreliable preprocessing/lexing and suppresses
+  individual findings when a syntax diagnostic touches the statement. Unclosed
+  function bodies are skipped. The traversal is capped at 16,384 statements;
+  overflow suppresses the whole rule rather than emitting partial findings.
+- Both codes are AST-only, do not enter the SEM001–SEM023 comparator, and do
+  not change Legacy behavior.
+
+
+## Return and unreachable-code hazards (SEM036/SEM037)
+
+- `ast_semantic::rules::return_hazards` checks complete top-level function and
+  event-handler bodies. `SEM036` reports a value-return from an event handler,
+  including unknown extension events. `return;` remains valid; function value
+  returns remain governed by SEM008.
+- `SEM037` emits at most one warning per straight-line statement sequence, on
+  its first unreachable statement after an unconditional return, an `if/else`
+  whose two branches both terminate, or an event state change to a different
+  known state. Same-state and unknown-target state statements do not terminate
+  the event. A global function's invalid state statement is not treated as a
+  valid termination edge.
+- Loops and switches are never assumed to terminate their enclosing sequence.
+  A body containing a jump/label, parser error, error node or unclosed nested
+  block suppresses both rules for that code scope. The
+  iterative preflight and bounded recursive sequence scan share a 16,384-work
+  and 128-depth budget. Overflow suppresses the whole rule family.
+- Both diagnostics are AST-only, remain outside the SEM001–SEM023 Compare
+  contract, and do not alter Legacy output.
