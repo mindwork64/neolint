@@ -29,6 +29,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Node.js for the website build
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install website dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build the Astro / Starlight website
+        working-directory: site
+        run: npm run build
+
       - name: Test canonical metadata extractor
         run: python3 -m unittest discover --start-directory scripts --pattern 'test_*.py'
 

@@ -1,0 +1,39 @@
+---
+import SiteHeader from '../../components/SiteHeader.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
+import DiagnosticCatalog from '../../components/DiagnosticCatalog.astro';
+import diagnostics from '../../data/diagnostics.json';
+import '../../styles/home.css';
+
+const rules = diagnostics;
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#070810" />
+    <meta name="description" content="Search and filter all neolint diagnostics for Linden Scripting Language." />
+    <title>Diagnostic reference — neolint</title>
+    <link rel="icon" href={`${base}favicon.ico`} sizes="any" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <SiteHeader />
+      <main class="catalog-page">
+        <div class="eyebrow"><span></span> REFERENCE · RULE CATALOG</div>
+        <h1>Diagnostic <em>catalog</em></h1>
+        <p class="catalog-intro">Search every diagnostic emitted by neolint. Filter by family, default severity, or analysis engine. Each entry includes its documented meaning and important boundary.</p>
+        <div class="catalog-summary">
+          <div><strong>{rules.length}</strong><span>documented diagnostics</span></div>
+          <div><strong>5</strong><span>diagnostic families</span></div>
+          <div><strong>2</strong><span>analysis engines</span></div>
+        </div>
+        <DiagnosticCatalog rules={rules} />
+        <p class="catalog-source">This catalog is generated from <code>docs/diagnostics.md</code>. The Markdown reference remains the canonical source.</p>
+      </main>
+      <SiteFooter />
+    </div>
+  </body>
+</html>

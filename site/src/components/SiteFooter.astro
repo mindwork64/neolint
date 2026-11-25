@@ -1,0 +1,40 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+---
+<footer class="site-footer">
+  <div>
+    <strong>neolint</strong>
+    <span>Code quality linter for Linden Scripting Language.</span>
+  </div>
+  <nav aria-label="Footer navigation">
+    <a href={`${base}docs/`}>Documentation</a>
+    <a href={`${base}diagnostics/`}>Diagnostics</a>
+    <a href="https://github.com/mindwork64/neolint">Source code</a>
+    <a href="https://github.com/mindwork64/neolint/releases/latest">Latest release</a>
+  </nav>
+  <small>MIT OR Apache-2.0 · Built for people who write LSL.</small>
+</footer>
+
+<style>
+  .site-footer {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 18px 32px;
+    width: min(1180px, calc(100% - 48px));
+    margin: 80px auto 0;
+    padding: 28px 0 34px;
+    border-top: 1px solid rgba(111, 153, 205, .16);
+    color: #98a7be;
+  }
+  .site-footer div { display: grid; gap: 5px; }
+  .site-footer strong { color: #eaf0ff; font-size: 1.05rem; }
+  .site-footer span, .site-footer small { font-size: .82rem; }
+  .site-footer nav { display: flex; flex-wrap: wrap; gap: 12px 22px; }
+  .site-footer a { color: #aebbd0; font-size: .84rem; text-decoration: none; }
+  .site-footer a:hover { color: #57dfff; }
+  .site-footer small { grid-column: 1 / -1; color: #75839a; }
+  @media (max-width: 700px) {
+    .site-footer { width: min(100% - 32px, 1180px); grid-template-columns: 1fr; }
+    .site-footer small { grid-column: auto; }
+  }
+</style>

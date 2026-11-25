@@ -1,0 +1,233 @@
+---
+interface Rule {
+  code: string;
+  summary: string;
+  detail: string;
+  category: string;
+  family: string;
+  kind: string;
+  severity: string;
+  engine: string;
+}
+
+const { rules } = Astro.props as { rules: Rule[] };
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+---
+<section class="catalog" data-diagnostic-catalog>
+  <div class="catalog-toolbar">
+    <label class="search-field">
+      <span class="sr-only">Search diagnostics</span>
+      <span aria-hidden="true">⌕</span>
+      <input type="search" data-search placeholder="Search by code, name, or description…" autocomplete="off" />
+      <kbd>/</kbd>
+    </label>
+    <label class="filter-field">
+      <span>FAMILY</span>
+      <select data-category aria-label="Filter by diagnostic family">
+        <option value="">All families</option>
+        <option value="LEX">LEX · Lexical</option>
+        <option value="PAR">PAR · Parser</option>
+        <option value="AST">AST · AST parser</option>
+        <option value="PRE">PRE · Preprocessor</option>
+        <option value="SEM">SEM · Semantic and lint</option>
+      </select>
+    </label>
+    <label class="filter-field">
+      <span>SEVERITY</span>
+      <select data-severity aria-label="Filter by default severity">
+        <option value="">All severities</option>
+        <option value="error">Error</option>
+        <option value="warning">Warning</option>
+        <option value="info">Info</option>
+      </select>
+    </label>
+    <label class="filter-field">
+      <span>ENGINE</span>
+      <select data-engine aria-label="Filter by analysis engine">
+        <option value="">All engines</option>
+        <option value="AST only">AST only</option>
+        <option value="AST + Legacy">AST + Legacy</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="catalog-status">
+    <p data-result-count aria-live="polite">{rules.length} diagnostics</p>
+    <button type="button" class="reset-filters" data-reset>Reset filters <span aria-hidden="true">↺</span></button>
+  </div>
+
+  <div class="diagnostic-grid" data-results>
+    {rules.map((rule) => (
+      <details
+        class="rule-card"
+        data-rule
+        data-code={rule.code}
+        data-category={rule.category}
+        data-severity={rule.severity}
+        data-engine={rule.engine}
+        data-search={`${rule.code} ${rule.summary} ${rule.detail} ${rule.kind}`}
+      >
+        <summary>
+          <span class="rule-code">{rule.code}</span>
+          <span class:list={['severity-pill', `severity-${rule.severity}`]}>{rule.severity}</span>
+          <span class="rule-title">{rule.summary}</span>
+          <span class="rule-chevron" aria-hidden="true">+</span>
+        </summary>
+        <div class="rule-content">
+          <p>{rule.detail || 'See the full diagnostic reference for details.'}</p>
+          <div class="rule-meta">
+            <span>{rule.family}</span>
+            <span>{rule.engine}</span>
+            <a href={`${base}docs/diagnostics/`}>Full reference ↗</a>
+          </div>
+        </div>
+      </details>
+    ))}
+  </div>
+
+  <div class="catalog-empty" data-empty hidden>
+    <span aria-hidden="true">⌕</span>
+    <h2>No diagnostics found</h2>
+    <p>Try another search term or reset the filters.</p>
+  </div>
+  <noscript><p class="noscript-note">Search and filters require JavaScript. All diagnostics remain listed below.</p></noscript>
+</section>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-diagnostic-catalog]').forEach((catalog) => {
+    const search = catalog.querySelector<HTMLInputElement>('[data-search]');
+    const category = catalog.querySelector<HTMLSelectElement>('[data-category]');
+    const severity = catalog.querySelector<HTMLSelectElement>('[data-severity]');
+    const engine = catalog.querySelector<HTMLSelectElement>('[data-engine]');
+    const cards = Array.from(catalog.querySelectorAll<HTMLDetailsElement>('[data-rule]'));
+    const count = catalog.querySelector<HTMLElement>('[data-result-count]');
+    const empty = catalog.querySelector<HTMLElement>('[data-empty]');
+    const reset = catalog.querySelector<HTMLButtonElement>('[data-reset]');
+
+    const filter = () => {
+      const query = search?.value.trim().toLocaleLowerCase() ?? '';
+      const selectedCategory = category?.value ?? '';
+      const selectedSeverity = severity?.value ?? '';
+      const selectedEngine = engine?.value ?? '';
+      let visible = 0;
+
+      for (const card of cards) {
+        const matches =
+          (!query || (card.dataset.search ?? '').toLocaleLowerCase().includes(query)) &&
+          (!selectedCategory || card.dataset.category === selectedCategory) &&
+          (!selectedSeverity || card.dataset.severity === selectedSeverity) &&
+          (!selectedEngine || card.dataset.engine === selectedEngine);
+        card.hidden = !matches;
+        if (matches) visible += 1;
+      }
+
+      if (count) count.textContent = `${visible} of ${cards.length} diagnostics`;
+      if (empty) empty.hidden = visible !== 0;
+    };
+
+    search?.addEventListener('input', filter);
+    category?.addEventListener('change', filter);
+    severity?.addEventListener('change', filter);
+    engine?.addEventListener('change', filter);
+    reset?.addEventListener('click', () => {
+      if (search) search.value = '';
+      if (category) category.value = '';
+      if (severity) severity.value = '';
+      if (engine) engine.value = '';
+      filter();
+      search?.focus();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const target = event.target;
+        if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+        event.preventDefault();
+        search?.focus();
+      }
+      if (event.key === 'Escape' && document.activeElement === search) {
+        if (search) search.value = '';
+        filter();
+        search?.blur();
+      }
+    });
+  });
+</script>
+
+<style>
+  .catalog { display: grid; gap: 18px; }
+  .catalog-toolbar {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(135px, .8fr));
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(17, 30, 48, .72), rgba(14, 13, 27, .78));
+  }
+  .search-field, .filter-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .search-field { position: relative; justify-content: center; }
+  .search-field > span:not(.sr-only) { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: #59dfff; font-size: 1.25rem; }
+  .search-field input, .filter-field select {
+    min-width: 0;
+    height: 43px;
+    border: 1px solid rgba(125, 157, 198, .25);
+    border-radius: 9px;
+    background: rgba(5, 8, 16, .76);
+    color: #eaf1ff;
+    font: inherit;
+    font-size: .86rem;
+  }
+  .search-field input { width: 100%; padding: 0 45px 0 38px; }
+  .search-field input::placeholder { color: #71819b; }
+  .search-field kbd { position: absolute; right: 11px; top: 50%; transform: translateY(-50%); padding: 2px 6px; border: 1px solid rgba(135, 159, 195, .25); border-radius: 5px; color: #8291aa; font-size: .72rem; }
+  .filter-field > span { color: #7688a5; font-size: .63rem; font-weight: 750; letter-spacing: .14em; }
+  .filter-field select { padding: 0 10px; }
+  .catalog-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .catalog-status p { margin: 0; color: var(--sl-color-gray-3); font-size: .82rem; font-variant-numeric: tabular-nums; }
+  .reset-filters { border: 0; background: transparent; color: #65dfff; cursor: pointer; font: inherit; font-size: .8rem; }
+  .reset-filters:hover { color: #d58aff; }
+  .diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .rule-card {
+    align-self: start;
+    overflow: hidden;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 11px;
+    background: rgba(13, 17, 29, .72);
+    transition: border-color .18s ease, background .18s ease;
+  }
+  .rule-card:hover, .rule-card[open] { border-color: rgba(51, 197, 244, .52); background: rgba(18, 26, 43, .9); }
+  .rule-card[hidden] { display: none; }
+  .rule-card summary {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 66px;
+    padding: 13px 14px;
+    list-style: none;
+    cursor: pointer;
+  }
+  .rule-card summary::-webkit-details-marker { display: none; }
+  .rule-code { color: #69e3ff; font-family: var(--sl-font-mono); font-size: .78rem; font-weight: 780; letter-spacing: .025em; }
+  .severity-pill { padding: 3px 7px; border: 1px solid; border-radius: 5px; font-size: .6rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+  .severity-error { border-color: rgba(255, 88, 121, .32); background: rgba(255, 72, 110, .1); color: #ff8ca3; }
+  .severity-warning { border-color: rgba(250, 183, 75, .3); background: rgba(250, 183, 75, .09); color: #ffd18a; }
+  .severity-info { border-color: rgba(72, 205, 255, .3); background: rgba(72, 205, 255, .09); color: #83e5ff; }
+  .rule-title { color: #dce5f5; font-size: .84rem; line-height: 1.45; }
+  .rule-chevron { color: #71829d; font-size: 1.1rem; transition: transform .15s ease; }
+  .rule-card[open] .rule-chevron { transform: rotate(45deg); color: #65dfff; }
+  .rule-content { padding: 0 15px 15px; }
+  .rule-content p { margin: 0; color: #aebbd0; font-size: .82rem; line-height: 1.65; }
+  .rule-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 13px; padding-top: 11px; border-top: 1px solid rgba(115, 143, 184, .15); color: #798aa5; font-size: .72rem; }
+  .rule-meta a { margin-left: auto; color: #65dfff; text-decoration: none; }
+  .rule-meta a:hover { color: #d58aff; }
+  .catalog-empty { padding: 42px 16px; border: 1px dashed rgba(119, 151, 194, .28); border-radius: 12px; text-align: center; }
+  .catalog-empty[hidden] { display: none; }
+  .catalog-empty > span { color: #62dfff; font-size: 2rem; }
+  .catalog-empty h2 { margin: 8px 0; color: #e7edfa; font-size: 1.05rem; }
+  .catalog-empty p, .noscript-note { color: #91a0b8; font-size: .84rem; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  @media (max-width: 800px) { .catalog-toolbar { grid-template-columns: repeat(3, minmax(0, 1fr)); } .search-field { grid-column: 1 / -1; } }
+  @media (max-width: 560px) { .catalog-toolbar { grid-template-columns: 1fr; } .search-field { grid-column: auto; } .diagnostic-grid { grid-template-columns: 1fr; } .rule-card summary { grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 7px; padding: 12px; } .severity-pill { font-size: .55rem; } .rule-title { font-size: .8rem; } }
+</style>
