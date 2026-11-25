@@ -44,7 +44,7 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 `SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` are AST-only lint diagnostics.
-`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, and `SEM045` are AST-only semantic errors. The Firestorm switch
+`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, and `SEM046` are AST-only semantic errors. The Firestorm switch
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
 user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
@@ -54,7 +54,8 @@ to event handlers and user-defined function bodies. State/list checks
 context-bound detection functions are reachable from incompatible events;
 `SEM043` warns on division/remainder by statically known zero; `SEM044` warns
 when a populated state has no transition path from `default`; `SEM045` rejects
-known-invalid operator operand types. These codes appear in
+known-invalid operator operand types; `SEM046` rejects known-incompatible
+arithmetic and comparison operands. These codes appear in
 default and explicit `--engine ast`
 output, are never emitted by explicit `--engine legacy`, and are not part of the
 Compare parity report, which continues to cover only `SEM001`–`SEM023`.

@@ -34,7 +34,8 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   (statically provable division/remainder by zero). `SEM044` warns on populated
   states with no transition path from `default`, and `SEM045` validates known
   operand types for unary, logical, bitwise/shift and increment/decrement operators;
-  Legacy and Compare remain unchanged.
+  `SEM046` validates known-incompatible arithmetic and comparison operand
+  pairs using the shared LSL type matrix. Legacy and Compare remain unchanged.
 - Phase 8: reproducible benchmark harness, resource-limit reconciliation and
   profile-guided fixes.
 - Phase 8 follow-ups #108–#111 are integrated and closed:
@@ -43,7 +44,7 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM045` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM046` are AST-only.
 
 ## Architecture
 

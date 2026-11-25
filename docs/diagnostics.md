@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, and `SEM045`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, and `SEM046`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -173,6 +173,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM043` | Division or integer remainder has a statically known zero divisor. | warning / lint | AST-only. Checks `/`, `%`, `/=` and `%=` when operand types are valid and the divisor can be evaluated from literals, unshadowed numeric built-in constants, parentheses, zero-preserving numeric casts and side-effect-free constant arithmetic. Mutable variables and calls are never guessed; vector `%` is not treated as integer remainder. Parser errors, unreliable environments and work/depth budget exhaustion suppress the rule. |
 | `SEM044` | A populated named state has no transition path from `default`. | warning / lint | AST-only. Builds a bounded over-approximation from state-change statements in event handlers. Conditional and otherwise unreachable transitions count as possible edges; unknown targets, malformed/duplicate states, parser errors, unreliable environments and budget exhaustion are handled conservatively (4,096 states, 32,768 traversal units and 128 nested statement levels maximum). Empty states remain covered by SEM038. |
 | `SEM045` | An operator operand is incompatible or an increment target is not writable. | error / semantic | AST-only. Checks unary `-`, `!`, `~`, logical/bitwise/shift operators, and `++`/`--` on known variables. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. Built-in constants cannot be incremented or decremented. Unary plus is intentionally outside the rule. |
+| `SEM046` | A known binary arithmetic/comparison operator has incompatible operand types. | error / semantic | AST-only. Validates `+`, `-`, `*`, `/`, `%`, equality and relational operators against the shared LSL type-result matrix. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. List equality remains covered by SEM040 when both operands are lists. |
 
 ## Illustrative minimal examples
 
@@ -317,6 +318,11 @@ default {
 ```
 
 ```lsl
+// SEM046: arithmetic operands must have a supported type combination
+default { state_entry() { string text = "x"; integer invalid = text - 1; } }
+```
+
+```lsl
 // SEM003: wrong event parameter count
 default { touch_start() { } }
 ```
@@ -411,6 +417,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM043 reports only when a valid numeric `/`, integer `%`, `/=`, or `%=` operation has a denominator that the bounded constant evaluator proves to be zero. It understands integer/float literals, unshadowed numeric built-in constants such as `FALSE`, parentheses, unary numeric operators, zero-preserving numeric casts and side-effect-free constant arithmetic. It does not evaluate mutable variables or function calls, and vector `%` remains a vector cross product rather than integer remainder. Any parser error, unreliable lexical/preprocessor environment or evaluator budget/depth exhaustion suppresses the rule.
 - SEM044 builds a conservative state-transition graph starting at `default` and warns on populated named states with no path from that root. Every state-change statement in a valid event body is treated as a possible edge, even when nested in a conditional or textually unreachable code; this favors false negatives over false positives. Transitions inside global functions are not used because those are separately diagnosed by SEM034/SEM035. Empty states are left to SEM038. The rule skips duplicate/malformed state sets, parser errors, unreliable environments and budget/depth exhaustion. This is structural reachability from `default`, not a model of a script restored from an inventory snapshot in a previously active state.
 - SEM045 validates only operator/type combinations with confirmed LSL constraints: unary `-` accepts integer/float/vector/rotation, `!` and `~` require integer, logical/bitwise/shift operators require two integers, and increment/decrement require a known integer/float variable. Unknown values are not guessed. Built-in constants are not writable. Unary plus is intentionally excluded. Any parser error, unreliable lexical/preprocessor environment or more than 65,536 expression sites suppresses the rule.
+- SEM046 validates ordinary arithmetic and comparison operators only when both operand types are known. It reuses the shared LSL result-type matrix, so accepted vector/rotation arithmetic, string/list concatenation, mixed numeric operations and implicit string/key equality conversions stay aligned with expression inference. Unknown values are not guessed; parser errors, unreliable input or expression-site budget exhaustion suppress the rule.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

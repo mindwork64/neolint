@@ -548,7 +548,7 @@ fn ast_only_codes_are_ignored_by_the_comparator() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044", "SEM045",
+        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046",
     ] {
         assert!(
             !SEM_CODES.contains(&code),
@@ -637,6 +637,7 @@ fn ast_only_codes_are_ignored_by_the_comparator() {
             ..diagnostic("SEM044")
         },
         diagnostic("SEM045"),
+        diagnostic("SEM046"),
     ];
 
     let report = compare_semantic_diagnostics(&[], &ast);

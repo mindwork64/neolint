@@ -826,3 +826,47 @@ fn sem045_is_ast_only_and_does_not_change_legacy_or_compare_streams() {
     );
     assert_eq!(compare.comparison().unwrap().by_rule.len(), 23);
 }
+
+#[test]
+fn sem046_is_ast_only_and_does_not_change_legacy_or_compare_streams() {
+    let source =
+        r#"default { state_entry() { string text = "bad"; integer invalid = text - 1; } }"#;
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run
+        .add_prepared_text("binary-operators.lsl", source)
+        .unwrap();
+    let unit = run.unit(index).unwrap();
+
+    let ast = unit
+        .analyze_with_engine(AnalysisEngine::Ast)
+        .expect("AST analysis should succeed");
+    assert!(
+        ast.diagnostics()
+            .iter()
+            .any(|item| item.diagnostic().code == "SEM046"),
+        "AST mode must emit SEM046"
+    );
+
+    let legacy = unit
+        .analyze_with_engine(AnalysisEngine::Legacy)
+        .expect("Legacy analysis should succeed");
+    assert!(
+        legacy
+            .diagnostics()
+            .iter()
+            .all(|item| item.diagnostic().code != "SEM046"),
+        "Legacy output must remain frozen"
+    );
+
+    let compare = unit
+        .analyze_with_engine(AnalysisEngine::Compare)
+        .expect("Compare analysis should succeed");
+    assert!(
+        compare
+            .diagnostics()
+            .iter()
+            .all(|item| item.diagnostic().code != "SEM046"),
+        "Compare display output must remain Legacy-only"
+    );
+    assert_eq!(compare.comparison().unwrap().by_rule.len(), 23);
+}
