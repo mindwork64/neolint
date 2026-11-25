@@ -22,4 +22,5 @@ integer constant_true()
 
 default
 {
+    state_entry() { }
 }

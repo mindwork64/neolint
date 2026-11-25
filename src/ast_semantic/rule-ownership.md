@@ -300,3 +300,21 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   and 128-depth budget. Overflow suppresses the whole rule family.
 - Both diagnostics are AST-only, remain outside the SEM001–SEM023 Compare
   contract, and do not alter Legacy output.
+
+
+## State and list semantics (SEM038–SEM040)
+
+- SEM038 requires each complete state declaration to contain at least one
+  event handler. It skips incomplete state bodies, malformed state ranges and
+  unreliable lexical/preprocessor environments. Canonical and extension event
+  handlers both satisfy the requirement.
+- SEM039 checks each list element with the AST scope/type resolver. It reports
+  nested list literals, visible variables of type list, list-returning calls and
+  other expressions with a provable list result. Unknown types and malformed
+  expressions are skipped. The traversal is capped at 65,536 work items and
+  fails closed on overflow.
+- SEM040 warns on == / != when both operands are provably lists. Its message
+  distinguishes length-only equality from the length-difference result of
+  inequality. It reports at the operator and skips malformed or syntax-damaged
+  expressions.
+- All three rules are AST-only and remain outside the SEM001–SEM023 Compare parity contract. Legacy output is unchanged.

@@ -8,6 +8,11 @@ An LSL script contains global declarations and user-defined functions followed b
 
 Global declarations and user-defined functions must appear before state definitions. A function that returns no value omits its return type; LSL does not use `void` as a function return type or parameter-list marker.
 
+Every state must contain at least one event handler. Neolint's AST engine
+reports `SEM038` for a complete but empty `default` or named state. A state with
+malformed event syntax is left to the parser diagnostics rather than receiving
+a cascading empty-state error.
+
 A state-change statement can target a named state or the default state:
 
 ```lsl
@@ -97,6 +102,23 @@ for (i = 0; i < 10; ++i)
 The C-style ternary operator (`?:`) and bitwise/shift compound assignments (`&=`, `|=`, `^=`, `<<=`, `>>=`) are not part of the supported LSL syntax.
 
 Assignment targets must be variables or supported vector/rotation components. Prefix and postfix `++`/`--` apply to variables, not components.
+
+### Lists and comparisons
+
+LSL lists cannot contain other lists. This includes a nested list literal, a
+variable whose type is `list`, a function returning `list`, or a list-valued
+expression used as an element. Neolint reports `SEM039` when it can prove that
+an element has list type; unresolved extension expressions are not guessed.
+
+The `==` and `!=` operators do not compare list contents. Equality compares
+lengths only, while inequality returns the difference between the two lengths
+rather than a normalized boolean. Neolint reports `SEM040` when both operands
+are known to have list type. Use an explicit element-by-element comparison
+when content equality is intended, or compare lengths directly when that is
+the intended operation.
+
+References: [Second Life Wiki — LSL List](https://wiki.secondlife.com/wiki/LSL_List)
+and [Second Life Wiki — ListCompare](https://wiki.secondlife.com/wiki/ListCompare).
 
 ## Literals, components, and comments
 
