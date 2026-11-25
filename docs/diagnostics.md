@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`, and `SEM041`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`, and `SEM041` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -168,6 +168,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM038` | A state has no event handlers. | error / semantic | AST-only. Checks complete `default` and named states; malformed states and states overlapped by parser errors are skipped. |
 | `SEM039` | A list element has list type. | error / semantic | AST-only. Checks nested literals, visible list variables, list-returning calls and other expressions whose type is provably `list`. Unknown types and malformed expressions are skipped. |
 | `SEM040` | Equality/inequality compares two lists. | warning / lint | AST-only. Reports only when both operand types are known to be `list`. `==` compares lengths only; `!=` returns their length difference. |
+| `SEM041` | Bare plain assignment in an `if` condition. | warning / lint | AST-only. Matches a top-level unparenthesized `=` assignment; an extra pair of parentheses marks intentional assignment. Compound assignments and assignments nested inside larger expressions are skipped. |
 
 ## Illustrative minimal examples
 
@@ -276,6 +277,12 @@ default { state_entry() { } }
 ```
 
 ```lsl
+// SEM041: likely assignment/comparison typo
+key target;
+default { state_entry() { if (target = llGetOwner()) { } } }
+```
+
+```lsl
 // SEM003: wrong event parameter count
 default { touch_start() { } }
 ```
@@ -365,6 +372,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM028–SEM033 are Firestorm-switch-only AST diagnostics. They are active only when the switch feature gate is enabled. The CFG models case dispatch, source-order fallthrough, `default`, and `break` to the innermost switch exit, so SEM011 can analyze value-returning functions containing switches instead of suppressing the whole function. A switch with no `default` retains an unmatched path; a `break` retains a path to the statement after the switch.
 - SEM036 reports a value-return from an event handler because the official Second Life Wiki documents that the compiler can accept it even though executing it crashes the script. `return;` remains valid. Parser-damaged bodies and unreliable lexical/preprocessor units are skipped.
 - SEM037 reports only the first unreachable statement in a straight-line sequence after a definite return, a two-branch terminating `if/else`, or a transition to a different declared state inside an event. A state statement targeting the current state or an unknown state is not treated as terminal. Loops and switch dispatch remain conservative. Bodies containing `jump`/labels or malformed syntax are skipped for both SEM036 and SEM037; work/depth overflow suppresses the entire rule family.
+- SEM041 follows the documented LSLint convention for the common `=`/`==` typo: only a bare plain assignment at the top level of an `if` condition is warned. Wrapping the assignment in an additional pair of parentheses, as in `if ((target = llGetOwner()))`, explicitly marks it as intentional. Compound assignments, assignments inside larger expressions, and other control-flow conditions are outside this rule. Parser-damaged conditions and unreliable preprocessor/lexical environments are skipped.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 

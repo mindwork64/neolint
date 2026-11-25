@@ -32,3 +32,4 @@ invalid_state_namespace|invalid|invalid/state_namespace.lsl|original|project-aut
 invalid_empty_states|invalid|invalid/empty_states.lsl|original|project-authored|valid|SEM001:1:error,SEM024:2:warning,SEM038:2:error|1|none|Every complete state must contain at least one event handler
 invalid_nested_list_element|invalid|invalid/nested_list_element.lsl|original|project-authored|valid|SEM001:1:error,SEM024:2:warning,SEM039:1:error|1|none|A list cannot contain another list, including a list variable
 medium_list_comparisons|medium|medium/list_comparisons.lsl|original|project-authored|valid|SEM040:2:warning|0|none|List equality compares lengths rather than contents
+medium_if_assignment|medium|medium/if_assignment.lsl|original|project-authored|valid|SEM041:1:warning|0|none|Bare assignment in if condition is suspicious; an extra pair of parentheses marks intentional use

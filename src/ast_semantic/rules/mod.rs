@@ -3,6 +3,7 @@
 pub(crate) mod assignments;
 pub(crate) mod builtin_calls;
 pub(crate) mod components;
+pub(crate) mod condition_assignments;
 pub(crate) mod deprecated_calls;
 pub(crate) mod discarded_comparisons;
 pub(crate) mod duplicate_events;
