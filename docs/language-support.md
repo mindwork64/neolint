@@ -176,6 +176,25 @@ References: [LSL Errors — Math Error](https://wiki.secondlife.com/wiki/LSL_Err
 [LSL Operators — modulus](https://wiki.secondlife.com/wiki/LSL_Operators), and
 [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
 
+### State reachability
+
+LSL starts in `default` when a script is compiled, reset or loaded, and a `state`
+statement transfers execution to another declared state. The AST engine reports
+warning `SEM044` when a populated named state has no transition path from
+`default`. It builds a bounded graph from transitions in event-handler bodies.
+All syntactically present transitions count as possible edges, including
+conditional branches; this intentionally avoids claiming that a state is dead
+when the condition is not statically understood. Empty states remain the
+responsibility of `SEM038`.
+
+This is structural reachability from `default`, not a model of scripts resumed
+from inventory in a previously active state. Parser errors, incomplete or
+duplicate states, unreliable lexical/preprocessor input and graph-budget
+exhaustion suppress the rule.
+
+References: [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State),
+[Getting Started in LSL — States](https://wiki.secondlife.com/wiki/Getting_Started_In_LSL).
+
 ### Lists and comparisons
 
 LSL lists cannot contain other lists. This includes a nested list literal, a

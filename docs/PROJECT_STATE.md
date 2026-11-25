@@ -31,7 +31,8 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   follow-up adds `SEM038` (empty states), `SEM039` (nested lists), and `SEM040`
   (list equality/inequality hazards), `SEM041` (bare assignments in `if`
   conditions), `SEM042` (detection-context-only calls), and `SEM043`
-  (statically provable division/remainder by zero); Legacy and Compare remain
+  (statically provable division/remainder by zero). `SEM044` warns on populated
+  states with no transition path from `default`; Legacy and Compare remain
   unchanged.
 - Phase 8: reproducible benchmark harness, resource-limit reconciliation and
   profile-guided fixes.
@@ -41,7 +42,7 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM043` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM044` are AST-only.
 
 ## Architecture
 
