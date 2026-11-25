@@ -28,6 +28,16 @@ enum ConstantValue {
     ListLength(usize),
 }
 
+/// Opaque constant value shared with the flow-sensitive switch dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SwitchConstantValue(ConstantValue);
+
+impl SwitchConstantValue {
+    pub(crate) fn equals(&self, other: &Self) -> bool {
+        self.0.equals(&other.0)
+    }
+}
+
 impl ConstantValue {
     fn equals(&self, other: &Self) -> bool {
         match (self, other) {
@@ -49,6 +59,14 @@ impl ConstantValue {
             }
             (Self::ListLength(left), Self::ListLength(right)) => left == right,
             _ => false,
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        match self {
+            Self::Float(value) => value.is_finite(),
+            Self::Vector(values) | Self::Rotation(values) => values.iter().all(Self::is_finite),
+            Self::Integer(_) | Self::String(_) | Self::Key(_) | Self::ListLength(_) => true,
         }
     }
 
@@ -397,6 +415,26 @@ fn contains_error(expression: &Expression) -> bool {
         }
     }
     false
+}
+
+/// Evaluate one Firestorm switch expression or case label with the same
+/// constant semantics used by SEM028–SEM033. The caller owns the shared node
+/// budget so a large switch cannot multiply the per-expression work limit.
+pub(crate) fn evaluate_switch_constant_value(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    budget: &mut usize,
+) -> Option<SwitchConstantValue> {
+    let value = evaluate_at(
+        expression,
+        scope,
+        scopes,
+        &builtins::definitions().constants,
+        0,
+        budget,
+    )?;
+    value.is_finite().then_some(SwitchConstantValue(value))
 }
 
 fn evaluate_constant(

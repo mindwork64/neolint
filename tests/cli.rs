@@ -1954,7 +1954,10 @@ fn engines_support_firestorm_dialect() {
     ]);
     assert_eq!(ast_switch.status.code(), Some(0));
     let ast_stdout = String::from_utf8(ast_switch.stdout.clone()).unwrap();
-    assert!(ast_stdout.contains("no diagnostics"), "{ast_stdout}");
+    assert!(
+        ast_stdout.contains(":10:17: warning[SEM037]: unreachable statement"),
+        "constant switch dispatch should report the unreachable default arm: {ast_stdout}"
+    );
 
     // With no engine flag the default AST engine accepts the switch too.
     let default_switch = run_args(&["--dialect", "firestorm", switch.to_str().unwrap()]);
@@ -2638,6 +2641,10 @@ fn firestorm_switch_body_diagnostics_are_reported_by_default_ast() {
     assert!(
         stdout.contains(":7:17: warning[SEM012]: variable 'counter'"),
         "switch-arm diagnostic was skipped: {stdout}"
+    );
+    assert!(
+        stdout.contains(":10:17: warning[SEM037]: unreachable statement"),
+        "constant switch dispatch should also analyze unreachable default-arm statements: {stdout}"
     );
 
     let explicit_ast = run_args(&["--engine", "ast", "--dialect", "firestorm", source]);

@@ -2201,7 +2201,7 @@ the guard runs before the allocation or traversal it bounds.
 | AST recursion depth | `MAX_AST_RECURSION_DEPTH` | 256 | Parser entry for statements and expressions (`src/ast/parser.rs:460`, `:1114`) | Per unit | `AST001`, deepest construct skipped | `AST001` cases in `tests/ast_parser.rs`, `tests/ast_firestorm.rs` |
 | AST parser worker stack | `PARSER_STACK_BYTES` | 16 MiB | Dedicated parser thread (`src/ast/parser.rs:2695`) | Per parse | `AST002` if the worker cannot start | `worker_failure_returns_empty_ast_and_one_safe_diagnostic` |
 | AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` construction (`src/ast_semantic/flow.rs`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
-| AST flow data-flow solver | `MAX_DATAFLOW_WORK` / `MAX_DATAFLOW_FACT_WORK` | 131,072 / 1,048,576 | `FlowGraph::solve_constants` worklist and cumulative fact processing (`src/ast_semantic/flow.rs`) | Per function | Solver returns unknown; dependent flow rules are suppressed for the body | Fixed-point, loop and jump/label flow tests |
+| AST flow data-flow solver | `MAX_DATAFLOW_WORK` / `MAX_DATAFLOW_FACT_WORK` / `MAX_DATAFLOW_EDGE_WORK` | 131,072 / 1,048,576 / 1,048,576 | FlowGraph::solve_constants worklist, fact processing, edge visits and switch dispatch (src/ast_semantic/flow.rs) | Per function | Solver returns unknown; dependent flow rules are suppressed for the body | Fixed-point, loop, jump/label and switch-dispatch flow tests |
 | AST flow constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` / `MAX_CONSTANT_FACTS` | 128 / 64 / 4,096 | Bounded expression evaluator and `insert_constant_fact` (`src/ast_semantic/flow.rs`) | Per expression / code body | Expression becomes unknown; local environment is disabled if the fact cap is exceeded | Phase 6C/6D suites |
 | Type inference depth | `MAX_TYPE_DEPTH` | 256 | `infer_expression_type` (`src/ast_semantic/types.rs:11`, `:86`) | Per expression | Type inference yields unknown; dependent rules are suppressed | Defensive: the parser cap fires first (see below) |
 | Call-graph analysis | `MAX_CALL_GRAPH_NODES` / `MAX_CALL_GRAPH_EDGES` / `MAX_CALL_GRAPH_WORK` | 4,096 / 8,192 / 16,384 | Graph construction and reachability (`src/ast_semantic/callgraph.rs:24-28`) | Per unit | Whole graph suppressed; `SEM026` emits nothing | `call_graph_budget_overflow_suppresses_sem026`, `production_edge_budget_overflow_suppresses_sem026`, `production_work_budget_overflow_suppresses_sem026` |
@@ -3255,8 +3255,11 @@ ancestor of the jump scope.
 for/while/do-while, returns, labels, forward/backward jumps and empty `for`
 conditions (`ForStatement::condition_missing`). Nodes, edges, work and depth are
 capped; edges are deduplicated; unsupported or incomplete graphs skip the whole
-function. A function with SEM009/SEM010 findings is suppressed. Unsupported
-Firestorm switch/break and Error/recovery flow forms are skipped conservatively.
+function. A function with SEM009/SEM010 findings is suppressed. At the
+original end-of-Phase-6C migration boundary, Firestorm switch/break and
+Error/recovery flow forms were skipped conservatively.
+Subsequent post-migration refinements below add supported switch analysis while
+malformed Error/recovery forms continue to fail closed.
 
 **Conditions.** An AST-only evaluator proves the Legacy integer constant cases
 with 32-bit wrapping, division/remainder/shift guards, unary/binary operators,
@@ -3296,11 +3299,21 @@ assignments update or invalidate facts. Mutable globals and parameters, user
 calls, malformed expressions, non-finite arithmetic, unsupported mixed numeric
 operators, unsafe float-to-integer casts and budget exhaustion remain unknown.
 A bounded forward worklist merges incoming environments at CFG joins and
-iterates to a fixed point through loop back-edges and valid `jump`/label edges.
-Only facts that agree across every reachable input survive. `for` initializers,
-conditions and increments are modeled in execution order. Per-environment fact
-storage, worklist iterations and cumulative fact-processing work are bounded;
-budget exhaustion suppresses conclusions for the affected body. There is no
+iterates to a fixed point through loop back-edges and valid jump/label edges.
+Only values that agree on every reachable incoming path survive a join.
+For-loop initializers, conditions and increments execute in source order.
+Safe scalar increments and arithmetic compound assignments update local facts.
+Right-associative assignment chains are evaluated from the inner assignment
+outward. A single nested write is tracked through its containing expression;
+expressions with multiple writes whose relative evaluation order is not assumed
+invalidate only the potentially written locals. Compound assignments with
+effectful right operands remain unknown when their read/write ordering is
+ambiguous. Assignment and increment expression results can also prune
+conditions when their values are definite. Mutable globals and parameters
+are never treated as constants. Per-environment fact
+storage, side-effect expression traversal, worklist iterations, CFG edge visits,
+switch dispatch and cumulative fact-processing work are bounded; budget
+exhaustion suppresses conclusions for the affected body. There is no
 interprocedural propagation. Legacy remains frozen, so Compare can show
 intentional SEM011 differences for paths proved by the extended AST analysis
 but not by Legacy. LSL's eager logical evaluation is documented in
@@ -3799,11 +3812,20 @@ because LSL list equality compares lengths. Constant evaluation and duplicate
 checking are bounded and fail closed on malformed switch expressions, parser
 errors in the switch, or an unreliable lexical/preprocessor environment.
 
-The value-return CFG now models switch dispatch to each case/default arm,
-source-order fallthrough, a no-match path when default is absent, and `break` to
-the innermost switch's exit node. This replaces the previous blanket SEM011
-suppression for every function containing a switch or break. Legacy remains
-unchanged, and the SEM001–SEM023 Compare contract does not include SEM028–SEM033.
+The value-return CFG evaluates Firestorm switch constants with the same
+comparison semantics as SEM028–SEM033: integer/float coercion, string/key
+equality, vector/rotation component equality and list-length equality. Numeric
+switch expressions can additionally use definitely known local integer/float
+facts from the CFG data-flow environment. Only matching case entries are
+selected, then execution follows source-order fallthrough. A known value with
+no matching case selects default or the no-match exit. If the value or any
+case label is unknown/unsupported, every possible arm and the appropriate
+default/no-match path remain reachable. Break targets the
+innermost switch even when nested inside if/for/while/do-while; a nested switch
+shadows that target, so its break does not escape its enclosing loop/switch.
+This replaces the previous blanket SEM011 suppression for switch-containing
+functions. Legacy remains unchanged, and the SEM001–SEM023 Compare contract
+does not include SEM028–SEM033.
 
 ### Post-v1.1.0 AST-only semantic addition: SEM027
 
@@ -4180,22 +4202,38 @@ function/event entry. The rule reports the first unreachable non-empty statement
 in each straight-line sequence, including within nested blocks, branches, loop
 bodies and switch arms.
 
-The same graph models statically provable integer/float conditions, including
-definitely known local numeric values from declarations and assignments.
-A bounded forward worklist propagates local values and merges incoming states
-at every reachable join; only values that agree across all reachable inputs
-survive, and a terminating branch does not constrain the surviving path. The
-solver iterates through loop back-edges and valid jump/label edges to a fixed
-point. `for` initializers, conditions and increments are modeled in execution
-order. Mutable globals/parameters remain unknown. Per-environment fact storage,
-worklist iterations and cumulative fact-processing work are bounded. The CFG
-also models zero- and many-iteration loop paths, valid jump edges and Firestorm switch dispatch,
-fallthrough, default and break. It can prove a branch body unreachable when its
-condition is constant, code after a loop unreachable when no exit edge exists,
-and code after a switch unreachable when every possible arm returns or
-otherwise terminates. A switch without default retains its unmatched exit;
-a reachable break retains the switch exit. Event state changes to a different,
-unique known state are terminal edges; same-state/unknown targets and global
+The shared graph models statically provable integer/float conditions,
+including definitely known local numeric values from declarations and
+assignments. A bounded forward worklist propagates local values and merges
+incoming states at every reachable join; only values that agree across all
+reachable inputs survive, and a terminating branch does not constrain the
+surviving path. The solver iterates through loop back-edges and valid
+jump/label edges to a fixed point. For-loop initializers, conditions and
+increments are modeled in execution order. Safe scalar increments and
+arithmetic compound assignments update local facts. A single nested write is
+tracked through its containing expression; multiple writes with unspecified
+relative evaluation order invalidate only potentially written local facts.
+Direct assignment and increment results can determine an enclosing condition
+when their values are known. Mutable globals/parameters and call results remain
+unknown. Side-effect expression traversal, per-environment fact storage,
+worklist iterations, CFG edge visits, switch dispatch and cumulative
+fact-processing work are bounded.
+
+The CFG models zero- and many-iteration loop paths, valid jump edges, and
+Firestorm constant switch dispatch. The shared evaluator applies integer/float,
+string/key, vector/rotation and list-length equality semantics from SEM028–SEM033;
+numeric switches can additionally use local data-flow facts. Only matching
+entries are dispatched and source-order fallthrough is preserved. A known
+unmatched value selects default or the no-match exit. Unknown values or
+unsupported case labels retain all possible arms. Break targets the innermost
+switch, including when nested in if/for/while/do-while; a nested switch shadows
+that target. It can prove a
+branch body unreachable when its condition is constant, code after a loop
+unreachable when no exit edge exists, and code after a switch unreachable
+when every feasible arm returns or otherwise terminates. A switch without
+default retains its unmatched exit when the value is unknown; a reachable
+break retains the switch exit. Event state changes to a different, unique
+known state are terminal edges; same-state/unknown targets and global
 function state changes are not.
 
 Invalid jump scopes, missing/duplicate labels, syntax diagnostics, error nodes,

@@ -39,11 +39,12 @@
 //! and explicit `--engine ast` produce identical stdout, stderr, and exit
 //! status for every case.
 //!
-//! The Firestorm fixture uses a `switch` statement: the AST engine accepts it
-//! in the Firestorm dialect and reports no diagnostics (exit 0), while the
-//! separate Legacy golden records the pre-change diagnostics (exit 1). The
-//! `stdin` case pins the AST source label `<stdin>`; the Legacy golden labels
-//! the same input `-`.
+//! The Firestorm fixture uses a switch statement. The immutable Phase 6H
+//! baseline records no diagnostics. The later CFG refinement has one explicit
+//! expected stdout delta: its known selector reaches case 1, whose break makes
+//! the default arm unreachable (SEM037 at line 10:17). The Legacy golden still
+//! records the pre-change diagnostics (exit 1). The stdin case pins the AST
+//! source label `<stdin>`; the Legacy golden labels the same input `-`.
 //!
 //! These fixtures are LF-only and CI is Linux; path rendering uses `/`. The
 //! `directory` case pins recursive collection order (`a.lsl` before
@@ -183,6 +184,21 @@ fn read_golden(directory: &Path, case: &AstGoldenCase, file: &str) -> Vec<u8> {
             path.display()
         )
     })
+}
+
+// Keep the Phase 6H capture immutable while making later intentional AST
+// analysis refinements explicit in the expected-current-output layer.
+fn expected_stdout(case: &AstGoldenCase, baseline: &[u8]) -> Vec<u8> {
+    match case.name {
+        "firestorm" => {
+            assert_eq!(
+                baseline, b"firestorm.lsl: no diagnostics\n",
+                "the immutable Firestorm AST baseline changed"
+            );
+            b"firestorm.lsl:10:17: warning[SEM037]: unreachable statement\n".to_vec()
+        }
+        _ => baseline.to_vec(),
+    }
 }
 
 fn assert_bytes(expected: &[u8], actual: &[u8], case: &str, stream: &str) {
@@ -443,12 +459,9 @@ fn run_case(case: &AstGoldenCase, engine_args: &[&str]) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    assert_bytes(
-        &read_golden(&golden, case, "stdout.txt"),
-        &output.stdout,
-        case.name,
-        "stdout",
-    );
+    let baseline_stdout = read_golden(&golden, case, "stdout.txt");
+    let expected_stdout = expected_stdout(case, &baseline_stdout);
+    assert_bytes(&expected_stdout, &output.stdout, case.name, "stdout");
     assert_bytes(
         &read_golden(&golden, case, "stderr.txt"),
         &output.stderr,

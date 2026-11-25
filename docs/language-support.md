@@ -76,23 +76,31 @@ handlers. Use a value-return only from a user-defined function with a matching
 return type.
 
 SEM037 uses Neolint's bounded control-flow graph to report unreachable
-statements. In addition to literal and built-in constants, it can propagate
+statements. In addition to literal and built-in constants, it propagates
 definitely known local numeric values from declarations and assignments.
 At every reachable CFG join, a value is retained only when all incoming paths
 agree; a branch that returns does not constrain the surviving path. A bounded
-forward worklist iterates through loop back-edges and valid `jump`/label edges
-to a fixed point, so conditions are reconsidered when loop-carried values
-change. `for` initializers execute once before the first condition and increment
-expressions run before each back-edge. Mutable globals and parameters are never
-assumed constant. Per-environment fact storage, worklist iterations and total
+forward worklist iterates through loop back-edges and valid jump/label edges
+to a fixed point. Safe increments and arithmetic compound assignments update
+facts; one nested write is tracked through its containing expression, while
+ambiguous multiple writes invalidate only touched locals. Assignment and
+increment results can determine conditions when known. Mutable globals and
+parameters are never assumed constant. Per-environment fact storage, side
+effect scans, worklist iterations, CFG edge visits, switch dispatch and total
 fact-processing work are bounded; exhaustion suppresses conclusions for the
 affected body.
 
 The CFG also reasons about loop exit paths, valid jump/label edges, and
-Firestorm switch dispatch, fallthrough, default and break. It can therefore
-find dead statements inside a branch that is provably never taken, after an
-infinite loop, or after a switch whose possible arms all terminate. A reachable
-break or an unmatched switch path prevents that conclusion.
+Firestorm constant switch dispatch. It uses scalar/composite equality for
+integer/float, string/key, vector/rotation and list-length values; numeric local
+facts can also select cases. When the switch value and every case label are
+known, only matching cases are entered and source-order fallthrough is
+preserved; a known unmatched value selects default or the no-match exit.
+Unknown values and unsupported labels retain all possible arms. Break always
+targets the innermost switch, even when nested
+inside a loop; a nested switch owns its own break target. This allows Neolint
+to find dead statements after a switch whose feasible arms all terminate, while
+preserving the exit for reachable breaks and unmatched cases.
 
 A transition to a different, unique known state terminates an event handler.
 A transition to the current state has no state-change side effect, and unknown

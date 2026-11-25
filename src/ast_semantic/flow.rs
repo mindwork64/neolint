@@ -25,6 +25,7 @@ const MAX_CONSTANT_DEPTH: usize = 64;
 const MAX_CONSTANT_FACTS: usize = 4_096;
 const MAX_DATAFLOW_WORK: usize = 131_072;
 const MAX_DATAFLOW_FACT_WORK: usize = 1_048_576;
+const MAX_DATAFLOW_EDGE_WORK: usize = 1_048_576;
 const CONSTANT_PROPAGATION_DISABLED: usize = usize::MAX;
 
 type ConstantEnvironment = HashMap<usize, ConstantNumber>;
@@ -421,6 +422,13 @@ enum FlowTransfer {
         expression: Expression,
         scope: ScopeId,
     },
+    Switch {
+        expression: Expression,
+        scope: ScopeId,
+        cases: Vec<(Expression, usize)>,
+        defaults: Vec<usize>,
+        unmatched_exit: usize,
+    },
 }
 
 struct FlowCondition {
@@ -538,6 +546,8 @@ impl FlowGraph {
         queued[start] = true;
         let mut work = 0usize;
         let mut fact_work = 0usize;
+        let mut edge_work = 0usize;
+        let mut switch_work = 0usize;
 
         while let Some(node) = pending.pop_front() {
             queued[node] = false;
@@ -551,6 +561,7 @@ impl FlowGraph {
                 return None;
             }
             let mut output = input.clone();
+            let mut switch_targets: Option<HashSet<usize>> = None;
             let (may_true, may_false) = if let Some(condition) = self.conditions.get(node)?.as_ref()
             {
                 let possibilities = if condition.malformed {
@@ -582,16 +593,47 @@ impl FlowGraph {
                         FlowTransfer::Expression { expression, scope } => {
                             apply_expression_effects(expression, *scope, scopes, &mut output);
                         }
+                        FlowTransfer::Switch {
+                            expression,
+                            scope,
+                            cases,
+                            defaults,
+                            unmatched_exit,
+                        } => {
+                            switch_work = switch_work
+                                .saturating_add(cases.len().saturating_add(defaults.len()));
+                            if switch_work > MAX_DATAFLOW_EDGE_WORK {
+                                return None;
+                            }
+                            switch_targets = Some(switch_dispatch_targets(
+                                expression,
+                                *scope,
+                                scopes,
+                                &input,
+                                cases,
+                                defaults,
+                                *unmatched_exit,
+                            ));
+                            apply_expression_effects(expression, *scope, scopes, &mut output);
+                        }
                     }
                 }
                 (true, true)
             };
 
             for edge in self.successors.get(node)? {
-                let allowed = match edge.condition {
-                    EdgeCondition::Always => true,
-                    EdgeCondition::True => may_true,
-                    EdgeCondition::False => may_false,
+                edge_work = edge_work.saturating_add(1);
+                if edge_work > MAX_DATAFLOW_EDGE_WORK {
+                    return None;
+                }
+                let allowed = if let Some(targets) = &switch_targets {
+                    targets.contains(&edge.target)
+                } else {
+                    match edge.condition {
+                        EdgeCondition::Always => true,
+                        EdgeCondition::True => may_true,
+                        EdgeCondition::False => may_false,
+                    }
                 };
                 if !allowed {
                     continue;
@@ -1236,16 +1278,16 @@ fn build_switch(
     let switch_exit = graph.node()?;
     let switch_scope = scopes.scope_for_switch(switch).unwrap_or(scope);
     let mut arms = Vec::with_capacity(switch.arms.len());
-    let mut has_default = false;
+    let mut cases = Vec::new();
+    let mut defaults = Vec::new();
 
     for arm in &switch.arms {
         if matches!(arm.label, crate::ast::SwitchLabel::Error(_)) {
             graph.failed = true;
             return None;
         }
-        has_default |= matches!(arm.label, crate::ast::SwitchLabel::Default);
         let mut arm_constants = empty_constant_environment_like(constants);
-        arms.push(build_statements(
+        let fragment = build_statements(
             &arm.statements,
             switch_scope,
             scopes,
@@ -1253,7 +1295,18 @@ fn build_switch(
             Some(switch_exit),
             depth + 1,
             &mut arm_constants,
-        )?);
+        )?;
+        match &arm.label {
+            crate::ast::SwitchLabel::Case(expression) => {
+                cases.push((expression.clone(), fragment.entry));
+            }
+            crate::ast::SwitchLabel::Default => defaults.push(fragment.entry),
+            crate::ast::SwitchLabel::Error(_) => {
+                graph.failed = true;
+                return None;
+            }
+        }
+        arms.push(fragment);
     }
 
     // Arms fall through in source order. Break statements already have a
@@ -1266,29 +1319,29 @@ fn build_switch(
     }
 
     let dispatch = graph.node()?;
-    if !graph.set_transfer(
-        dispatch,
-        FlowTransfer::Expression {
-            expression: switch.condition.clone(),
-            scope: switch_scope,
-        },
-    ) {
-        return None;
-    }
-    for (arm, fragment) in switch.arms.iter().zip(&arms) {
-        match arm.label {
-            crate::ast::SwitchLabel::Case(_) | crate::ast::SwitchLabel::Default => {
-                if !graph.edge(dispatch, fragment.entry) {
-                    return None;
-                }
-            }
-            crate::ast::SwitchLabel::Error(_) => {
-                graph.failed = true;
-                return None;
-            }
+    for (_, target) in &cases {
+        if !graph.edge(dispatch, *target) {
+            return None;
         }
     }
-    if !has_default && !graph.edge(dispatch, switch_exit) {
+    for target in &defaults {
+        if !graph.edge(dispatch, *target) {
+            return None;
+        }
+    }
+    if defaults.is_empty() && !graph.edge(dispatch, switch_exit) {
+        return None;
+    }
+    if !graph.set_transfer(
+        dispatch,
+        FlowTransfer::Switch {
+            expression: switch.condition.clone(),
+            scope: switch_scope,
+            cases,
+            defaults,
+            unmatched_exit: switch_exit,
+        },
+    ) {
         return None;
     }
 
@@ -1302,6 +1355,122 @@ fn build_switch(
     })
 }
 
+fn switch_dispatch_targets(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &ConstantEnvironment,
+    cases: &[(Expression, usize)],
+    defaults: &[usize],
+    unmatched_exit: usize,
+) -> HashSet<usize> {
+    if let Some(switch_value) = evaluate_expression_result(expression, scope, scopes, constants) {
+        return numeric_switch_dispatch_targets(
+            switch_value,
+            scope,
+            scopes,
+            cases,
+            defaults,
+            unmatched_exit,
+        );
+    }
+
+    // The shared Firestorm evaluator also supports constant strings, keys,
+    // vectors, rotations and list-length equality. It intentionally does not
+    // consult flow-sensitive locals, so unknown local values stay conservative.
+    let mut switch_budget = MAX_CONSTANT_NODES;
+    let Some(switch_value) =
+        crate::ast_semantic::rules::firestorm_switches::evaluate_switch_constant_value(
+            expression,
+            scope,
+            scopes,
+            &mut switch_budget,
+        )
+    else {
+        return all_switch_targets(cases, defaults, unmatched_exit);
+    };
+    let mut case_budget = MAX_CONSTANT_NODES;
+    let mut targets = HashSet::new();
+    for (case, target) in cases {
+        let Some(case_value) =
+            crate::ast_semantic::rules::firestorm_switches::evaluate_switch_constant_value(
+                case,
+                scope,
+                scopes,
+                &mut case_budget,
+            )
+        else {
+            return all_switch_targets(cases, defaults, unmatched_exit);
+        };
+        if switch_value.equals(&case_value) {
+            targets.insert(*target);
+        }
+    }
+    finish_switch_dispatch_targets(targets, defaults, unmatched_exit)
+}
+
+fn numeric_switch_dispatch_targets(
+    switch_value: ConstantNumber,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    cases: &[(Expression, usize)],
+    defaults: &[usize],
+    unmatched_exit: usize,
+) -> HashSet<usize> {
+    // Case labels are compile-time expressions. Do not let a flow-sensitive
+    // local fact turn an otherwise invalid/non-constant label into a match.
+    let empty_constants = ConstantEnvironment::new();
+    let mut case_budget = MAX_CONSTANT_NODES;
+    let mut targets = HashSet::new();
+    for (case, target) in cases {
+        let Some(value) =
+            evaluate_constant_number(case, scope, scopes, &empty_constants, 0, &mut case_budget)
+        else {
+            return all_switch_targets(cases, defaults, unmatched_exit);
+        };
+        if constant_numbers_equal(switch_value, value) {
+            targets.insert(*target);
+        }
+    }
+    finish_switch_dispatch_targets(targets, defaults, unmatched_exit)
+}
+
+fn finish_switch_dispatch_targets(
+    mut targets: HashSet<usize>,
+    defaults: &[usize],
+    unmatched_exit: usize,
+) -> HashSet<usize> {
+    if targets.is_empty() {
+        if defaults.is_empty() {
+            targets.insert(unmatched_exit);
+        } else {
+            targets.extend(defaults.iter().copied());
+        }
+    }
+    targets
+}
+
+fn all_switch_targets(
+    cases: &[(Expression, usize)],
+    defaults: &[usize],
+    unmatched_exit: usize,
+) -> HashSet<usize> {
+    let mut targets = HashSet::with_capacity(cases.len() + defaults.len() + 1);
+    targets.extend(cases.iter().map(|(_, target)| *target));
+    targets.extend(defaults.iter().copied());
+    if defaults.is_empty() {
+        targets.insert(unmatched_exit);
+    }
+    targets
+}
+
+fn constant_numbers_equal(left: ConstantNumber, right: ConstantNumber) -> bool {
+    match (left, right) {
+        (ConstantNumber::Integer(left), ConstantNumber::Integer(right)) => left == right,
+        (left, right) => left.as_float() == right.as_float(),
+    }
+}
+
 fn connect_exits(graph: &mut FlowGraph, exits: &[usize], target: usize) -> bool {
     for exit in exits {
         if !graph.edge(*exit, target) {
@@ -1309,35 +1478,6 @@ fn connect_exits(graph: &mut FlowGraph, exits: &[usize], target: usize) -> bool 
         }
     }
     true
-}
-
-fn contains_side_effects(expression: &Expression) -> bool {
-    match &expression.kind {
-        ExpressionKind::Assignment(_) | ExpressionKind::Increment(_) => true,
-        ExpressionKind::Parenthesized(inner)
-        | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
-        | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
-            contains_side_effects(inner)
-        }
-        ExpressionKind::Binary(binary) => {
-            contains_side_effects(&binary.left) || contains_side_effects(&binary.right)
-        }
-        ExpressionKind::Call(call) => {
-            contains_side_effects(&call.callee) || call.arguments.iter().any(contains_side_effects)
-        }
-        ExpressionKind::Component(component) => contains_side_effects(&component.base),
-        ExpressionKind::LazyIndex(lazy) => {
-            contains_side_effects(&lazy.base) || lazy.indices.iter().any(contains_side_effects)
-        }
-        ExpressionKind::List(list) => list.elements.iter().any(contains_side_effects),
-        ExpressionKind::Vector(vector) => vector.components.iter().any(contains_side_effects),
-        ExpressionKind::Rotation(rotation) => rotation.components.iter().any(contains_side_effects),
-        ExpressionKind::Identifier(_)
-        | ExpressionKind::Integer(_)
-        | ExpressionKind::Float(_)
-        | ExpressionKind::String(_)
-        | ExpressionKind::Error(_) => false,
-    }
 }
 
 fn contains_error(expression: &Expression) -> bool {
@@ -1484,10 +1624,7 @@ fn apply_local_declaration(
         };
         // Evaluate the initializer against the values available before this
         // declarator is written; a self-reference must not see stale data.
-        let candidate = {
-            let mut budget = MAX_CONSTANT_NODES;
-            evaluate_constant_number(initializer, scope, scopes, constants, 0, &mut budget)
-        };
+        let candidate = evaluate_expression_result(initializer, scope, scopes, constants);
         apply_expression_effects(initializer, scope, scopes, constants);
         if let Some((key, type_name)) = binding {
             if let Some(value) = candidate.filter(|value| constant_matches_type(*value, type_name))
@@ -1509,32 +1646,27 @@ fn apply_expression_effects(
     if is_constant_propagation_disabled(constants) {
         return;
     }
-    if contains_error(expression) {
-        // Recovered expressions can retain only part of their original side
-        // effects. Do not carry facts past a syntactically damaged expression.
+    if side_effect_count(expression) == usize::MAX || contains_error(expression) {
+        // Recovered or pathologically deep expressions can retain only part
+        // of their side effects. Do not carry facts past such an expression.
         clear_constant_facts(constants);
         return;
     }
     match &expression.kind {
         ExpressionKind::Assignment(assignment) => {
             let binding = local_numeric_binding(&assignment.target, scope, scopes);
-            // For `x = x + 1`, read the old value before replacing it. The
-            // constant evaluator rejects RHS expressions with their own side
-            // effects, so this candidate cannot hide a nested write.
-            let candidate = if assignment.operator == AssignmentOperator::Assign {
-                let mut budget = MAX_CONSTANT_NODES;
-                evaluate_constant_number(
-                    &assignment.value,
-                    scope,
-                    scopes,
-                    constants,
-                    0,
-                    &mut budget,
-                )
-            } else {
-                None
-            };
+            // Assignment chains are represented as right-nested AST nodes,
+            // so their result and writes can be evaluated in that same order.
+            let candidate = binding
+                .and_then(|_| evaluate_expression_result(expression, scope, scopes, constants));
+
             if binding.is_none() {
+                let nested_effects = side_effect_count(&assignment.target)
+                    .saturating_add(side_effect_count(&assignment.value));
+                if nested_effects > 1 {
+                    invalidate_written_local_facts(expression, scope, scopes, constants);
+                    return;
+                }
                 apply_expression_effects(&assignment.target, scope, scopes, constants);
             }
             apply_expression_effects(&assignment.value, scope, scopes, constants);
@@ -1548,8 +1680,26 @@ fn apply_expression_effects(
             }
         }
         ExpressionKind::Increment(increment) => {
-            if let Some((key, _)) = local_numeric_binding(&increment.operand, scope, scopes) {
+            if let Some((key, type_name)) = local_numeric_binding(&increment.operand, scope, scopes)
+            {
+                let one = match type_name {
+                    "integer" => ConstantNumber::Integer(1),
+                    "float" => ConstantNumber::Float(1.0),
+                    _ => unreachable!(),
+                };
+                let operator = match increment.operator {
+                    crate::ast::IncrementOperator::Increment => BinaryOperator::Add,
+                    crate::ast::IncrementOperator::Decrement => BinaryOperator::Subtract,
+                };
+                let candidate = constants
+                    .get(&key)
+                    .copied()
+                    .and_then(|value| evaluate_constant_binary(operator, value, one))
+                    .filter(|value| constant_matches_type(*value, type_name));
                 constants.remove(&key);
+                if let Some(value) = candidate {
+                    insert_constant_fact(constants, key, value);
+                }
             } else {
                 apply_expression_effects(&increment.operand, scope, scopes, constants);
             }
@@ -1565,11 +1715,255 @@ fn apply_expression_effects(
         | ExpressionKind::LazyIndex(_)
         | ExpressionKind::List(_)
         | ExpressionKind::Vector(_)
-        | ExpressionKind::Rotation(_) => {
-            if contains_side_effects(expression) {
-                // Operand/argument evaluation order is not assumed when a
-                // compound expression contains multiple writes.
-                clear_constant_facts(constants);
+        | ExpressionKind::Rotation(_) => match side_effect_count(expression) {
+            0 => {}
+            1 => apply_single_nested_effect(expression, scope, scopes, constants),
+            _ => invalidate_written_local_facts(expression, scope, scopes, constants),
+        },
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Integer(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::String(_)
+        | ExpressionKind::Error(_) => {}
+    }
+}
+
+fn compound_assignment_binary_operator(operator: AssignmentOperator) -> Option<BinaryOperator> {
+    match operator {
+        AssignmentOperator::Assign => None,
+        AssignmentOperator::AddAssign => Some(BinaryOperator::Add),
+        AssignmentOperator::SubtractAssign => Some(BinaryOperator::Subtract),
+        AssignmentOperator::MultiplyAssign => Some(BinaryOperator::Multiply),
+        AssignmentOperator::DivideAssign => Some(BinaryOperator::Divide),
+        AssignmentOperator::RemainderAssign => Some(BinaryOperator::Remainder),
+    }
+}
+
+fn side_effect_count(expression: &Expression) -> usize {
+    let mut budget = MAX_CONSTANT_NODES;
+    side_effect_count_at(expression, 0, &mut budget)
+}
+
+fn side_effect_count_at(expression: &Expression, depth: usize, budget: &mut usize) -> usize {
+    if depth > MAX_CONSTANT_DEPTH || *budget == 0 {
+        return usize::MAX;
+    }
+    *budget -= 1;
+    let next_depth = depth + 1;
+    let nested = match &expression.kind {
+        ExpressionKind::Parenthesized(inner)
+        | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+        | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+            side_effect_count_at(inner, next_depth, budget)
+        }
+        ExpressionKind::Binary(binary) => {
+            let left = side_effect_count_at(&binary.left, next_depth, budget);
+            if left == usize::MAX {
+                usize::MAX
+            } else {
+                left.saturating_add(side_effect_count_at(&binary.right, next_depth, budget))
+            }
+        }
+        ExpressionKind::Call(call) => {
+            let callee = side_effect_count_at(&call.callee, next_depth, budget);
+            if callee == usize::MAX {
+                usize::MAX
+            } else {
+                callee.saturating_add(side_effect_count_many(
+                    call.arguments.iter(),
+                    next_depth,
+                    budget,
+                ))
+            }
+        }
+        ExpressionKind::Component(component) => {
+            side_effect_count_at(&component.base, next_depth, budget)
+        }
+        ExpressionKind::LazyIndex(lazy) => {
+            let base = side_effect_count_at(&lazy.base, next_depth, budget);
+            if base == usize::MAX {
+                usize::MAX
+            } else {
+                base.saturating_add(side_effect_count_many(
+                    lazy.indices.iter(),
+                    next_depth,
+                    budget,
+                ))
+            }
+        }
+        ExpressionKind::List(list) => {
+            side_effect_count_many(list.elements.iter(), next_depth, budget)
+        }
+        ExpressionKind::Vector(vector) => {
+            side_effect_count_many(vector.components.iter(), next_depth, budget)
+        }
+        ExpressionKind::Rotation(rotation) => {
+            side_effect_count_many(rotation.components.iter(), next_depth, budget)
+        }
+        ExpressionKind::Assignment(assignment) => {
+            let target = side_effect_count_at(&assignment.target, next_depth, budget);
+            if target == usize::MAX {
+                usize::MAX
+            } else {
+                target.saturating_add(side_effect_count_at(&assignment.value, next_depth, budget))
+            }
+        }
+        ExpressionKind::Increment(increment) => {
+            side_effect_count_at(&increment.operand, next_depth, budget)
+        }
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Integer(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::String(_)
+        | ExpressionKind::Error(_) => 0,
+    };
+    match &expression.kind {
+        ExpressionKind::Assignment(_) | ExpressionKind::Increment(_) => nested.saturating_add(1),
+        _ => nested,
+    }
+}
+
+fn side_effect_count_many<'a>(
+    expressions: impl Iterator<Item = &'a Expression>,
+    depth: usize,
+    budget: &mut usize,
+) -> usize {
+    let mut count = 0usize;
+    for expression in expressions {
+        let nested = side_effect_count_at(expression, depth, budget);
+        if nested == usize::MAX {
+            return usize::MAX;
+        }
+        count = count.saturating_add(nested);
+    }
+    count
+}
+
+fn apply_single_nested_effect(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &mut ConstantEnvironment,
+) {
+    let mut apply_child = |child: &Expression| {
+        if side_effect_count(child) == 1 {
+            apply_expression_effects(child, scope, scopes, constants);
+            true
+        } else {
+            false
+        }
+    };
+    match &expression.kind {
+        ExpressionKind::Binary(binary) => {
+            if !apply_child(&binary.left) {
+                apply_child(&binary.right);
+            }
+        }
+        ExpressionKind::Call(call) => {
+            if !apply_child(&call.callee) {
+                for argument in &call.arguments {
+                    if apply_child(argument) {
+                        break;
+                    }
+                }
+            }
+        }
+        ExpressionKind::Component(component) => {
+            apply_child(&component.base);
+        }
+        ExpressionKind::LazyIndex(lazy) => {
+            if !apply_child(&lazy.base) {
+                for index in &lazy.indices {
+                    if apply_child(index) {
+                        break;
+                    }
+                }
+            }
+        }
+        ExpressionKind::List(list) => {
+            for element in &list.elements {
+                if apply_child(element) {
+                    break;
+                }
+            }
+        }
+        ExpressionKind::Vector(vector) => {
+            for component in &vector.components {
+                if apply_child(component) {
+                    break;
+                }
+            }
+        }
+        ExpressionKind::Rotation(rotation) => {
+            for component in &rotation.components {
+                if apply_child(component) {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn invalidate_written_local_facts(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &mut ConstantEnvironment,
+) {
+    match &expression.kind {
+        ExpressionKind::Assignment(assignment) => {
+            if let Some((key, _)) = local_numeric_binding(&assignment.target, scope, scopes) {
+                constants.remove(&key);
+            } else {
+                invalidate_written_local_facts(&assignment.target, scope, scopes, constants);
+            }
+            invalidate_written_local_facts(&assignment.value, scope, scopes, constants);
+        }
+        ExpressionKind::Increment(increment) => {
+            if let Some((key, _)) = local_numeric_binding(&increment.operand, scope, scopes) {
+                constants.remove(&key);
+            } else {
+                invalidate_written_local_facts(&increment.operand, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::Parenthesized(inner)
+        | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+        | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+            invalidate_written_local_facts(inner, scope, scopes, constants);
+        }
+        ExpressionKind::Binary(binary) => {
+            invalidate_written_local_facts(&binary.left, scope, scopes, constants);
+            invalidate_written_local_facts(&binary.right, scope, scopes, constants);
+        }
+        ExpressionKind::Call(call) => {
+            invalidate_written_local_facts(&call.callee, scope, scopes, constants);
+            for argument in &call.arguments {
+                invalidate_written_local_facts(argument, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::Component(component) => {
+            invalidate_written_local_facts(&component.base, scope, scopes, constants);
+        }
+        ExpressionKind::LazyIndex(lazy) => {
+            invalidate_written_local_facts(&lazy.base, scope, scopes, constants);
+            for index in &lazy.indices {
+                invalidate_written_local_facts(index, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::List(list) => {
+            for element in &list.elements {
+                invalidate_written_local_facts(element, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::Vector(vector) => {
+            for component in &vector.components {
+                invalidate_written_local_facts(component, scope, scopes, constants);
+            }
+        }
+        ExpressionKind::Rotation(rotation) => {
+            for component in &rotation.components {
+                invalidate_written_local_facts(component, scope, scopes, constants);
             }
         }
         ExpressionKind::Identifier(_)
@@ -1602,6 +1996,193 @@ impl ConstantNumber {
     }
 }
 
+fn evaluate_expression_result(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &ConstantEnvironment,
+) -> Option<ConstantNumber> {
+    let mut budget = MAX_CONSTANT_NODES;
+    evaluate_expression_result_at(expression, scope, scopes, constants, 0, &mut budget)
+}
+
+fn evaluate_expression_result_at(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    constants: &ConstantEnvironment,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<ConstantNumber> {
+    if depth > MAX_CONSTANT_DEPTH || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+
+    match &expression.kind {
+        ExpressionKind::Parenthesized(inner) => {
+            evaluate_expression_result_at(inner, scope, scopes, constants, depth + 1, budget)
+        }
+        ExpressionKind::Assignment(assignment) => {
+            let (key, type_name) = local_numeric_binding(&assignment.target, scope, scopes)?;
+            if assignment.operator == AssignmentOperator::Assign
+                && expression_writes_local_binding(&assignment.value, key, scope, scopes)
+            {
+                // Do not infer a final value when the RHS also writes the
+                // outer assignment target (for example an assignment of itself post-incremented).
+                return None;
+            }
+            // A nested assignment chain is unambiguous because assignment is
+            // right-associative in the AST. Other effectful compound operands
+            // remain unknown unless they are themselves a supported scalar
+            // assignment/increment result.
+            let right = match assignment.operator {
+                AssignmentOperator::Assign => evaluate_expression_result_at(
+                    &assignment.value,
+                    scope,
+                    scopes,
+                    constants,
+                    depth + 1,
+                    budget,
+                )?,
+                _ => {
+                    // A compound assignment's LHS read and an effectful RHS
+                    // may be unsequenced. Keep it unknown rather than infer a
+                    // value that depends on an operand evaluation order.
+                    if side_effect_count(&assignment.value) != 0 {
+                        return None;
+                    }
+                    evaluate_constant_number(
+                        &assignment.value,
+                        scope,
+                        scopes,
+                        constants,
+                        depth + 1,
+                        budget,
+                    )?
+                }
+            };
+            let result = match assignment.operator {
+                AssignmentOperator::Assign => right,
+                operator => {
+                    let left = constants.get(&key).copied()?;
+                    evaluate_constant_binary(
+                        compound_assignment_binary_operator(operator)?,
+                        left,
+                        right,
+                    )?
+                }
+            };
+            constant_matches_type(result, type_name).then_some(result)
+        }
+        ExpressionKind::Increment(increment) => {
+            let (key, type_name) = local_numeric_binding(&increment.operand, scope, scopes)?;
+            let old = constants.get(&key).copied()?;
+            if !increment.prefix {
+                return Some(old);
+            }
+            let one = match type_name {
+                "integer" => ConstantNumber::Integer(1),
+                "float" => ConstantNumber::Float(1.0),
+                _ => return None,
+            };
+            let operator = match increment.operator {
+                crate::ast::IncrementOperator::Increment => BinaryOperator::Add,
+                crate::ast::IncrementOperator::Decrement => BinaryOperator::Subtract,
+            };
+            let result = evaluate_constant_binary(operator, old, one)?;
+            constant_matches_type(result, type_name).then_some(result)
+        }
+        _ => evaluate_constant_number(expression, scope, scopes, constants, depth, budget),
+    }
+}
+
+fn expression_writes_local_binding(
+    expression: &Expression,
+    binding: usize,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+) -> bool {
+    fn visit(
+        expression: &Expression,
+        binding: usize,
+        scope: ScopeId,
+        scopes: &ScopeTree,
+        depth: usize,
+        budget: &mut usize,
+    ) -> bool {
+        if depth > MAX_CONSTANT_DEPTH || *budget == 0 {
+            // Unknown after a budget/depth limit means that the target may
+            // have been written; callers must not use the candidate value.
+            return true;
+        }
+        *budget -= 1;
+        let contains = |child: &Expression, budget: &mut usize| {
+            visit(child, binding, scope, scopes, depth + 1, budget)
+        };
+        match &expression.kind {
+            ExpressionKind::Assignment(assignment) => {
+                local_numeric_binding(&assignment.target, scope, scopes)
+                    .is_some_and(|(key, _)| key == binding)
+                    || contains(&assignment.target, budget)
+                    || contains(&assignment.value, budget)
+            }
+            ExpressionKind::Increment(increment) => {
+                local_numeric_binding(&increment.operand, scope, scopes)
+                    .is_some_and(|(key, _)| key == binding)
+                    || contains(&increment.operand, budget)
+            }
+            ExpressionKind::Parenthesized(inner)
+            | ExpressionKind::Cast(crate::ast::CastExpression { operand: inner, .. })
+            | ExpressionKind::Unary(crate::ast::UnaryExpression { operand: inner, .. }) => {
+                contains(inner, budget)
+            }
+            ExpressionKind::Binary(binary) => {
+                contains(&binary.left, budget) || contains(&binary.right, budget)
+            }
+            ExpressionKind::Call(call) => {
+                if contains(&call.callee, budget) {
+                    return true;
+                }
+                for argument in &call.arguments {
+                    if contains(argument, budget) {
+                        return true;
+                    }
+                }
+                false
+            }
+            ExpressionKind::Component(component) => contains(&component.base, budget),
+            ExpressionKind::LazyIndex(lazy) => {
+                if contains(&lazy.base, budget) {
+                    return true;
+                }
+                for index in &lazy.indices {
+                    if contains(index, budget) {
+                        return true;
+                    }
+                }
+                false
+            }
+            ExpressionKind::List(list) => list.elements.iter().any(|item| contains(item, budget)),
+            ExpressionKind::Vector(vector) => {
+                vector.components.iter().any(|item| contains(item, budget))
+            }
+            ExpressionKind::Rotation(rotation) => rotation
+                .components
+                .iter()
+                .any(|item| contains(item, budget)),
+            ExpressionKind::Identifier(_)
+            | ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::String(_)
+            | ExpressionKind::Error(_) => false,
+        }
+    }
+
+    let mut budget = MAX_CONSTANT_NODES;
+    visit(expression, binding, scope, scopes, 0, &mut budget)
+}
+
 fn condition_possibilities(
     expression: &Expression,
     empty_is_true: bool,
@@ -1616,10 +2197,7 @@ fn condition_possibilities(
         return None;
     }
 
-    let mut budget = MAX_CONSTANT_NODES;
-    let Some(value) =
-        evaluate_constant_number(expression, scope, scopes, constants, 0, &mut budget)
-    else {
+    let Some(value) = evaluate_expression_result(expression, scope, scopes, constants) else {
         // Unknown values deliberately preserve both paths. In particular, a
         // mutable local/global is never treated as a constant merely because
         // its initializer happens to be a literal.
@@ -2178,10 +2756,172 @@ mod constant_condition_tests {
                 "function parameter_stays_unknown may reach the end without returning a value",
                 "function global_stays_unknown may reach the end without returning a value",
                 "function loop_carried_value_stays_unknown may reach the end without returning a value",
-                "function increment_invalidates_value may reach the end without returning a value",
-                "function compound_assignment_invalidates_value may reach the end without returning a value",
                 "function parenthesized_assignment_invalidates_value may reach the end without returning a value",
                 "function unordered_side_effects_stay_unknown may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn declaration_initializers_capture_assignment_and_increment_results() {
+        let source = r#"
+            integer declaration_captures_postfix_result() {
+                integer value = 1;
+                integer previous = value++;
+                if (previous == 1 && value == 2) return 1;
+            }
+            integer declaration_captures_compound_assignment_result() {
+                integer value = 1;
+                integer updated = (value += 2);
+                if (updated == 3 && value == 3) return 1;
+            }
+            integer declaration_captures_nested_assignment_result() {
+                integer first = 0;
+                integer second = 0;
+                integer assigned = (first = second = 4);
+                if (assigned == 4 && first == 4 && second == 4) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert!(missing_return_functions(source).is_empty());
+    }
+
+    #[test]
+    fn assignment_does_not_reuse_rhs_write_to_the_same_local() {
+        let source = r#"
+            integer assignment_from_postfix_same_local_stays_unknown() {
+                integer value = 0;
+                if (value = value++) return 1;
+            }
+            integer assignment_from_prefix_same_local_stays_unknown() {
+                integer value = 0;
+                if (value = ++value) return 1;
+            }
+            integer assignment_from_other_local_increment_is_known() {
+                integer value = 0;
+                integer other = 1;
+                if (value = other++) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function assignment_from_postfix_same_local_stays_unknown may reach the end without returning a value",
+                "function assignment_from_prefix_same_local_stays_unknown may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn right_associative_assignment_chains_update_each_local_and_return_the_value() {
+        let source = r#"
+            integer chained_assignments_update_both_values() {
+                integer first = 0;
+                integer second = 0;
+                first = second = 3;
+                if (first == 3 && second == 3) return 1;
+            }
+            integer chained_assignment_drives_condition() {
+                integer first = 0;
+                integer second = 0;
+                if (first = second = 1) return 1;
+            }
+            integer chained_compound_assignment_result() {
+                integer first = 1;
+                integer second = 2;
+                if (first = (second += 1)) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert!(missing_return_functions(source).is_empty());
+    }
+
+    #[test]
+    fn assignment_and_increment_results_drive_condition_edges() {
+        let source = r#"
+            integer assignment_true_condition() {
+                integer value = 0;
+                if (value = 1) return 1;
+            }
+            integer assignment_false_condition() {
+                integer value = 1;
+                if (value = 0) return 1;
+            }
+            integer postfix_condition_uses_old_value() {
+                integer value = 0;
+                if (value++) return 1;
+            }
+            integer prefix_condition_uses_new_value() {
+                integer value = 0;
+                if (++value) return 1;
+            }
+            integer compound_assignment_condition_uses_result() {
+                integer value = 0;
+                if (value += 1) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function assignment_false_condition may reach the end without returning a value",
+                "function postfix_condition_uses_old_value may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn side_effects_update_known_values_and_preserve_unwritten_facts() {
+        let source = r#"
+            integer increment_updates_value() {
+                integer value = 1;
+                value++;
+                if (value == 2) return 1;
+            }
+            integer compound_assignment_updates_value() {
+                integer value = 1;
+                value += 2;
+                if (value == 3) return 1;
+            }
+            integer single_nested_write_updates_value() {
+                integer value = 0;
+                (value = 2) + 1;
+                if (value == 2) return 1;
+            }
+            integer multiple_writes_preserve_unrelated_value() {
+                integer first = 0;
+                integer second = 0;
+                integer untouched = 5;
+                (first = 1) + (second = 2);
+                if (untouched == 5) return 1;
+            }
+            integer multiple_writes_to_same_value_stay_unknown() {
+                integer value = 0;
+                (value = 1) + (value = 2);
+                if (value == 1) return 1;
+            }
+            integer compound_same_operand_write_stays_unknown() {
+                integer value = 0;
+                if ((value += (value = 1)) == 1) return 1;
+            }
+            integer nested_call_argument_write_updates_value() {
+                integer value = 0;
+                llOwnerSay((string)(value = 2));
+                if (value == 2) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function multiple_writes_to_same_value_stay_unknown may reach the end without returning a value",
+                "function compound_same_operand_write_stays_unknown may reach the end without returning a value",
             ]
         );
     }
@@ -2277,6 +3017,296 @@ mod constant_condition_tests {
                 .any(|diagnostic| diagnostic.code == "SEM037"),
             "expected SEM037 for the unreachable local-condition branch, got {diagnostics:?}"
         );
+    }
+
+    fn switch_diagnostics(source: &str) -> Vec<Diagnostic> {
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) =
+            parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+        assert!(syntax.is_empty(), "{syntax:?}");
+        crate::ast_semantic::analyze_ast(&ast, &syntax)
+    }
+
+    #[test]
+    fn constant_switch_values_prune_dispatch_but_preserve_fallthrough_and_unknowns() {
+        let source = r#"
+            integer known_case_prunes_other_arms() {
+                integer selected = 1;
+                switch (selected) {
+                    case 1: return 1;
+                    case 2: llSay(0, "unreachable");
+                }
+            }
+            integer known_case_falls_through() {
+                integer selected = 1;
+                switch (selected) {
+                    case 1: ;
+                    case 2: return 2;
+                    default: llSay(0, "unreachable");
+                }
+            }
+            integer assignment_switch_condition_prunes_arms() {
+                integer selected = 0;
+                switch (selected = 1) {
+                    case 1: return 1;
+                    case 2: llSay(0, "unreachable");
+                }
+            }
+            integer known_value_selects_default() {
+                integer selected = 1;
+                switch (selected) {
+                    case 2: return 2;
+                    default: llSay(0, "reachable default");
+                }
+            }
+            integer unmatched_case_keeps_switch_exit() {
+                integer selected = 1;
+                switch (selected) {
+                    case 2: return 2;
+                }
+            }
+            integer unknown_value_keeps_all_arms(integer selected) {
+                switch (selected) {
+                    case 1: return 1;
+                    default: llSay(0, "reachable default");
+                }
+            }
+            integer unknown_case_label_keeps_all_arms() {
+                integer selected = 1;
+                switch (selected) {
+                    case selected: return 1;
+                    default: llSay(0, "reachable default for unknown label");
+                }
+            }
+            integer unknown_string_value_keeps_all_arms(string selected) {
+                switch (selected) {
+                    case "alpha": return 1;
+                    default: llSay(0, "reachable default for unknown string");
+                }
+            }
+            default { state_entry() { } }
+        "#;
+
+        let diagnostics = switch_diagnostics(source);
+        let unreachable_case_phrase = source
+            .find("unreachable")
+            .expect("unreachable switch statement must exist");
+        let unreachable_case_start = source[..unreachable_case_phrase]
+            .rfind("llSay")
+            .expect("unreachable call start must exist");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "SEM037" && diagnostic.span.start == unreachable_case_start
+            }),
+            "the non-matching case arm must be unreachable: {diagnostics:?}"
+        );
+
+        let missing_returns: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "SEM011")
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(
+            missing_returns,
+            vec![
+                "function known_value_selects_default may reach the end without returning a value",
+                "function unmatched_case_keeps_switch_exit may reach the end without returning a value",
+                "function unknown_value_keeps_all_arms may reach the end without returning a value",
+                "function unknown_case_label_keeps_all_arms may reach the end without returning a value",
+                "function unknown_string_value_keeps_all_arms may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn nonnumeric_constant_switch_values_use_firestorm_equality() {
+        let source = r#"
+            integer string_switch_dispatches_one_case() {
+                switch ("alpha") {
+                    case "alpha": return 1;
+                    case "beta": llSay(0, "unreachable string arm");
+                }
+            }
+            integer vector_switch_dispatches_one_case() {
+                switch (<1.0, 2.0, 3.0>) {
+                    case <1.0, 2.0, 3.0>: return 1;
+                    case <4.0, 5.0, 6.0>: llSay(0, "unreachable vector arm");
+                }
+            }
+            integer list_switch_uses_length_equality() {
+                switch ([1, 2]) {
+                    case [3, 4]: return 1;
+                    case [5]: llSay(0, "unreachable list arm");
+                }
+            }
+            integer rotation_switch_dispatches_one_case() {
+                switch (ZERO_ROTATION) {
+                    case <0.0, 0.0, 0.0, 1.0>: return 1;
+                    case <0.0, 0.0, 1.0, 0.0>: llSay(0, "unreachable rotation arm");
+                }
+            }
+            default { state_entry() { } }
+        "#;
+
+        let diagnostics = switch_diagnostics(source);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "SEM011"),
+            "all selected constant switch arms return: {diagnostics:?}"
+        );
+        for phrase in [
+            "unreachable string arm",
+            "unreachable vector arm",
+            "unreachable list arm",
+            "unreachable rotation arm",
+        ] {
+            let phrase_start = source.find(phrase).expect("test arm must exist");
+            let statement_start = source[..phrase_start]
+                .rfind("llSay")
+                .expect("statement start must exist");
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "SEM037" && diagnostic.span.start == statement_start
+                }),
+                "expected the constant nonmatching arm {phrase:?} to be unreachable: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_switch_and_loop_breaks_target_the_nearest_switch() {
+        let source = r#"
+            integer nested_switch_break_stays_inside_outer_switch(integer selected) {
+                switch (selected) {
+                    case 1:
+                        switch (selected) {
+                            case 1: break;
+                            default: return 2;
+                        }
+                        return 1;
+                    default: return 3;
+                }
+            }
+            integer switch_inside_loop_break_does_not_break_loop() {
+                integer selected = 1;
+                while (selected) {
+                    switch (selected) {
+                        case 1: break;
+                        default: break;
+                    }
+                    return 1;
+                }
+            }
+            integer loop_inside_switch_break_exits_switch() {
+                integer selected = 1;
+                switch (selected) {
+                    case 1:
+                        while (TRUE) { break; }
+                        llSay(0, "unreachable after switch break");
+                    default: return 2;
+                }
+                return 3;
+            }
+            integer for_inside_switch_break_exits_switch() {
+                switch (TRUE) {
+                    case TRUE:
+                        for (; TRUE; ) { break; }
+                        llSay(0, "unreachable after for break");
+                    default: return 2;
+                }
+                return 3;
+            }
+            integer do_inside_switch_break_exits_switch() {
+                switch (TRUE) {
+                    case TRUE:
+                        do { break; } while (TRUE);
+                        llSay(0, "unreachable after do break");
+                    default: return 2;
+                }
+                return 3;
+            }
+            integer if_inside_switch_break_exits_switch() {
+                switch (TRUE) {
+                    case TRUE:
+                        if (TRUE) { break; }
+                        llSay(0, "unreachable after if break");
+                    default: return 2;
+                }
+                return 3;
+            }
+            integer switch_inside_for_break_keeps_following_return() {
+                integer selected = 1;
+                for (; selected; selected = 0) {
+                    switch (selected) {
+                        case 1: break;
+                        default: break;
+                    }
+                    return 1;
+                }
+            }
+            integer switch_inside_do_break_keeps_following_return() {
+                integer selected = 1;
+                do {
+                    switch (selected) {
+                        case 1: break;
+                        default: break;
+                    }
+                    return 1;
+                } while (FALSE);
+            }
+            default { state_entry() { } }
+        "#;
+
+        let diagnostics = switch_diagnostics(source);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "SEM011"),
+            "unexpected missing-return diagnostic: {diagnostics:?}"
+        );
+        let phrase = source
+            .find("unreachable after switch break")
+            .expect("test statement must exist");
+        let unreachable_after_break = source[..phrase]
+            .rfind("llSay")
+            .expect("call start must exist");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "SEM037" && diagnostic.span.start == unreachable_after_break
+            }),
+            "expected SEM037 on the statement after a break inside a loop nested in a switch: {diagnostics:?}"
+        );
+        for marker in [
+            "                        return 1;",
+            "                    return 1;",
+        ] {
+            let return_start = source.find(marker).expect("reachable return must exist");
+            assert!(
+                diagnostics.iter().all(|diagnostic| {
+                    diagnostic.code != "SEM037" || diagnostic.span.start != return_start
+                }),
+                "a break in a nested switch must not hide the following return: {diagnostics:?}"
+            );
+        }
+        for phrase in [
+            "unreachable after switch break",
+            "unreachable after for break",
+            "unreachable after do break",
+            "unreachable after if break",
+        ] {
+            let phrase_start = source.find(phrase).expect("unreachable call must exist");
+            let call_start = source[..phrase_start]
+                .rfind("llSay")
+                .expect("call start must exist");
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "SEM037" && diagnostic.span.start == call_start
+                }),
+                "expected SEM037 at {phrase:?}: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]
