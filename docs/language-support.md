@@ -151,6 +151,31 @@ References: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wik
 [On damage](https://wiki.secondlife.com/wiki/On_damage), and
 [Final damage](https://wiki.secondlife.com/wiki/Final_damage).
 
+### Statically provable division by zero
+
+LSL integer/float division and integer remainder by zero cause a runtime
+`Math Error` that halts script execution. This includes compound assignments
+such as `/=` and `%=`. The AST engine reports warning `SEM043` when it can prove
+the divisor is zero from a numeric literal, unshadowed numeric built-in
+constant (for example `FALSE`), parentheses, unary operators,
+zero-preserving numeric casts, or side-effect-free constant arithmetic:
+
+```lsl
+integer quotient = 10 / (3 - 3); // SEM043
+integer remainder = 10 % FALSE; // SEM043
+float negative_zero = 1.0 / -0.0; // SEM043
+```
+
+Variables and function calls are not constant-folded, even when their current
+initializer or implementation appears to return zero. The rule first checks
+the LSL operand type matrix, so vector `%` cross products are not mistaken for
+integer remainders. Evaluation is bounded and fails closed on parser errors or
+unreliable lexical/preprocessor input.
+
+References: [LSL Errors — Math Error](https://wiki.secondlife.com/wiki/LSL_Errors),
+[LSL Operators — modulus](https://wiki.secondlife.com/wiki/LSL_Operators), and
+[LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
+
 ### Lists and comparisons
 
 LSL lists cannot contain other lists. This includes a nested list literal, a
