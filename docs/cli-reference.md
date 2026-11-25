@@ -43,7 +43,7 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
-`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM042` are AST-only lint diagnostics.
+`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM043` are AST-only lint diagnostics.
 `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039` are AST-only semantic errors. The Firestorm switch
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
@@ -51,8 +51,8 @@ user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
 to event handlers and user-defined function bodies. State/list checks
 `SEM038`–`SEM040` validate event presence, nested lists and list comparisons;
 `SEM041` warns on bare assignments in `if` conditions; `SEM042` warns when
-context-bound detection functions are reachable from incompatible events.
-These codes appear in
+context-bound detection functions are reachable from incompatible events;
+`SEM043` warns on division/remainder by statically known zero. These codes appear in
 default and explicit `--engine ast`
 output, are never emitted by explicit `--engine legacy`, and are not part of the
 Compare parity report, which continues to cover only `SEM001`–`SEM023`.

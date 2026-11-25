@@ -15,6 +15,7 @@ pub(crate) mod explicit_casts;
 pub(crate) mod firestorm_switches;
 pub(crate) mod global_initializers;
 pub(crate) mod list_semantics;
+pub(crate) mod math_errors;
 pub(crate) mod return_hazards;
 pub(crate) mod state_namespace;
 pub(crate) mod state_targets;

@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM042`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM042` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM043`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM043` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -170,6 +170,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM040` | Equality/inequality compares two lists. | warning / lint | AST-only. Reports only when both operand types are known to be `list`. `==` compares lengths only; `!=` returns their length difference. |
 | `SEM041` | Bare plain assignment in an `if` condition. | warning / lint | AST-only. Matches a top-level unparenthesized `=` assignment; an extra pair of parentheses marks intentional assignment. Compound assignments and assignments nested inside larger expressions are skipped. |
 | `SEM042` | Detection-context-only function is reachable from an incompatible event. | warning / lint | AST-only. Propagates known event contexts through direct user-function calls. `llDetectedGrab` and `llDetectedTouch*` are touch-only, `llDetectedLinkNumber` is restricted to touch/collision events, `llDetectedDamage` requires a damage event, and `llAdjustDamage` requires `on_damage`. Unknown extension events and unreferenced helpers are not guessed; parser errors, unreliable environments and graph-budget overflow suppress the rule. |
+| `SEM043` | Division or integer remainder has a statically known zero divisor. | warning / lint | AST-only. Checks `/`, `%`, `/=` and `%=` when operand types are valid and the divisor can be evaluated from literals, unshadowed numeric built-in constants, parentheses, zero-preserving numeric casts and side-effect-free constant arithmetic. Mutable variables and calls are never guessed; vector `%` is not treated as integer remainder. Parser errors, unreliable environments and work/depth budget exhaustion suppress the rule. |
 
 ## Illustrative minimal examples
 
@@ -289,6 +290,12 @@ default { state_entry() { llOwnerSay((string)llDetectedKey(0)); } }
 ```
 
 ```lsl
+// SEM043: execution stops with a Math Error
+integer divide(integer value) { return value / (3 - 3); }
+default { state_entry() { integer value = 10; value %= FALSE; } }
+```
+
+```lsl
 // SEM003: wrong event parameter count
 default { touch_start() { } }
 ```
@@ -380,6 +387,7 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM037 reports only the first unreachable statement in a straight-line sequence after a definite return, a two-branch terminating `if/else`, or a transition to a different declared state inside an event. A state statement targeting the current state or an unknown state is not treated as terminal. Loops and switch dispatch remain conservative. Bodies containing `jump`/labels or malformed syntax are skipped for both SEM036 and SEM037; work/depth overflow suppresses the entire rule family.
 - SEM041 follows the documented LSLint convention for the common `=`/`==` typo: only a bare plain assignment at the top level of an `if` condition is warned. Wrapping the assignment in an additional pair of parentheses, as in `if ((target = llGetOwner()))`, explicitly marks it as intentional. Compound assignments, assignments inside larger expressions, and other control-flow conditions are outside this rule. Parser-damaged conditions and unreliable preprocessor/lexical environments are skipped.
 - SEM042 propagates known event contexts through matched direct user-function calls. General `llDetected*` functions require a detection event; `llDetectedGrab` and `llDetectedTouch*` are touch-only; `llDetectedLinkNumber` is restricted to touch/collision events; `llDetectedDamage` is limited to `on_damage`/`final_damage`; and `llAdjustDamage` is `on_damage`-only. Unknown extension events contribute no guessed context, unreferenced functions are ignored, and the check fails closed for parser errors, unreliable environments or call-graph budget overflow.
+- SEM043 reports only when a valid numeric `/`, integer `%`, `/=`, or `%=` operation has a denominator that the bounded constant evaluator proves to be zero. It understands integer/float literals, unshadowed numeric built-in constants such as `FALSE`, parentheses, unary numeric operators, zero-preserving numeric casts and side-effect-free constant arithmetic. It does not evaluate mutable variables or function calls, and vector `%` remains a vector cross product rather than integer remainder. Any parser error, unreliable lexical/preprocessor environment or evaluator budget/depth exhaustion suppresses the rule.
 - Parser recovery does not promise full reconstruction after unbalanced outer braces.
 - A clean lint result does not guarantee acceptance by the official compiler or any simulator.
 
