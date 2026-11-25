@@ -124,7 +124,7 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, and `SEM035`, `SEM037`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, and `SEM037` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, and `SEM036`, default to **error**.
+All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, and `SEM039`, default to **error**.
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -165,6 +165,9 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM035` | A state change relies on the historical Mono `if`-without-`else` workaround. | warning / lint | AST-only. Matches only a direct unbraced state-change then-branch with no `else`; this is an unsupported compatibility behavior, not portable LSL. |
 | `SEM036` | An event handler returns a value. | error / semantic | AST-only. The compiler may accept this, but the official LSL reference says it crashes at runtime. Applies to canonical and extension event handlers; malformed bodies and unreliable units are skipped. |
 | `SEM037` | A statement is unreachable after an unconditional `return` or event state transition. | warning / lint | AST-only. Reports only the first unreachable statement in a straight-line sequence, or after an `if/else` whose both branches terminate. Same-state transitions, unknown state targets, conditional one-sided exits, loops and switch dispatch are not treated as terminating. Any jump/label or malformed body suppresses both rules for that code scope. |
+| `SEM038` | A state has no event handlers. | error / semantic | AST-only. Checks complete `default` and named states; malformed states and states overlapped by parser errors are skipped. |
+| `SEM039` | A list element has list type. | error / semantic | AST-only. Checks nested literals, visible list variables, list-returning calls and other expressions whose type is provably `list`. Unknown types and malformed expressions are skipped. |
+| `SEM040` | Equality/inequality compares two lists. | warning / lint | AST-only. Reports only when both operand types are known to be `list`. `==` compares lengths only; `!=` returns their length difference. |
 
 ## Illustrative minimal examples
 

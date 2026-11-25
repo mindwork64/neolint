@@ -138,10 +138,10 @@ fn focused_structural_rule_parity() {
         "default { custom_event() { } custom_event() { } }",
         "default { state_entry() { } state_entry() { } }",
         "default { state_entry() { } } state running { state_entry() { } }",
-        "default { } state running { } state running { }",
-        "integer running; default { } state running { }",
-        "integer idle() { return 1; } default { } state idle { }",
-        "default { } state llOwnerSay { }",
+        "default { state_entry() { } } state running { state_entry() { } } state running { state_entry() { } }",
+        "integer running; default { state_entry() { } } state running { state_entry() { } }",
+        "integer idle() { return 1; } default { state_entry() { } } state idle { state_entry() { } }",
+        "default { state_entry() { } } state llOwnerSay { state_entry() { } }",
         "default { } state llGodLikeRezObject { }",
         "default state_entry() { }",
         "integer phantom()\ndefault { }\nstate phantom { }",
@@ -340,7 +340,7 @@ fn sem020_exact_message_and_scope_boundary() {
 
 #[test]
 fn sem021_exact_duplicate_and_namespace_collisions() {
-    let source = "default { } state running { } state running { }";
+    let source = "default { state_entry() { } } state running { state_entry() { } } state running { state_entry() { } }";
     let first = source.find("running").unwrap();
     let second = source.rfind("running").unwrap();
     let first_span = span(source, first, "running".len());
@@ -358,7 +358,8 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
         )]
     );
 
-    let source = "integer running; default { } state running { }";
+    let source =
+        "integer running; default { state_entry() { } } state running { state_entry() { } }";
     let global_start = source.find("running").unwrap();
     let start = source.rfind("running").unwrap();
     assert_eq!(
@@ -375,7 +376,7 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
         ]
     );
 
-    let source = "integer idle() { return 1; } default { } state idle { }";
+    let source = "integer idle() { return 1; } default { state_entry() { } } state idle { state_entry() { } }";
     let start = source.rfind("idle").unwrap();
     let function_start = source.find("idle").unwrap();
     assert_eq!(
@@ -392,7 +393,7 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
         ]
     );
 
-    let source = "default { } state llOwnerSay { }";
+    let source = "default { state_entry() { } } state llOwnerSay { state_entry() { } }";
     let start = source.find("llOwnerSay").unwrap();
     assert_eq!(
         semantic(source),
@@ -405,7 +406,7 @@ fn sem021_exact_duplicate_and_namespace_collisions() {
         )]
     );
     assert!(migrated(&semantic(
-        "default { } state llGodLikeRezObject { } state llSetInventoryPermMask { } state llSetObjectPermMask { }"
+        "default { state_entry() { } } state llGodLikeRezObject { state_entry() { } } state llSetInventoryPermMask { state_entry() { } } state llSetObjectPermMask { state_entry() { } }"
     ))
     .is_empty());
 }
@@ -1038,7 +1039,7 @@ fn recovered_first_definition_still_wins() {
 
 #[test]
 fn sem021_uses_recovered_malformed_function_signatures() {
-    let source = "integer llOwnerSay(string) { return 1; } default { } state llOwnerSay { }";
+    let source = "integer llOwnerSay(string) { return 1; } default { state_entry() { } } state llOwnerSay { state_entry() { } }";
     let diagnostics = semantic(source);
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "SEM021"

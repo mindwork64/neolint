@@ -4158,3 +4158,16 @@ SEM001–SEM023.
 Evidence: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
 [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and
 [LSL Wiki — Compiler errors](https://www.lslwiki.digiworldz.com/lslwiki/wakka.php?wakka=errors).
+
+
+### Post-v1.1.0 state and list semantics (SEM038–SEM040)
+
+The AST semantic pass now requires every complete state declaration to contain at least one event handler (SEM038). The rule includes named and default states, accepts canonical and extension events, and skips malformed state ranges or units whose lexical/preprocessor output is unreliable.
+
+SEM039 validates list elements with the shared AST scope/type resolver. It reports an element when its type is provably list, including nested list literals, visible list variables, known list-returning calls and list-valued expressions such as list concatenation. Unknown extension values are not guessed. Its iterative rule pass is capped at 65,536 work items and emits no partial findings after overflow.
+
+SEM040 warns when == or != is used with two known list operands. LSL list equality compares lengths only; inequality returns the difference between the lengths rather than a normalized boolean. The finding points to the operator and skips expressions with parser errors or unknown operand types.
+
+All three diagnostics are AST-only. They do not alter Legacy behavior or the SEM001–SEM023 Compare parity set.
+
+Evidence: [Second Life Wiki — LSL List](https://wiki.secondlife.com/wiki/LSL_List), [Second Life Wiki — ListCompare](https://wiki.secondlife.com/wiki/ListCompare), and [Second Life LSL Guide — States](https://static-secondlife-com.s3.amazonaws.com/downloads/textures/guides/LSLGuide.pdf).

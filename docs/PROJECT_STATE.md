@@ -27,8 +27,9 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   `SEM028`–`SEM033` and switch-aware return-flow analysis. The follow-up
   `SEM034`/`SEM035` adds AST-only Mono state-change context checks. A further
   AST-only control-flow slice adds `SEM036` (event value-return errors) and
-  `SEM037` (conservative unreachable-statement warnings); Legacy and Compare
-  remain unchanged.
+  `SEM037` (conservative unreachable-statement warnings). The LSL state/list
+  follow-up adds `SEM038` (empty states), `SEM039` (nested lists), and `SEM040`
+  (list equality/inequality hazards); Legacy and Compare remain unchanged.
 - Phase 8: reproducible benchmark harness, resource-limit reconciliation and
   profile-guided fixes.
 - Phase 8 follow-ups #108–#111 are integrated and closed:
@@ -37,7 +38,7 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM037` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM040` are AST-only.
 
 ## Architecture
 

@@ -6,6 +6,7 @@ integer idle()
 
 default
 {
+    state_entry() { }
 }
 
 state running

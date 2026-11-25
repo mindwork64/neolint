@@ -57,7 +57,9 @@ signatures are unchanged.
   changes that Mono does not support; `SEM035` warns on the historical
   if-without-else compatibility workaround. `SEM036` rejects value returns
   from events, and `SEM037` warns on directly unreachable statements after
-  unconditional returns or event state transitions.
+  unconditional returns or event state transitions. `SEM038` rejects empty
+  states, `SEM039` rejects elements with list type inside a list, and `SEM040`
+  warns when list equality/inequality compares lengths rather than contents.
 - AST and Legacy may report intentional, documented differences and may order
   findings differently. The migration does not remove Legacy.
 - `--engine compare` is a maintainer-oriented diagnostic mode: it runs both
