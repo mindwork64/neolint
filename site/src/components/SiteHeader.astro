@@ -1,0 +1,58 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+const current = Astro.url.pathname.replace(base, '/');
+---
+<header class="site-header">
+  <a class="site-brand" href={base} aria-label="neolint home">
+    <img src={`${base}assets/neolint-icon.png`} alt="" width="42" height="42" />
+    <span>neolint</span>
+  </a>
+  <nav aria-label="Main navigation">
+    <a class:list={{ active: current === '/' }} href={base}>Home</a>
+    <a class:list={{ active: current.startsWith('/docs') }} href={`${base}docs/`}>Documentation</a>
+    <a class:list={{ active: current.startsWith('/diagnostics') }} href={`${base}diagnostics/`}>Diagnostics</a>
+    <a href="https://github.com/mindwork64/neolint" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+  </nav>
+</header>
+
+<style>
+  .site-header {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: min(1180px, calc(100% - 48px));
+    margin: 0 auto;
+    padding: 22px 0;
+    border-bottom: 1px solid rgba(111, 153, 205, 0.16);
+  }
+  .site-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    color: #f4f7ff;
+    font-size: 1.35rem;
+    font-weight: 760;
+    letter-spacing: -0.045em;
+    text-decoration: none;
+  }
+  .site-brand img { object-fit: contain; filter: drop-shadow(0 0 12px rgba(17, 191, 255, .28)); }
+  nav { display: flex; align-items: center; gap: clamp(16px, 3vw, 34px); }
+  nav a {
+    color: #aeb9ce;
+    font-size: .9rem;
+    font-weight: 560;
+    text-decoration: none;
+    transition: color .18s ease;
+  }
+  nav a:hover, nav a.active { color: #55dcff; }
+  nav a:last-child { color: #e8ecf8; }
+  @media (max-width: 620px) {
+    .site-header { width: min(100% - 32px, 1180px); align-items: flex-start; gap: 16px; }
+    .site-brand { gap: 8px; font-size: 1.15rem; }
+    .site-brand img { width: 34px; height: 34px; }
+    nav { justify-content: flex-end; flex-wrap: wrap; gap: 10px 16px; }
+    nav a { font-size: .8rem; }
+  }
+</style>

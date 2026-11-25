@@ -22,6 +22,7 @@
 </p>
 
 <p align="center">
+  <a href="https://mindwork64.github.io/neolint/">Project site</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#what-it-checks">What it checks</a> ·
   <a href="#documentation">Documentation</a> ·
