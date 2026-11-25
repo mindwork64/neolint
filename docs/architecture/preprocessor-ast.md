@@ -4171,3 +4171,10 @@ SEM040 warns when == or != is used with two known list operands. LSL list equali
 All three diagnostics are AST-only. They do not alter Legacy behavior or the SEM001–SEM023 Compare parity set.
 
 Evidence: [Second Life Wiki — LSL List](https://wiki.secondlife.com/wiki/LSL_List), [Second Life Wiki — ListCompare](https://wiki.secondlife.com/wiki/ListCompare), and [Second Life LSL Guide — States](https://static-secondlife-com.s3.amazonaws.com/downloads/textures/guides/LSLGuide.pdf).
+
+
+### Post-v1.1.0 if-condition assignment warning (SEM041)
+
+SEM041 warns when the root expression of an `if` condition is a plain assignment (`=`), a common typo for `==` documented by the Second Life Wiki and checked by LSLint. An extra pair of parentheses around the assignment explicitly communicates intent and suppresses the warning. Compound assignments, nested assignments inside larger expressions and conditions on `for`/`while`/`do-while` are outside the rule. The check walks nested statements iteratively, skips parser-damaged conditions and unreliable lexical/preprocessor units, and suppresses all SEM041 output if its 65,536-item work budget is exceeded. It is an AST-only lint warning and does not change Legacy or Compare parity.
+
+Evidence: [Second Life Wiki — If, “The =/== Mistakes”](https://wiki.secondlife.com/wiki/If#The_=/==_Mistakes) and [Second Life Wiki - Lslint](https://wiki.secondlife.com/wiki/Lslint).

@@ -39,7 +39,8 @@ pub fn analyze_ast(ast: &Ast, syntax_diagnostics: &[Diagnostic]) -> Vec<Diagnost
 /// error-severity preprocessor or lexical diagnostic. Code may have been
 /// dropped before parsing in that case, so the unused-variable, unused-parameter,
 /// unreachable-function, global-initializer, state/list semantic, Firestorm-switch,
-/// Mono state-transition-context and return/control-flow hazard rules fail closed
+/// Mono state-transition-context, return/control-flow hazard and if-condition
+/// assignment rules fail closed
 /// instead of treating the surviving text as complete. The flag affects
 /// only these AST-only rules; all SEM001–SEM023 diagnostics are computed exactly
 /// as before.
@@ -134,6 +135,11 @@ pub fn analyze_ast_with_environment(
         environment_reliable,
     ));
     diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
+    diagnostics.extend(rules::condition_assignments::check(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);

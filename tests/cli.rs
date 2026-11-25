@@ -493,12 +493,12 @@ fn firestorm_switch_diagnostics_are_ast_only_and_keep_json_v1() {
 }
 
 #[test]
-fn compare_ignores_ast_only_sem024_through_sem040() {
+fn compare_ignores_ast_only_sem024_through_sem041() {
     let directory = temporary_directory();
     let source = write_file(
         &directory,
         "unused-analysis.lsl",
-        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\nlist source_list = [1];\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
+        "float calculated = llGetTime() + 1.0;\ninteger callee(integer unused_parameter) { return 1; }\nunused_function() { }\ntransition_helper() { state running; if (TRUE) state default; }\nlist source_list = [1];\ninteger condition_target;\ndefault { state_entry() { integer unused_local; list nested_list = [source_list]; if (condition_target = 1) { } if (condition_target == 1) { } if (source_list == []) llOwnerSay((string)source_list); llOwnerSay((string)nested_list); llOwnerSay((string)callee(1)); transition_helper(); return 1; llOwnerSay((string)unused_local); } }\nstate running { state_entry() { } }\nstate empty_state {}\n",
     );
     let source = source.to_str().unwrap();
 
@@ -512,6 +512,7 @@ fn compare_ignores_ast_only_sem024_through_sem040() {
     assert!(ast_stdout.contains("error[SEM038]"), "{ast_stdout}");
     assert!(ast_stdout.contains("error[SEM039]"), "{ast_stdout}");
     assert!(ast_stdout.contains("warning[SEM040]"), "{ast_stdout}");
+    assert!(ast_stdout.contains("warning[SEM041]"), "{ast_stdout}");
     let ast_json = run_args(&["--format", "json", source]);
     let ast_json_stdout = String::from_utf8(ast_json.stdout).unwrap();
     for field in [
@@ -522,6 +523,7 @@ fn compare_ignores_ast_only_sem024_through_sem040() {
         "\"code\":\"SEM038\"",
         "\"code\":\"SEM039\"",
         "\"code\":\"SEM040\"",
+        "\"code\":\"SEM041\"",
         "\"severity\":\"error\"",
         "\"severity\":\"warning\"",
         "\"kind\":\"semantic\"",
@@ -538,7 +540,7 @@ fn compare_ignores_ast_only_sem024_through_sem040() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040",
+        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -554,7 +556,7 @@ fn compare_ignores_ast_only_sem024_through_sem040() {
     assert!(!stderr.contains("SEM026"), "{stderr}");
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040",
+        "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }

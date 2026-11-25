@@ -295,7 +295,7 @@ const ENGINE_VARIANTS: &[&[&str]] = &[&[], &["--engine", "legacy"]];
 /// all other expected diagnostics remain exact for both engines.
 const AST_ONLY_CODES: &[&str] = &[
     "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
-    "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040",
+    "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
 ];
 
 fn expected_for_engine(fixture: &Fixture, engine_args: &[&str]) -> BTreeMap<DiagnosticKey, usize> {
@@ -410,7 +410,7 @@ fn corpus_manifest_is_valid_and_complete() {
     // asserted by `assert_manifest_is_valid` above: adding a corpus fixture
     // requires its manifest row and `.lsl` file, not a hardcoded total here.
     assert_eq!(categories.get("small"), Some(&9));
-    assert_eq!(categories.get("medium"), Some(&7));
+    assert_eq!(categories.get("medium"), Some(&8));
     assert_eq!(categories.get("large"), Some(&3));
     assert_eq!(categories.get("invalid"), Some(&13));
     assert!(

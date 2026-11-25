@@ -103,6 +103,22 @@ The C-style ternary operator (`?:`) and bitwise/shift compound assignments (`&=`
 
 Assignment targets must be variables or supported vector/rotation components. Prefix and postfix `++`/`--` apply to variables, not components.
 
+A plain assignment at the top level of an `if` condition is often a typo for an equality test:
+
+```lsl
+if (target = llGetOwner()) // likely meant: target == llGetOwner()
+{
+    // ...
+}
+```
+
+The AST engine reports this as the warning `SEM041`. To make an intentional
+assignment explicit and silence the warning, put an extra pair of parentheses
+around the assignment: `if ((target = llGetOwner()))`. The rule is deliberately
+narrow: it checks only bare plain assignments in `if` conditions, not compound
+assignments or assignments nested inside larger expressions. This follows the
+[Second Life Wiki guidance for the `=`/`==` mistake](https://wiki.secondlife.com/wiki/If#The_=/==_Mistakes).
+
 ### Lists and comparisons
 
 LSL lists cannot contain other lists. This includes a nested list literal, a
