@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Expression, ExpressionKind, TypeKind, UnaryOperator,
 };
-use crate::builtins;
+use crate::builtins::{self, Signature};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::expressions::ExpressionSite;
 use super::super::scopes::ScopeTree;
 use super::super::types::{
-    can_implicitly_convert, infer_binary_result_type, infer_expression_type, UserFunctionSignature,
+    can_implicitly_convert, infer_binary_result_type, infer_expression_type_with_builtins,
+    UserFunctionSignature,
 };
 
 const MAX_MATH_WORK: usize = 32_768;
@@ -69,12 +70,13 @@ enum Evaluation {
 
 /// Warn on statically provable division-by-zero and imaginary math hazards.
 /// Mutable variables and user-defined calls are deliberately not evaluated.
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     sites: &[ExpressionSite<'_>],
     scopes: &ScopeTree,
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Vec<Diagnostic> {
     if !environment_reliable
         || syntax_diagnostics
@@ -99,14 +101,22 @@ pub(crate) fn check(
                     BinaryOperator::Divide | BinaryOperator::Remainder
                 ) =>
             {
-                let Some(left_type) =
-                    infer_expression_type(&binary.left, scopes, site.scope, functions)
-                else {
+                let Some(left_type) = infer_expression_type_with_builtins(
+                    &binary.left,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
-                let Some(right_type) =
-                    infer_expression_type(&binary.right, scopes, site.scope, functions)
-                else {
+                let Some(right_type) = infer_expression_type_with_builtins(
+                    &binary.right,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
                 if infer_binary_result_type(binary.operator, &left_type, &right_type).is_none() {
@@ -127,14 +137,22 @@ pub(crate) fn check(
                     AssignmentOperator::DivideAssign | AssignmentOperator::RemainderAssign
                 ) =>
             {
-                let Some(target_type) =
-                    infer_expression_type(&assignment.target, scopes, site.scope, functions)
-                else {
+                let Some(target_type) = infer_expression_type_with_builtins(
+                    &assignment.target,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
-                let Some(value_type) =
-                    infer_expression_type(&assignment.value, scopes, site.scope, functions)
-                else {
+                let Some(value_type) = infer_expression_type_with_builtins(
+                    &assignment.value,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
                 let operator = match assignment.operator {
@@ -169,8 +187,7 @@ pub(crate) fn check(
                     continue;
                 }
 
-                let Some(signature) = builtins::definitions().functions.get(callee.name.as_str())
-                else {
+                let Some(signature) = builtin_functions.get(callee.name.as_str()) else {
                     continue;
                 };
                 let expected_argument_count = if callee.name == "llPow" { 2 } else { 1 };
@@ -186,9 +203,14 @@ pub(crate) fn check(
 
                 let arguments_valid = call.arguments.iter().zip(&signature.parameters).all(
                     |(argument, parameter)| {
-                        infer_expression_type(argument, scopes, site.scope, functions).is_some_and(
-                            |actual| can_implicitly_convert(&actual, &parameter.type_name),
+                        infer_expression_type_with_builtins(
+                            argument,
+                            scopes,
+                            site.scope,
+                            functions,
+                            builtin_functions,
                         )
+                        .is_some_and(|actual| can_implicitly_convert(&actual, &parameter.type_name))
                     },
                 );
                 if !arguments_valid {

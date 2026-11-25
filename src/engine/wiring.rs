@@ -10,6 +10,7 @@
 use crate::ast::{Ast, AstParseOptions};
 use crate::diagnostic::Diagnostic;
 use crate::lexer::Token;
+use crate::target::{OsslAllowlist, TargetProfile};
 
 /// Legacy parser diagnostics, only consumable by the Legacy semantic pass.
 pub(crate) struct LegacySyntax(Vec<Diagnostic>);
@@ -71,12 +72,31 @@ pub(crate) fn analyze_legacy(tokens: &[Token], syntax: &LegacySyntax) -> Vec<Dia
 
 /// Run the AST semantic analyzer with its own parser findings and an explicit
 /// environment-reliability flag.
+#[cfg(test)]
 pub(crate) fn analyze_ast(
     ast: &Ast,
     syntax: &AstSyntax,
     environment_reliable: bool,
+    target: TargetProfile,
 ) -> Vec<Diagnostic> {
-    crate::ast_semantic::analyze_ast_with_environment(ast, &syntax.0, environment_reliable)
+    crate::ast_semantic::analyze_ast_with_target(ast, &syntax.0, environment_reliable, target)
+}
+
+/// Run target-aware AST semantics with an explicit OSSL allowlist.
+pub(crate) fn analyze_ast_with_target_options(
+    ast: &Ast,
+    syntax: &AstSyntax,
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+) -> Vec<Diagnostic> {
+    crate::ast_semantic::analyze_ast_with_target_options(
+        ast,
+        &syntax.0,
+        environment_reliable,
+        target,
+        ossl_allowlist,
+    )
 }
 
 #[cfg(test)]
@@ -103,7 +123,7 @@ mod tests {
 
         let (ast, ast_syntax) = AstSyntax::parse(&tokens, AstParseOptions::lsl());
         let expected_ast = crate::ast_semantic::analyze_ast(&ast, &ast_syntax.0);
-        let actual_ast = analyze_ast(&ast, &ast_syntax, true);
+        let actual_ast = analyze_ast(&ast, &ast_syntax, true, TargetProfile::default());
         assert_eq!(actual_ast, expected_ast);
 
         // The report is built from these two raw streams by the comparator.
@@ -144,8 +164,18 @@ mod tests {
 
         let (ast, _) = AstSyntax::parse(&tokens, AstParseOptions::lsl());
         let ast_empty = AstSyntax::from_diagnostics(Vec::new());
-        assert!(has_sem002(&analyze_ast(&ast, &ast_empty, true)));
+        assert!(has_sem002(&analyze_ast(
+            &ast,
+            &ast_empty,
+            true,
+            TargetProfile::default()
+        )));
         let ast_sentinel = AstSyntax::from_diagnostics(vec![sentinel]);
-        assert!(!has_sem002(&analyze_ast(&ast, &ast_sentinel, true)));
+        assert!(!has_sem002(&analyze_ast(
+            &ast,
+            &ast_sentinel,
+            true,
+            TargetProfile::default()
+        )));
     }
 }

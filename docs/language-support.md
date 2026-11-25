@@ -40,31 +40,72 @@ User-defined functions can return one of these types or omit a return type when 
 
 Neolint recognizes blocks, empty statements, local declarations, expression statements, assignments, function calls, `if`/`else`, `for`, `while`, `do-while`, `return`, `jump` labels, and state changes.
 
-### State changes and Mono compatibility
+### State changes and runtime profiles
 
 A `state target;` statement is valid in an event handler. A top-level
-user-defined (global) function is a different context: the Mono compiler
-rejects ordinary state changes from these functions with the diagnostic
-`Global functions can't change state`. Neolint's AST engine reports
-`SEM034` for these placements, whether or not the function is currently
-reachable from an event handler.
+user-defined (global) function is a different context: the Second Life Mono
+compiler rejects ordinary state changes from these functions with the
+diagnostic `Global functions can't change state`. The AST engine reports
+`SEM034` for these placements when the selected target is `second-life-mono`.
 
 The Second Life Wiki documents one historical compiler bugfeature:
 `if (condition) state target;` with the state change as the direct, unbraced
-then-branch and no `else`. The same page records that Rand Linden had previously
-said this workaround was no longer valid. A 2026 Mono/LSL-Luau compatibility
-report demonstrates different execution behavior for this exact pattern.
-Neolint therefore reports this narrow shape as `SEM035`, a warning—not as a
-supported workaround or portable LSL. Do not use it in new code; perform state
-transitions in event handlers. Braced branches, `if/else`, and loop bodies do
-not qualify and receive `SEM034`.
+then-branch and no `else`. The same page records that this workaround was
+described as no longer valid. Neolint reports this narrow shape as `SEM035`,
+a warning—not as a supported workaround or portable LSL. Do not use it in new
+code; perform state transitions in event handlers.
 
-These are AST-only diagnostics. Legacy output remains frozen, and Compare still
-compares only `SEM001`–`SEM023`. The rule skips malformed state-change
-statements, incomplete function bodies, unreliable lexical/preprocessor units,
-and inputs exceeding its bounded traversal budget. The official references are
-the [LSL State documentation](https://wiki.secondlife.com/wiki/State) and the
-[2026 Mono/LSL-Luau state-change compatibility report](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
+These two diagnostics are currently enabled only for `second-life-mono`.
+They are deliberately suppressed for LSO, LSL-on-Luau, OpenSim XEngine and
+OpenSim YEngine until the exact compiler/runtime behavior is verified for each
+target. No warning on those targets must not be read as proof that a global
+function state change is valid there. Legacy output remains frozen, and
+Compare retains its existing `SEM001`–`SEM023` parity contract.
+
+The selected target is independent of `--dialect`. Firestorm controls the
+preprocessor dialect and its opt-in parser gates; it is not a runtime. The
+supported initial target selectors are `second-life-mono` (default),
+`second-life-lso`, `second-life-luau`, `opensim-xengine`, and
+`opensim-yengine`.
+
+second-life-luau means LSL compiled to Luau, not the separate SLua language.
+OpenSim XEngine is a historical target: OpenSimulator removed it in 0.9.3.0
+and uses YEngine in that release line.
+
+The AST analyzer has target-specific OpenSim function catalogs derived from
+the upstream ILSL_Api.cs interfaces pinned in data/README.md. The XEngine
+snapshot contains 425 unique ll* names and the YEngine snapshot contains 473.
+SEM047 reports calls to canonical Second Life functions missing from the
+selected OpenSim interface. The catalog reuses canonical LSL signatures where
+names overlap, records OpenSim key-to-string parameter aliases, and
+recognizes the YEngine three-argument llLinkPlaySound overload. It is an
+interface-level compatibility check, not proof that every function has been
+tested in a live simulator. Function behavior may still differ even when the
+name exists.
+
+OpenSim OSSL names are catalogued separately from standard LSL: 231 names for
+XEngine and 265 for YEngine. OSSL calls are not assumed available by default.
+Set ossl_allowlist = strict or pass --strict-ossl to enable checking. A
+repeated ossl_function = osName setting or --ossl-function osName option
+records the project's expectation that a function is enabled on its target
+region. With an explicit allowlist, SEM048 warns when a known OSSL call is
+not listed. This does not inspect the live region's threat levels, security
+configuration or permissions. No OSSL allowlist means no availability claim.
+
+The current OpenSim snapshots cover function names and a narrow set of
+signature adaptations. Runtime-specific event and constant catalogs,
+comprehensive API signature differences, and in-world verification in both
+OpenSim engines remain outstanding. Second Life Mono, LSO and LSL-on-Luau use
+the canonical Linden Lab function catalog for now; this is not a claim of
+complete per-runtime semantic equivalence.
+
+The rule skips malformed state-change statements, incomplete function bodies,
+unreliable lexical/preprocessor units, and inputs exceeding its bounded
+traversal budget. References: the
+[LSL State documentation](https://wiki.secondlife.com/wiki/State),
+[Second Life compiler targets](https://lsl.dev/fundamentals/script-editor/),
+[OpenSimulator scripting documentation](https://opensimulator.dev/wiki/Scripting_Documentation),
+and the [Mono/LSL-Luau state-change compatibility report](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
 
 ### Return statements and unreachable code
 

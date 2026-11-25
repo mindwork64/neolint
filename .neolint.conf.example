@@ -3,3 +3,15 @@ disable = SEM001, SEM003
 
 # Change severity without hiding the diagnostic.
 severity.SEM004 = warning
+
+# Target platform/runtime (independent of preprocessing dialect).
+# Supported: second-life-mono, second-life-lso, second-life-luau,
+#            opensim-xengine, opensim-yengine
+# target = second-life-mono
+
+# OpenSim-only strict OSSL allowlist; omit all functions to allow none.
+# ossl_allowlist = strict
+# Add only APIs expected to be enabled on this region:
+# target = opensim-yengine
+# ossl_function = osGetAgentIP
+# ossl_function = osTeleportAgent

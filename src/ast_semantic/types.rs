@@ -73,7 +73,24 @@ pub(crate) fn infer_expression_type(
     scope: ScopeId,
     functions: &HashMap<String, UserFunctionSignature>,
 ) -> Option<String> {
-    infer_at(expression, scopes, scope, functions, 0)
+    infer_expression_type_with_builtins(
+        expression,
+        scopes,
+        scope,
+        functions,
+        &builtins::definitions().functions,
+    )
+}
+
+/// Infer an expression using a target-specific built-in function catalogue.
+pub(crate) fn infer_expression_type_with_builtins(
+    expression: &Expression,
+    scopes: &ScopeTree,
+    scope: ScopeId,
+    functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, builtins::Signature>,
+) -> Option<String> {
+    infer_at(expression, scopes, scope, functions, builtin_functions, 0)
 }
 
 fn infer_at(
@@ -81,6 +98,7 @@ fn infer_at(
     scopes: &ScopeTree,
     scope: ScopeId,
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, builtins::Signature>,
     depth: usize,
 ) -> Option<String> {
     if depth > MAX_TYPE_DEPTH {
@@ -99,9 +117,14 @@ fn infer_at(
         ExpressionKind::Integer(_) => Some("integer".to_owned()),
         ExpressionKind::Float(_) => Some("float".to_owned()),
         ExpressionKind::String(_) => Some("string".to_owned()),
-        ExpressionKind::Parenthesized(inner) => {
-            infer_at(inner, scopes, scope, functions, depth + 1)
-        }
+        ExpressionKind::Parenthesized(inner) => infer_at(
+            inner,
+            scopes,
+            scope,
+            functions,
+            builtin_functions,
+            depth + 1,
+        ),
         ExpressionKind::List(_) => Some("list".to_owned()),
         ExpressionKind::Vector(_) => Some("vector".to_owned()),
         ExpressionKind::Rotation(_) => Some("rotation".to_owned()),
@@ -115,8 +138,7 @@ fn infer_at(
             if let Some(signature) = functions.get(callee.name.as_str()) {
                 return Some(signature.return_type.clone());
             }
-            builtins::definitions()
-                .functions
+            builtin_functions
                 .get(callee.name.as_str())
                 .map(|signature| signature.return_type.clone())
         }
@@ -137,7 +159,14 @@ fn infer_at(
             }
         }
         ExpressionKind::Unary(unary) => {
-            let operand = infer_at(&unary.operand, scopes, scope, functions, depth + 1)?;
+            let operand = infer_at(
+                &unary.operand,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
             match unary.operator {
                 UnaryOperator::Plus => {
                     matches!(operand.as_str(), "integer" | "float").then_some(operand)
@@ -153,13 +182,34 @@ fn infer_at(
             }
         }
         ExpressionKind::Binary(binary) => {
-            let left = infer_at(&binary.left, scopes, scope, functions, depth + 1)?;
-            let right = infer_at(&binary.right, scopes, scope, functions, depth + 1)?;
+            let left = infer_at(
+                &binary.left,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
+            let right = infer_at(
+                &binary.right,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
             infer_binary_result_type(binary.operator, &left, &right).map(str::to_owned)
         }
         ExpressionKind::Cast(cast) => {
             let target = type_name(cast.ty.kind);
-            let source = infer_at(&cast.operand, scopes, scope, functions, depth + 1);
+            let source = infer_at(
+                &cast.operand,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            );
             match source {
                 Some(source) => {
                     if explicit_cast_supported(&source, target) {

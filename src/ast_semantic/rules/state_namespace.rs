@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, TopLevel};
-use crate::builtins;
+use crate::builtins::Signature;
 use crate::diagnostic::{Diagnostic, Span};
 
 use super::super::scopes::{ScopeTree, SymbolKind};
@@ -15,7 +15,11 @@ const GOD_ONLY_BUILTIN_FUNCTIONS: &[&str] = &[
     "llSetObjectPermMask",
 ];
 
-pub(crate) fn check(ast: &Ast, scopes: &ScopeTree) -> Vec<Diagnostic> {
+pub(crate) fn check_with_builtins(
+    ast: &Ast,
+    scopes: &ScopeTree,
+    builtin_functions: &HashMap<String, Signature>,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let root = scopes.scope(scopes.root());
     let mut globals: HashMap<&str, Span> = HashMap::new();
@@ -93,9 +97,7 @@ pub(crate) fn check(ast: &Ast, scopes: &ScopeTree) -> Vec<Diagnostic> {
                 ),
                 state.name_span,
             ));
-        } else if builtins::definitions()
-            .functions
-            .contains_key(state.name.as_str())
+        } else if builtin_functions.contains_key(state.name.as_str())
             && !GOD_ONLY_BUILTIN_FUNCTIONS.contains(&state.name.as_str())
         {
             diagnostics.push(semantic_error(

@@ -29,6 +29,7 @@ use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{
     lex, parse, AnalysisEngine, AnalysisRun, Diagnostic, DiagnosticFingerprint,
     EngineAnalysisOptions, EngineComparisonReport, PreprocessDialect, PreprocessSettings, Severity,
+    TargetProfile,
 };
 use std::collections::HashSet;
 use std::env;
@@ -91,6 +92,9 @@ fn run() -> i32 {
     let mut severity_overrides = Vec::new();
     let mut preprocess_flag = false;
     let mut dialect_override = None;
+    let mut target_override = None;
+    let mut ossl_functions_cli = Vec::new();
+    let mut strict_ossl_cli = false;
     let mut include_dirs_cli = Vec::new();
     let mut engine_override = None;
     let mut args = env::args().skip(1);
@@ -117,6 +121,29 @@ fn run() -> i32 {
                     "firestorm" => Some(PreprocessDialect::Firestorm),
                     _ => {
                         eprintln!("neolint: invalid dialect '{value}' (expected lsl or firestorm)");
+                        return 2;
+                    }
+                };
+            }
+            "--strict-ossl" => {
+                strict_ossl_cli = true;
+            }
+            "--ossl-function" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: --ossl-function requires an OSSL function name");
+                    return 2;
+                };
+                ossl_functions_cli.push(value);
+            }
+            "--target" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: --target requires a target profile");
+                    return 2;
+                };
+                target_override = match TargetProfile::parse(&value) {
+                    Some(target) => Some(target),
+                    None => {
+                        eprintln!("neolint: invalid target '{value}' (expected second-life-mono, second-life-lso, second-life-luau, opensim-xengine or opensim-yengine)");
                         return 2;
                     }
                 };
@@ -159,6 +186,24 @@ fn run() -> i32 {
                     "firestorm" => Some(PreprocessDialect::Firestorm),
                     _ => {
                         eprintln!("neolint: invalid dialect '{value}' (expected lsl or firestorm)");
+                        return 2;
+                    }
+                };
+            }
+            _ if arg.starts_with("--ossl-function=") => {
+                let value = &arg["--ossl-function=".len()..];
+                if value.is_empty() {
+                    eprintln!("neolint: --ossl-function requires an OSSL function name");
+                    return 2;
+                }
+                ossl_functions_cli.push(value.to_owned());
+            }
+            _ if arg.starts_with("--target=") => {
+                let value = &arg["--target=".len()..];
+                target_override = match TargetProfile::parse(value) {
+                    Some(target) => Some(target),
+                    None => {
+                        eprintln!("neolint: invalid target '{value}' (expected second-life-mono, second-life-lso, second-life-luau, opensim-xengine or opensim-yengine)");
                         return 2;
                     }
                 };
@@ -290,6 +335,26 @@ fn run() -> i32 {
     }
     if let Some(engine) = engine_override {
         config.set_engine(engine);
+    }
+    if let Some(target) = target_override {
+        config.set_target(target);
+    }
+    if strict_ossl_cli {
+        config.enable_ossl_allowlist();
+    }
+    for function in ossl_functions_cli {
+        if let Err(error) = config.add_ossl_function(&function) {
+            eprintln!("neolint: invalid --ossl-function value: {error}");
+            return 2;
+        }
+    }
+    if let Err(error) = config.validate_target_settings() {
+        eprintln!("neolint: invalid target configuration: {error}");
+        return 2;
+    }
+    if config.target_explicit() && config.engine() == AnalysisEngine::Legacy {
+        eprintln!("neolint: target profiles require --engine ast or compare; the frozen Legacy engine is not target-profile aware");
+        return 2;
     }
     if !config.preprocess_enabled() && !config.include_dirs().is_empty() {
         eprintln!("neolint: include directories require --preprocess or --dialect firestorm");
@@ -515,15 +580,20 @@ fn run_units(
             input_failed = true;
             continue;
         };
-        let analysis =
-            match unit.analyze_with_engine_options_suppressed(engine, &options, &suppression) {
-                Ok(analysis) => analysis,
-                Err(error) => {
-                    eprintln!("neolint: cannot analyze unit {index}: {error}");
-                    input_failed = true;
-                    continue;
-                }
-            };
+        let analysis = match unit.analyze_with_target_options_suppressed(
+            engine,
+            &options,
+            config.target(),
+            config.ossl_allowlist(),
+            &suppression,
+        ) {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                eprintln!("neolint: cannot analyze unit {index}: {error}");
+                input_failed = true;
+                continue;
+            }
+        };
         analyzed_units += 1;
 
         if engine == AnalysisEngine::Compare {
@@ -1046,7 +1116,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm; firestorm enables\n                           preprocessing\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm preprocessing; firestorm\n                           enables preprocessing\n    --target <PROFILE>     Select second-life-mono (default), second-life-lso,\n                           second-life-luau, opensim-xengine or opensim-yengine\n                           (independent of --dialect; AST/Compare only)\n    --strict-ossl          Check all known OSSL calls against an explicit allowlist\n                           (requires an OpenSim target)\n    --ossl-function <NAME> Add an OpenSim OSSL function to the project allowlist\n                           (repeatable; requires an OpenSim target)\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n    target = second-life-mono\n    ossl_allowlist = strict\n    ossl_function = osGetAgentIP\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
         env!("CARGO_PKG_VERSION")
     );
 }

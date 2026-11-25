@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::ast::ExpressionKind;
-use crate::builtins;
+use crate::builtins::{self, Signature};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::{CallOwner, CallSite, FunctionId};
@@ -27,11 +27,12 @@ const CONTEXT_DAMAGE: u16 = CONTEXT_ON_DAMAGE | CONTEXT_FINAL_DAMAGE;
 ///
 /// Context is propagated through direct user-function calls. Unknown extension
 /// events do not contribute a context, and unreferenced functions are ignored.
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Vec<Diagnostic> {
     if !environment_reliable
         || syntax_diagnostics
@@ -41,7 +42,7 @@ pub(crate) fn check(
         return Vec::new();
     }
 
-    let Some(contexts) = function_contexts(calls, functions) else {
+    let Some(contexts) = function_contexts(calls, functions, builtin_functions) else {
         return Vec::new();
     };
 
@@ -53,7 +54,7 @@ pub(crate) fn check(
         if functions.contains_key(callee.name.as_str()) {
             continue;
         }
-        let Some(allowed) = allowed_context(callee.name.as_str()) else {
+        let Some(allowed) = allowed_context(callee.name.as_str(), builtin_functions) else {
             continue;
         };
 
@@ -89,6 +90,7 @@ pub(crate) fn check(
 fn function_contexts(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Option<HashMap<FunctionId, u16>> {
     if functions.len() > MAX_CONTEXT_NODES {
         return None;
@@ -116,10 +118,7 @@ fn function_contexts(
         let ExpressionKind::Identifier(callee) = &site.call.callee.kind else {
             continue;
         };
-        if builtins::definitions()
-            .functions
-            .contains_key(callee.name.as_str())
-        {
+        if builtin_functions.contains_key(callee.name.as_str()) {
             continue;
         }
         let Some(&target) = function_ids.get(callee.name.as_str()) else {
@@ -201,8 +200,8 @@ fn event_context(name: &str) -> Option<u16> {
 }
 
 /// Event masks for canonical functions that require detection data.
-fn allowed_context(name: &str) -> Option<u16> {
-    if !builtins::definitions().functions.contains_key(name) {
+fn allowed_context(name: &str, builtin_functions: &HashMap<String, Signature>) -> Option<u16> {
+    if !builtin_functions.contains_key(name) {
         return None;
     }
 
@@ -236,11 +235,14 @@ mod tests {
         assert!(!detected.is_empty());
         for name in detected {
             assert!(
-                allowed_context(name).is_some(),
+                allowed_context(name, &definitions.functions).is_some(),
                 "missing event-context policy for {name}"
             );
         }
-        assert_eq!(allowed_context("llAdjustDamage"), Some(CONTEXT_ON_DAMAGE));
+        assert_eq!(
+            allowed_context("llAdjustDamage", &definitions.functions),
+            Some(CONTEXT_ON_DAMAGE)
+        );
         assert!(definitions.events.contains_key("on_damage"));
         assert!(definitions.events.contains_key("final_damage"));
     }

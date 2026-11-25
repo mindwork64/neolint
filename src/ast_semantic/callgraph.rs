@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, ExpressionKind, FunctionDeclaration, TopLevel};
+#[cfg(test)]
 use crate::builtins;
+use crate::builtins::Signature;
 use crate::diagnostic::Span;
 
 use super::calls::{CallOwner, CallSite, FunctionId};
@@ -71,18 +73,20 @@ fn suppressed() -> Reachability {
 }
 
 /// Compute which user functions no event handler or global initializer reaches.
-pub(crate) fn unreachable_functions(
+pub(crate) fn unreachable_functions_with_builtins(
     ast: &Ast,
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Reachability {
-    build(ast, calls, functions, PRODUCTION_LIMITS)
+    build(ast, calls, functions, builtin_functions, PRODUCTION_LIMITS)
 }
 
 fn build(
     ast: &Ast,
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, Signature>,
     limits: Limits,
 ) -> Reachability {
     let mut work = 0usize;
@@ -147,10 +151,7 @@ fn build(
         // The existing call analyzer resolves canonical built-ins independently
         // of the user-function signature map. A same-named user definition must
         // not become reachable merely because a built-in call uses that spelling.
-        if builtins::definitions()
-            .functions
-            .contains_key(callee.name.as_str())
-        {
+        if builtin_functions.contains_key(callee.name.as_str()) {
             continue;
         }
         let Some(&target) = index_by_name.get(callee.name.as_str()) else {
@@ -227,7 +228,13 @@ mod tests {
         let scopes = ScopeTree::build(&ast);
         let calls = collect_calls(&ast, &scopes);
         let functions = collect_user_functions(&ast);
-        build(&ast, &calls, &functions, limits)
+        build(
+            &ast,
+            &calls,
+            &functions,
+            &builtins::definitions().functions,
+            limits,
+        )
     }
 
     fn names(reachability: &Reachability) -> Vec<&str> {
@@ -360,7 +367,13 @@ mod tests {
         let scopes = ScopeTree::build(&ast);
         let calls = collect_calls(&ast, &scopes);
         let functions = collect_user_functions(&ast);
-        let result = build(&ast, &calls, &functions, LIMITS);
+        let result = build(
+            &ast,
+            &calls,
+            &functions,
+            &builtins::definitions().functions,
+            LIMITS,
+        );
         assert!(!result.suppressed);
         assert_eq!(names(&result), vec!["helper"]);
     }
@@ -379,7 +392,13 @@ mod tests {
         let scopes = ScopeTree::build(&ast);
         let calls = collect_calls(&ast, &scopes);
         let functions = collect_user_functions(&ast);
-        let result = build(&ast, &calls, &functions, LIMITS);
+        let result = build(
+            &ast,
+            &calls,
+            &functions,
+            &builtins::definitions().functions,
+            LIMITS,
+        );
         assert!(!result.suppressed);
         assert!(result.unreachable.is_empty());
     }

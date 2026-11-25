@@ -8,8 +8,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+use crate::target::{ScriptRuntime, TargetProfile};
+
 const BUILTIN_SOURCE: &str = include_str!("../data/lsl-builtins.txt");
 const DEPRECATED_SOURCE: &str = include_str!("../data/lsl-deprecated.txt");
+const OPENSIM_XENGINE_LSL: &str = include_str!("../data/opensim-xengine-ll-functions.txt");
+const OPENSIM_YENGINE_LSL: &str = include_str!("../data/opensim-yengine-ll-functions.txt");
+const OPENSIM_XENGINE_KEY_STRING_PARAMS: &str =
+    include_str!("../data/opensim-xengine-ll-key-string-params.txt");
+const OPENSIM_YENGINE_KEY_STRING_PARAMS: &str =
+    include_str!("../data/opensim-yengine-ll-key-string-params.txt");
+const OPENSIM_XENGINE_OSSL: &str = include_str!("../data/opensim-xengine-ossl-functions.txt");
+const OPENSIM_YENGINE_OSSL: &str = include_str!("../data/opensim-yengine-ossl-functions.txt");
 
 /// One parameter of a canonical built-in function or event signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +66,10 @@ pub struct LslDefinitions {
 }
 
 static DEFINITIONS: OnceLock<LslDefinitions> = OnceLock::new();
+static OPENSIM_XENGINE_FUNCTIONS: OnceLock<HashMap<String, Signature>> = OnceLock::new();
+static OPENSIM_YENGINE_FUNCTIONS: OnceLock<HashMap<String, Signature>> = OnceLock::new();
+static OPENSIM_XENGINE_OSSL_FUNCTIONS: OnceLock<HashSet<String>> = OnceLock::new();
+static OPENSIM_YENGINE_OSSL_FUNCTIONS: OnceLock<HashSet<String>> = OnceLock::new();
 
 /// Return the built-in LSL definitions vendored in this build.
 ///
@@ -63,6 +77,100 @@ static DEFINITIONS: OnceLock<LslDefinitions> = OnceLock::new();
 /// It is parsed once and then shared read-only for the process lifetime.
 pub fn definitions() -> &'static LslDefinitions {
     DEFINITIONS.get_or_init(|| parse_definitions(BUILTIN_SOURCE))
+}
+
+/// Return the built-in LSL function signatures exposed by the selected runtime.
+///
+/// Second Life profiles use the canonical Linden Lab catalogue. OpenSim
+/// profiles are filtered against the pinned runtime interface snapshots.
+pub fn functions_for_target(target: TargetProfile) -> &'static HashMap<String, Signature> {
+    match target.runtime() {
+        ScriptRuntime::XEngine => OPENSIM_XENGINE_FUNCTIONS.get_or_init(|| {
+            filter_functions(
+                &definitions().functions,
+                OPENSIM_XENGINE_LSL,
+                OPENSIM_XENGINE_KEY_STRING_PARAMS,
+            )
+        }),
+        ScriptRuntime::YEngine => OPENSIM_YENGINE_FUNCTIONS.get_or_init(|| {
+            filter_functions(
+                &definitions().functions,
+                OPENSIM_YENGINE_LSL,
+                OPENSIM_YENGINE_KEY_STRING_PARAMS,
+            )
+        }),
+        ScriptRuntime::Mono | ScriptRuntime::Lso | ScriptRuntime::Luau => &definitions().functions,
+    }
+}
+
+/// Return the known OSSL interface names for an OpenSim runtime.
+///
+/// This list is only an API catalogue. It does not mean that a region has
+/// enabled any of these functions in its security configuration.
+pub fn ossl_functions_for_target(target: TargetProfile) -> Option<&'static HashSet<String>> {
+    match target.runtime() {
+        ScriptRuntime::XEngine => Some(
+            OPENSIM_XENGINE_OSSL_FUNCTIONS
+                .get_or_init(|| parse_function_names(OPENSIM_XENGINE_OSSL)),
+        ),
+        ScriptRuntime::YEngine => Some(
+            OPENSIM_YENGINE_OSSL_FUNCTIONS
+                .get_or_init(|| parse_function_names(OPENSIM_YENGINE_OSSL)),
+        ),
+        ScriptRuntime::Mono | ScriptRuntime::Lso | ScriptRuntime::Luau => None,
+    }
+}
+
+fn filter_functions(
+    canonical: &HashMap<String, Signature>,
+    supported_names: &str,
+    key_string_parameters: &str,
+) -> HashMap<String, Signature> {
+    let mut functions: HashMap<_, _> = parse_function_names(supported_names)
+        .into_iter()
+        .filter_map(|name| {
+            canonical
+                .get(&name)
+                .cloned()
+                .map(|signature| (name, signature))
+        })
+        .collect();
+
+    // OpenSim exposes several LSL key parameters as C# string parameters.
+    // OpenSim's LSL key wrapper has an implicit conversion to System.String,
+    // so retain these runtime-specific parameter aliases in the signature set.
+    for (name, index) in parse_parameter_overrides(key_string_parameters) {
+        if let Some(parameter) = functions
+            .get_mut(&name)
+            .and_then(|signature| signature.parameters.get_mut(index))
+        {
+            if parameter.type_name == "key" {
+                parameter.type_name = "string".to_owned();
+            }
+        }
+    }
+    functions
+}
+
+fn parse_parameter_overrides(source: &str) -> Vec<(String, usize)> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let (name, index) = line.split_once('|')?;
+            Some((name.to_owned(), index.parse().ok()?))
+        })
+        .collect()
+}
+
+fn parse_function_names(source: &str) -> HashSet<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_definitions(source: &str) -> LslDefinitions {
@@ -221,6 +329,59 @@ mod tests {
             .iter()
             .all(|name| definitions.functions.contains_key(name)));
         assert!(!definitions.deprecated_functions.contains("ll.GetPos"));
+    }
+
+    #[test]
+    fn target_function_catalogues_match_pinned_opensim_interfaces() {
+        let xengine = functions_for_target(TargetProfile::parse("opensim-xengine").unwrap());
+        let yengine = functions_for_target(TargetProfile::parse("opensim-yengine").unwrap());
+        assert_eq!(xengine.len(), 425);
+        assert_eq!(yengine.len(), 473);
+        assert!(xengine.contains_key("llOwnerSay"));
+        assert!(yengine.contains_key("llOwnerSay"));
+        assert!(!xengine.contains_key("llGetExperienceDetails"));
+        assert!(!yengine.contains_key("llGetExperienceDetails"));
+        assert!(!xengine.contains_key("llGetCameraFOV"));
+        assert!(yengine.contains_key("llGetCameraFOV"));
+        assert!(!xengine.contains_key("llTransferOwnership"));
+        assert!(!yengine.contains_key("llTransferOwnership"));
+        assert_eq!(
+            definitions().functions["llListen"].parameters[2].type_name,
+            "key"
+        );
+        assert_eq!(xengine["llListen"].parameters[2].type_name, "string");
+        assert_eq!(yengine["llListen"].parameters[2].type_name, "string");
+        assert_eq!(
+            xengine["llGetBoundingBox"].parameters[0].type_name,
+            "string"
+        );
+    }
+
+    #[test]
+    fn second_life_profiles_keep_the_full_canonical_function_catalogue() {
+        let canonical = definitions().functions.len();
+        for target in ["second-life-mono", "second-life-lso", "second-life-luau"] {
+            assert_eq!(
+                functions_for_target(TargetProfile::parse(target).unwrap()).len(),
+                canonical
+            );
+        }
+    }
+
+    #[test]
+    fn ossl_catalogues_are_distinct_from_standard_lsl_and_runtime_specific() {
+        let xengine =
+            ossl_functions_for_target(TargetProfile::parse("opensim-xengine").unwrap()).unwrap();
+        let yengine =
+            ossl_functions_for_target(TargetProfile::parse("opensim-yengine").unwrap()).unwrap();
+        assert_eq!(xengine.len(), 231);
+        assert_eq!(yengine.len(), 265);
+        assert!(xengine.contains("osGetAgentIP"));
+        assert!(yengine.contains("osGetAgentIP"));
+        assert!(!xengine.contains("osAESDecrypt"));
+        assert!(yengine.contains("osAESDecrypt"));
+        assert!(!xengine.contains("osDefinitelyNotAFunction"));
+        assert!(ossl_functions_for_target(TargetProfile::default()).is_none());
     }
 
     #[test]

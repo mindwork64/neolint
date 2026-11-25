@@ -12,6 +12,7 @@ severity.SEM004 = warning
 # AST is the default in v1.1.0 and later.
 # Set this to legacy only when preserving the v1.0.0 engine is required.
 engine = ast
+target = second-life-mono
 ```
 
 Blank lines and text after `#` are ignored. Leading and trailing whitespace is ignored.
@@ -26,18 +27,94 @@ Blank lines and text after `#` are ignored. Leading and trailing whitespace is i
 | `dialect = lsl\|firestorm` | Select the preprocessing dialect; `firestorm` enables preprocessing. |
 | `include_dir = PATH` | Add an include search directory (repeatable). |
 | `engine = legacy\|ast\|compare` | Select the analysis engine; `ast` is the default, and `legacy` restores the v1.0.0 analysis pipeline. |
+| `target = PROFILE` | Select a platform/runtime profile; defaults to `second-life-mono`. Independent of the preprocessing dialect. |
+| `ossl_allowlist = strict` | Enable OSSL checking even with an empty allowlist; all known OSSL calls warn unless added below. Requires an OpenSim target. |
+| `ossl_function = NAME` | Add an OSSL function to the project's expected-enabled allowlist (repeatable; requires an OpenSim target). |
 
-Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, and invalid engine values cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `ast`; add `engine = legacy` to restore the v1.0.0 Legacy pipeline.
+Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, invalid engine values, invalid target profiles, malformed OSSL names, and OSSL names absent from the selected runtime interface cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `ast`; add `engine = legacy` to restore the v1.0.0 Legacy pipeline.
 
 Multiple `severity.*` lines, multiple `disable` lines, and multiple `include_dir` lines are supported. Disabled-rule filtering and severity overrides are applied only to displayed diagnostics, before CLI overrides. Include directories preserve file order; quoted includes search the including file's directory first. `#pragma once` is a neolint convenience, not a verified Firestorm guarantee.
 
 ## Precedence
 
 1. Default diagnostic severity and the default `engine = ast`.
-2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, and `engine`.
-3. Command-line `--disable`, `--severity`, `--dialect`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
+2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, `engine`, and `target`.
+3. Command-line `--disable`, `--severity`, `--dialect`, `--target`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
 
-The command line wins for the same rule. A non-empty CLI include-directory list replaces the configured list; CLI `--dialect` overrides the configured dialect; CLI `--engine` overrides the configured engine. Rule disabling and severity overrides affect only the displayed diagnostic stream: a disabled rule does not appear in that stream, and a severity of `warning` or `info` does not cause exit code 1 unless changed to `error`. In `--engine compare` mode the parity report is computed from the raw pre-configuration streams, so it can still report a disabled rule and select exit code 3; severity overrides do not change the report's raw severities.
+The command line wins for the same rule. A non-empty CLI include-directory list replaces the configured list; CLI `--dialect` overrides the configured dialect; CLI `--target` overrides the configured target; CLI `--strict-ossl` enables an empty or populated OSSL allowlist; CLI `--ossl-function` entries are added to the configured OSSL allowlist; CLI `--engine` overrides the configured engine. Rule disabling and severity overrides affect only the displayed diagnostic stream: a disabled rule does not appear in that stream, and a severity of `warning` or `info` does not cause exit code 1 unless changed to `error`. In `--engine compare` mode the parity report is computed from the raw pre-configuration streams, so it can still report a disabled rule and select exit code 3; severity overrides do not change the report's raw severities.
+
+
+## Target platform and runtime profiles
+
+The target profile is separate from `dialect`. The dialect controls source
+preprocessing and Firestorm syntax gates; the target selects the intended
+simulator platform and script runtime.
+
+Supported selectors:
+
+| Selector | Platform | Runtime |
+| --- | --- | --- |
+| `second-life-mono` | Second Life | Mono (default) |
+| `second-life-lso` | Second Life | Legacy LSO |
+| `second-life-luau` | Second Life | LSL compiled for Luau |
+| `opensim-xengine` | OpenSimulator | Historical XEngine (OpenSim versions before 0.9.3.0) |
+| `opensim-yengine` | OpenSimulator | YEngine (OpenSim 0.9.3.0+) |
+
+Use `--target PROFILE` or `target = PROFILE`. For example:
+
+```sh
+neolint --target opensim-yengine script.lsl
+neolint --dialect firestorm --target second-life-mono script.lsl
+neolint --target opensim-yengine --ossl-function osGetAgentIP script.lsl
+```
+
+Firestorm is not a runtime. Combining `--dialect firestorm` with an OpenSim
+target does not mean that OpenSim implements every Firestorm extension; it
+only selects the source preprocessor dialect independently of the selected
+runtime. The current target-aware rule slice is deliberately narrow:
+`SEM034`/`SEM035` are emitted only for the verified Second Life Mono profile.
+Other targets fail closed for those diagnostics until their behavior is
+independently verified. Their silence is not proof that the corresponding
+construct is accepted by the target compiler.
+
+The frozen Legacy engine is not target-profile aware. Selecting a `target`
+with `--engine legacy` is rejected rather than silently ignored. AST is the
+default; Compare passes the target to its AST analyzer while retaining the
+existing Legacy comparison stream.
+
+The AST analyzer uses pinned, runtime-specific OpenSim LSL function-name
+snapshots. It recognizes 425 XEngine and 473 YEngine ll* API names; SEM047
+reports a call to a canonical Second Life LSL function absent from the selected
+OpenSim interface. Common signatures reuse canonical Second Life metadata,
+with OpenSim key/string parameter aliases and the YEngine llLinkPlaySound
+three-argument overload represented explicitly. OpenSim event and constant
+catalogues are not yet runtime-specific, and interface presence does not prove
+that every function has been verified in a running region.
+
+OSSL is separate from standard LSL. The pinned interfaces contain 231 XEngine
+and 265 YEngine OSSL function names, but this is not a promise that a region
+enables them. Region threat levels, security configuration and permissions
+control actual availability. By default NeoLint makes no OSSL availability
+assumption. Set ossl_allowlist = strict (or pass --strict-ossl) to enable
+checking. Repeated ossl_function = NAME entries (or --ossl-function NAME)
+form a project-side allowlist of functions expected to be enabled. When that
+list is explicit, SEM048 warns about known OSSL calls omitted from it. The
+allowlist does not query or prove the live region configuration.
+
+Second Life Mono, LSO and LSL-on-Luau currently share the canonical Linden Lab
+function catalogue; full per-runtime event/API signature validation is not
+claimed. The selected target is an analysis target, not a live compiler or
+simulator connection.
+
+Second Life's `second-life-luau` selector means **LSL compiled for Luau**; it
+does not select the separate SLua language. The editor exposes the LSL-on-Luau
+compiler target only on regions that advertise Lua script support. OpenSim
+0.9.3.0 removed XEngine as part of its .NET 8 transition; `opensim-xengine`
+exists only to analyze legacy deployments.
+
+References: [Second Life compiler targets](https://lsl.dev/fundamentals/script-editor/),
+[OpenSimulator scripting documentation](https://opensimulator.dev/wiki/Scripting_Documentation),
+[Second Life State reference](https://wiki.secondlife.com/wiki/State).
 
 ## Engine migration (v1.1.0)
 

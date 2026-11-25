@@ -2760,3 +2760,200 @@ fn compare_tokens_come_from_the_single_lex() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn target_profiles_are_independent_from_preprocessor_dialects() {
+    let directory = temporary_directory();
+    let source = directory.join("state_change.lsl");
+    fs::write(
+        &source,
+        "helper(integer condition) { if (condition) state running; state default; } default { state_entry() { } } state running { state_entry() { } }\n",
+    )
+    .unwrap();
+    let source_arg = source.to_str().unwrap();
+
+    let mono = run_args(&["--target", "second-life-mono", source_arg]);
+    assert_eq!(
+        mono.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&mono.stdout)
+    );
+    let mono_stdout = String::from_utf8_lossy(&mono.stdout);
+    assert!(mono_stdout.contains("SEM034"), "{mono_stdout}");
+    assert!(mono_stdout.contains("SEM035"), "{mono_stdout}");
+
+    for target in [
+        "second-life-lso",
+        "second-life-luau",
+        "opensim-xengine",
+        "opensim-yengine",
+    ] {
+        let output = run_args(&["--target", target, source_arg]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "target {target}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("SEM034"), "target {target}: {stdout}");
+        assert!(!stdout.contains("SEM035"), "target {target}: {stdout}");
+    }
+
+    let invalid = run_args(&["--target", "firestorm", source_arg]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid target"));
+
+    let legacy = run_args(&[
+        "--engine",
+        "legacy",
+        "--target",
+        "second-life-lso",
+        source_arg,
+    ]);
+    assert_eq!(legacy.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("not target-profile aware"));
+
+    let config = directory.join(".neolint.conf");
+    fs::write(&config, "dialect = firestorm\ntarget = opensim-yengine\n").unwrap();
+    let configured = run_args(&["--config", config.to_str().unwrap(), source_arg]);
+    assert_eq!(configured.status.code(), Some(0));
+    let configured_stdout = String::from_utf8_lossy(&configured.stdout);
+    assert!(!configured_stdout.contains("SEM034"), "{configured_stdout}");
+    assert!(!configured_stdout.contains("SEM035"), "{configured_stdout}");
+
+    // Explicit target selection is orthogonal to preprocessing: Firestorm
+    // still controls its own syntax gate while the runtime stays Mono.
+    let firestorm_mono = run_args(&[
+        "--dialect",
+        "firestorm",
+        "--target=second-life-mono",
+        source_arg,
+    ]);
+    assert_eq!(firestorm_mono.status.code(), Some(1));
+    let firestorm_stdout = String::from_utf8_lossy(&firestorm_mono.stdout);
+    assert!(firestorm_stdout.contains("SEM034"), "{firestorm_stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn opensim_target_api_and_ossl_allowlist_are_exposed_through_cli_and_config() {
+    let directory = temporary_directory();
+    let source = directory.join("opensim_api.lsl");
+    fs::write(
+        &source,
+        "default { state_entry() { osGetAgentIP(llGetOwner()); osTeleportAgent(llGetOwner(), ZERO_VECTOR, ZERO_ROTATION); llGetCameraFOV(); llGetExperienceDetails(NULL_KEY); llTransferOwnership(NULL_KEY, 0, []); } }\n",
+    )
+    .unwrap();
+    let source_arg = source.to_str().unwrap();
+
+    let one_allowed = run_args(&[
+        "--target",
+        "opensim-yengine",
+        "--ossl-function",
+        "osGetAgentIP",
+        source_arg,
+    ]);
+    assert_eq!(one_allowed.status.code(), Some(1));
+    let one_allowed_stdout = String::from_utf8_lossy(&one_allowed.stdout);
+    assert!(
+        one_allowed_stdout.contains("warning[SEM048]"),
+        "{one_allowed_stdout}"
+    );
+    assert!(
+        one_allowed_stdout.contains("SEM047"),
+        "{one_allowed_stdout}"
+    );
+
+    let both_allowed = run_args(&[
+        "--target=opensim-yengine",
+        "--ossl-function=osGetAgentIP",
+        "--ossl-function=osTeleportAgent",
+        source_arg,
+    ]);
+    assert_eq!(both_allowed.status.code(), Some(1));
+    let both_allowed_stdout = String::from_utf8_lossy(&both_allowed.stdout);
+    assert!(
+        !both_allowed_stdout.contains("SEM048"),
+        "{both_allowed_stdout}"
+    );
+    assert!(
+        both_allowed_stdout.contains("SEM047"),
+        "{both_allowed_stdout}"
+    );
+
+    let wrong_platform = run_args(&["--ossl-function", "osGetAgentIP", source_arg]);
+    assert_eq!(wrong_platform.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&wrong_platform.stderr).contains("require an OpenSim target"));
+
+    let wrong_runtime = run_args(&[
+        "--target",
+        "opensim-xengine",
+        "--ossl-function",
+        "osAESDecrypt",
+        source_arg,
+    ]);
+    assert_eq!(wrong_runtime.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&wrong_runtime.stderr)
+        .contains("not present in the selected XEngine interface"));
+
+    let config = directory.join(".neolint.conf");
+    fs::write(
+        &config,
+        "target = opensim-yengine\nossl_function = osGetAgentIP\nossl_function = osTeleportAgent\n",
+    )
+    .unwrap();
+    let configured = run_args(&["--config", config.to_str().unwrap(), source_arg]);
+    assert_eq!(configured.status.code(), Some(1));
+    let configured_stdout = String::from_utf8_lossy(&configured.stdout);
+    assert!(!configured_stdout.contains("SEM048"), "{configured_stdout}");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn strict_ossl_option_enables_empty_allowlist_checks() {
+    let directory = temporary_directory();
+    let source = directory.join("strict_ossl.lsl");
+    fs::write(
+        &source,
+        "default { state_entry() { osGetAgentIP(llGetOwner()); } }\n",
+    )
+    .unwrap();
+    let source_arg = source.to_str().unwrap();
+
+    let strict = run_args(&["--target", "opensim-yengine", "--strict-ossl", source_arg]);
+    assert_eq!(strict.status.code(), Some(0));
+    let strict_stdout = String::from_utf8_lossy(&strict.stdout);
+    assert!(strict_stdout.contains("warning[SEM048]"), "{strict_stdout}");
+
+    let strict_and_allowed = run_args(&[
+        "--target",
+        "opensim-yengine",
+        "--strict-ossl",
+        "--ossl-function",
+        "osGetAgentIP",
+        source_arg,
+    ]);
+    assert_eq!(strict_and_allowed.status.code(), Some(0));
+    let allowed_stdout = String::from_utf8_lossy(&strict_and_allowed.stdout);
+    assert!(!allowed_stdout.contains("SEM048"), "{allowed_stdout}");
+
+    let config = directory.join(".neolint.conf");
+    fs::write(
+        &config,
+        "target = opensim-yengine\nossl_allowlist = strict\n",
+    )
+    .unwrap();
+    let configured = run_args(&["--config", config.to_str().unwrap(), source_arg]);
+    assert_eq!(configured.status.code(), Some(0));
+    let configured_stdout = String::from_utf8_lossy(&configured.stdout);
+    assert!(
+        configured_stdout.contains("warning[SEM048]"),
+        "{configured_stdout}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}

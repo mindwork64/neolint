@@ -44,12 +44,16 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - Boost.Wave `#pragma once` behavior is source-audited and tested.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
+- Target profiles separate platform/runtime from the preprocessing dialect. Supported selectors: second-life-mono (default), second-life-lso, second-life-luau, opensim-xengine (historical) and opensim-yengine. Firestorm remains a source/preprocessor dialect, never a runtime.
+- SEM034/SEM035 are enabled only for the verified Second Life Mono target; unverified runtimes fail closed. OpenSim ll* interface snapshots are pinned in data/ (425 XEngine names, 473 YEngine names); SEM047 reports canonical Second Life LSL function calls absent from the selected OpenSim interface. Function signatures reuse canonical metadata with explicit OpenSim key-to-string aliases and the YEngine three-argument llLinkPlaySound overload.
+- OSSL is catalogued separately (231 XEngine names, 265 YEngine names). OsslAllowlist supports an explicitly empty strict mode (ossl_allowlist = strict / --strict-ossl) plus repeatable ossl_function / --ossl-function entries for project-side expected-enabled functions. SEM048 warns for known OSSL calls outside an explicit allowlist; it does not query actual region settings.
+- Target profiles are not yet full runtime compatibility claims: target-specific event/constant catalogs, exhaustive API signature/behavior differences and in-world runtime verification remain outstanding. SL Mono/LSO/Luau currently share the canonical SL function catalogue.
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM046` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM048` are AST-only.
 
 ## Architecture
 
-CLI → `AnalysisRun` → `AnalysisUnit` → SourceManager / optional preprocessor →
+CLI/config target profile + preprocessing dialect → `AnalysisRun` → `AnalysisUnit` → SourceManager / optional preprocessor →
 PreparedSource + SourceMap → Legacy, AST or Compare → source-map diagnostic
 rendering → suppression and bounded display (`PRE039`).
 

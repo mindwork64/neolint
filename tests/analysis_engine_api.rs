@@ -870,3 +870,57 @@ fn sem046_is_ast_only_and_does_not_change_legacy_or_compare_streams() {
     );
     assert_eq!(compare.comparison().unwrap().by_rule.len(), 23);
 }
+
+#[test]
+fn explicit_target_profiles_control_runtime_specific_ast_rules() {
+    use neolint::{OsslAllowlist, TargetProfile};
+
+    let source = "helper(integer condition) { if (condition) state running; state default; } default { state_entry() { } } state running { state_entry() { } }";
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("target.lsl", source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let options = EngineAnalysisOptions::default();
+    let suppression = DisplaySuppression::default();
+
+    let mono = unit
+        .analyze_with_target_options_suppressed(
+            AnalysisEngine::Ast,
+            &options,
+            TargetProfile::parse("second-life-mono").unwrap(),
+            &OsslAllowlist::default(),
+            &suppression,
+        )
+        .unwrap();
+    let mono_codes: Vec<_> = mono
+        .diagnostics()
+        .iter()
+        .map(|item| item.diagnostic().code)
+        .filter(|code| matches!(*code, "SEM034" | "SEM035"))
+        .collect();
+    assert_eq!(mono_codes, vec!["SEM035", "SEM034"]);
+
+    for target_name in [
+        "second-life-lso",
+        "second-life-luau",
+        "opensim-xengine",
+        "opensim-yengine",
+    ] {
+        let target = TargetProfile::parse(target_name).unwrap();
+        let analysis = unit
+            .analyze_with_target_options_suppressed(
+                AnalysisEngine::Ast,
+                &options,
+                target,
+                &OsslAllowlist::default(),
+                &suppression,
+            )
+            .unwrap();
+        assert!(
+            analysis
+                .diagnostics()
+                .iter()
+                .all(|item| { !matches!(item.diagnostic().code, "SEM034" | "SEM035") }),
+            "unexpected Mono-specific diagnostic for {target_name}"
+        );
+    }
+}

@@ -7,8 +7,8 @@ use crate::diagnostic::resolve::{LegacyDiagnostic, PreparedDiagnostic, RenderedD
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::compare::compare_semantic_diagnostics;
 use crate::engine::wiring::{
-    analyze_ast as analyze_ast_semantics, analyze_legacy as analyze_legacy_semantics, AstSyntax,
-    LegacySyntax,
+    analyze_ast_with_target_options as analyze_ast_semantics,
+    analyze_legacy as analyze_legacy_semantics, AstSyntax, LegacySyntax,
 };
 use crate::engine::{
     AnalysisEngine, DisplaySuppression, EngineAnalysisError, EngineAnalysisOptions,
@@ -19,6 +19,7 @@ use crate::semantic::analyze_with_syntax_diagnostics;
 use crate::source::file::{AnalysisUnitId, SourceFileKind, SourceId};
 use crate::source::manager::SourceManager;
 use crate::source::map::SpanError;
+use crate::target::{OsslAllowlist, TargetProfile};
 use std::sync::Arc;
 
 /// One independent analysis of a single root source.
@@ -102,7 +103,14 @@ impl AnalysisUnit {
         let suppression = DisplaySuppression::default();
         if let Some(prepared) = &self.prepared {
             return Ok(self
-                .analyze_prepared(prepared, AnalysisEngine::Legacy, false, &suppression)?
+                .analyze_prepared(
+                    prepared,
+                    AnalysisEngine::Legacy,
+                    false,
+                    TargetProfile::default(),
+                    &OsslAllowlist::default(),
+                    &suppression,
+                )?
                 .into_diagnostics());
         }
         let (rendered, _tokens) = self.analyze_plain(false, &suppression)?;
@@ -142,11 +150,33 @@ impl AnalysisUnit {
         options: &EngineAnalysisOptions,
         suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        self.analyze_with_target_options_suppressed(
+            engine,
+            options,
+            TargetProfile::default(),
+            &OsslAllowlist::default(),
+            suppression,
+        )
+    }
+
+    /// Run engine-aware analysis for an explicit platform/runtime profile.
+    ///
+    /// Existing APIs continue to select the default Second Life Mono profile.
+    pub fn analyze_with_target_options_suppressed(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+        target: TargetProfile,
+        ossl_allowlist: &OsslAllowlist,
+        suppression: &DisplaySuppression,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
         if let Some(prepared) = &self.prepared {
             return Ok(self.analyze_prepared(
                 prepared,
                 engine,
                 options.collect_tokens,
+                target,
+                ossl_allowlist,
                 suppression,
             )?);
         }
@@ -221,6 +251,8 @@ impl AnalysisUnit {
         prepared: &PreparedSource,
         engine: AnalysisEngine,
         collect_tokens: bool,
+        target: TargetProfile,
+        ossl_allowlist: &OsslAllowlist,
         suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, SpanError> {
         let mut rendered = Vec::new();
@@ -259,7 +291,13 @@ impl AnalysisUnit {
             }
             AnalysisEngine::Ast => {
                 let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax, environment_reliable);
+                let ast_semantic = analyze_ast_semantics(
+                    &ast,
+                    &ast_syntax,
+                    environment_reliable,
+                    target,
+                    ossl_allowlist,
+                );
                 let mut display = lexical;
                 display.extend(ast_syntax.into_diagnostics());
                 display.extend(ast_semantic);
@@ -269,7 +307,13 @@ impl AnalysisUnit {
                 let legacy_syntax = LegacySyntax::parse(&tokens);
                 let legacy_semantic = analyze_legacy_semantics(&tokens, &legacy_syntax);
                 let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(&ast, &ast_syntax, environment_reliable);
+                let ast_semantic = analyze_ast_semantics(
+                    &ast,
+                    &ast_syntax,
+                    environment_reliable,
+                    target,
+                    ossl_allowlist,
+                );
                 comparison = Some(compare_semantic_diagnostics(
                     &legacy_semantic,
                     &ast_semantic,

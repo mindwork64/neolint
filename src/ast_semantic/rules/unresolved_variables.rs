@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, ExpressionKind, TopLevel};
-use crate::builtins;
+use crate::builtins::{self, Signature};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::CallSite;
@@ -23,15 +23,20 @@ impl ByteRange {
     }
 }
 
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     ast: &Ast,
     sites: &[ExpressionSite<'_>],
     calls: &[CallSite<'_>],
     scopes: &ScopeTree,
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Vec<Diagnostic> {
     let mut excluded = unknown_event_ranges(ast);
-    excluded.extend(unknown_call_argument_ranges(calls, functions));
+    excluded.extend(unknown_call_argument_ranges(
+        calls,
+        functions,
+        builtin_functions,
+    ));
     let mut callees = HashSet::new();
     for site in calls {
         if let ExpressionKind::Identifier(callee) = &site.call.callee.kind {
@@ -104,6 +109,7 @@ fn unknown_event_ranges(ast: &Ast) -> Vec<ByteRange> {
 fn unknown_call_argument_ranges(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &HashMap<String, Signature>,
 ) -> Vec<ByteRange> {
     let definitions = builtins::definitions();
     let mut ranges = Vec::new();
@@ -111,7 +117,7 @@ fn unknown_call_argument_ranges(
         let ExpressionKind::Identifier(callee) = &site.call.callee.kind else {
             continue;
         };
-        if definitions.functions.contains_key(callee.name.as_str())
+        if builtin_functions.contains_key(callee.name.as_str())
             || definitions.events.contains_key(callee.name.as_str())
             || functions.contains_key(callee.name.as_str())
         {

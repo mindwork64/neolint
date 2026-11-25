@@ -8,6 +8,7 @@
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::{AnalysisEngine, DisplaySuppression};
 use crate::preprocessor::PreprocessDialect;
+use crate::target::{OsslAllowlist, TargetProfile};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -21,6 +22,9 @@ pub struct LintConfig {
     dialect: PreprocessDialect,
     include_dirs: Vec<PathBuf>,
     engine: AnalysisEngine,
+    target: TargetProfile,
+    target_explicit: bool,
+    ossl_allowlist: OsslAllowlist,
 }
 
 impl LintConfig {
@@ -35,7 +39,7 @@ impl LintConfig {
     /// Blank lines and comments are ignored. Supported settings are
     /// `disable = RULE[, RULE...]`, `severity.RULE = error|warning|info`,
     /// `preprocess = true|false`, `dialect = lsl|firestorm`,
-    /// `include_dir = PATH`, and `engine = legacy|ast|compare`. A configuration
+    /// `include_dir = PATH`, `engine = legacy|ast|compare`, and `target = PROFILE`. A configuration
     /// without an `engine` setting selects [`AnalysisEngine::Ast`].
     ///
     /// # Errors
@@ -129,6 +133,33 @@ impl LintConfig {
                 continue;
             }
 
+            if key == "target" {
+                config.target = TargetProfile::parse(value).ok_or_else(|| {
+                    format!(
+                        "line {line_number}: invalid target '{value}' (expected second-life-mono, second-life-lso, second-life-luau, opensim-xengine or opensim-yengine)"
+                    )
+                })?;
+                config.target_explicit = true;
+                continue;
+            }
+
+            if key == "ossl_allowlist" {
+                if value != "strict" {
+                    return Err(format!(
+                        "line {line_number}: invalid ossl_allowlist value '{value}' (expected strict)"
+                    ));
+                }
+                config.enable_ossl_allowlist();
+                continue;
+            }
+
+            if key == "ossl_function" {
+                config
+                    .add_ossl_function(value)
+                    .map_err(|error| format!("line {line_number}: {error}"))?;
+                continue;
+            }
+
             return Err(format!("line {line_number}: unknown setting '{key}'"));
         }
 
@@ -173,6 +204,76 @@ impl LintConfig {
     /// Configured include directories, in file order.
     pub fn include_dirs(&self) -> &[PathBuf] {
         &self.include_dirs
+    }
+
+    /// Configured target platform/runtime profile.
+    pub fn target(&self) -> TargetProfile {
+        self.target
+    }
+
+    /// Whether a target was explicitly selected in the config or CLI.
+    pub fn target_explicit(&self) -> bool {
+        self.target_explicit
+    }
+
+    /// Override the target profile (CLI override).
+    pub fn set_target(&mut self, target: TargetProfile) {
+        self.target = target;
+        self.target_explicit = true;
+    }
+
+    /// OSSL functions that the project expects to be enabled in its OpenSim region.
+    pub fn ossl_allowlist(&self) -> &OsslAllowlist {
+        &self.ossl_allowlist
+    }
+
+    /// Explicitly enable the OSSL allowlist, even if it is empty.
+    pub fn enable_ossl_allowlist(&mut self) {
+        self.ossl_allowlist.enable();
+    }
+
+    /// Add one OSSL function name to the project allowlist.
+    ///
+    /// This is a project expectation, not a query of a simulator's live security configuration.
+    pub fn add_ossl_function(&mut self, function: &str) -> Result<(), String> {
+        if !function.starts_with("os")
+            || function.len() <= 2
+            || !function
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(format!(
+                "invalid OSSL function '{function}' (expected an os-prefixed identifier)"
+            ));
+        }
+        self.ossl_allowlist.add(function.to_owned());
+        Ok(())
+    }
+
+    /// Validate target-dependent configuration after CLI overrides have been applied.
+    pub fn validate_target_settings(&self) -> Result<(), String> {
+        if !self.ossl_allowlist.is_explicit() {
+            return Ok(());
+        }
+        if !self.target.is_opensim() {
+            return Err(
+                "ossl_function entries require an OpenSim target (opensim-xengine or opensim-yengine)"
+                    .to_owned(),
+            );
+        }
+        let catalogue = crate::builtins::ossl_functions_for_target(self.target)
+            .expect("OpenSim targets have an OSSL interface catalogue");
+        let mut functions: Vec<_> = self.ossl_allowlist.functions().iter().collect();
+        functions.sort();
+        for function in functions {
+            if !catalogue.contains(function) {
+                return Err(format!(
+                    "OSSL function '{function}' is not present in the selected {} interface",
+                    self.target.runtime().as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Configured analysis engine, defaulting to [`AnalysisEngine::Ast`].
@@ -446,5 +547,86 @@ mod engine_config_tests {
         assert_eq!(config.engine(), AnalysisEngine::Ast);
         config.set_engine(AnalysisEngine::Compare);
         assert_eq!(config.engine(), AnalysisEngine::Compare);
+    }
+}
+
+#[cfg(test)]
+mod target_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_target_is_second_life_mono_and_is_not_explicit() {
+        let config = LintConfig::default();
+        assert_eq!(config.target(), TargetProfile::default());
+        assert!(!config.target_explicit());
+    }
+
+    #[test]
+    fn parses_target_profile_independently_from_dialect() {
+        let config = LintConfig::parse("dialect = firestorm\ntarget = opensim-yengine\n").unwrap();
+        assert_eq!(config.dialect(), PreprocessDialect::Firestorm);
+        assert_eq!(config.target().as_str(), "opensim-yengine");
+        assert!(config.target_explicit());
+    }
+
+    #[test]
+    fn command_line_target_override_is_explicit() {
+        let mut config = LintConfig::default();
+        config.set_target(TargetProfile::parse("second-life-luau").unwrap());
+        assert_eq!(config.target().as_str(), "second-life-luau");
+        assert!(config.target_explicit());
+    }
+
+    #[test]
+    fn rejects_unknown_target_names() {
+        assert!(LintConfig::parse("target = mono").is_err());
+        assert!(LintConfig::parse("target = firestorm").is_err());
+        assert!(LintConfig::parse("target = opensim-mono").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ossl_config_tests {
+    use super::*;
+
+    #[test]
+    fn parses_repeatable_ossl_allowlist_entries() {
+        let config = LintConfig::parse(
+            "target = opensim-yengine\nossl_function = osGetAgentIP\nossl_function = osTeleportAgent\n",
+        )
+        .unwrap();
+        assert!(config.ossl_allowlist().is_explicit());
+        assert!(config.ossl_allowlist().allows("osGetAgentIP"));
+        assert!(config.ossl_allowlist().allows("osTeleportAgent"));
+        assert!(config.validate_target_settings().is_ok());
+    }
+
+    #[test]
+    fn rejects_ossl_allowlist_on_second_life_targets() {
+        let config = LintConfig::parse("ossl_function = osGetAgentIP").unwrap();
+        assert!(config.validate_target_settings().is_err());
+    }
+
+    #[test]
+    fn rejects_ossl_names_not_in_the_selected_runtime_interface() {
+        let config =
+            LintConfig::parse("target = opensim-xengine\nossl_function = osAESDecrypt").unwrap();
+        assert!(config.validate_target_settings().is_err());
+    }
+
+    #[test]
+    fn supports_explicit_empty_strict_ossl_allowlist() {
+        let config =
+            LintConfig::parse("target = opensim-yengine\nossl_allowlist = strict").unwrap();
+        assert!(config.ossl_allowlist().is_explicit());
+        assert!(config.ossl_allowlist().functions().is_empty());
+        assert!(config.validate_target_settings().is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_ossl_names() {
+        for value in ["", "llOwnerSay", "os-foo", "osFoo bar", "osé"] {
+            assert!(LintConfig::parse(&format!("ossl_function = {value}")).is_err());
+        }
     }
 }

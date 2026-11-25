@@ -1,0 +1,34 @@
+# OpenSim interface parameters declared as C# string where canonical LSL declares key.
+# Format: function-name|zero-based-parameter-index
+llCloseRemoteDataChannel|0
+llGetBoundingBox|0
+llGetOwnerKey|0
+llGetVisualParams|0
+llGodLikeRezObject|0
+llInstantMessage|0
+llListen|2
+llLoadURL|0
+llManageEstateAccess|1
+llMessageLinked|3
+llOverMyLand|0
+llPushObject|0
+llRegionSayTo|0
+llReleaseCamera|0
+llRemoteDataReply|0
+llRemoteDataReply|1
+llRemoteLoadScript|0
+llRemoteLoadScriptPin|0
+llRemoveFromLandBanList|0
+llRemoveFromLandPassList|0
+llRequestAgentData|0
+llRequestPermissions|0
+llSameGroup|0
+llSendRemoteData|0
+llSensor|1
+llSensorRepeat|1
+llTakeCamera|0
+llTeleportAgent|0
+llTeleportAgentGlobalCoords|0
+llTeleportAgentHome|0
+llTextBox|0
+llUnSit|0
