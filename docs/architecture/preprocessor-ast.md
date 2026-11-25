@@ -3273,7 +3273,27 @@ switch/break. No intentional diagnostic deltas exist in this slice.
 
 **Boundary at the end of 6C.** SEM012–SEM019, SEM022 and SEM023 remained
 Legacy-only. No new SEM codes, severity changes, CLI/pipeline selection or Legacy
-behavior changes.
+behavior changes at the time of the original migration.
+
+#### Post-migration flow-analysis refinement
+
+The deep-analysis workstream extends the AST condition evaluator used by the
+SEM011 CFG beyond the original Legacy-compatible subset. It now folds bounded
+finite f32 arithmetic and numeric comparisons, recognizes canonical float
+constants, supports integer-to-float casts, and folds integer &&/|| only
+when both operands are known, matching LSL's eager evaluation of both
+operands. This lets if, for, while and do/while edges be pruned when a condition
+is provably constant and every operand is known and side-effect-free. Float
+operands to integer-only logical/unary operators remain unknown.
+
+The evaluator still fails closed for mutable variables, user calls, malformed
+expressions, non-finite arithmetic, unsupported mixed numeric operators,
+unsafe float-to-integer casts and budget exhaustion. It does not perform
+interprocedural constant propagation or infer values from mutable initializers.
+Legacy remains frozen, so Compare can show an intentional SEM011 difference
+for a condition the extended AST evaluator proves but the Legacy integer-only
+constant evaluator cannot. LSL's eager logical evaluation is documented in
+[LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators).
 
 #### Phase 6D implementation record
 

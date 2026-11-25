@@ -138,7 +138,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM008` | Invalid explicit return presence/type. | error | Only explicit returns are checked. |
 | `SEM009` | Duplicate jump label in one function/event scope. | error | Labels in different code scopes are independent. |
 | `SEM010` | Undefined or inaccessible jump target. | error | Jumping into a nested block is rejected. |
-| `SEM011` | Value-returning function may reach the end without returning. | error | Conservative analysis; complex or malformed control flow may not be checked. |
+| `SEM011` | Value-returning function may reach the end without returning. | error | AST-only CFG folds bounded finite integer/float constants, numeric comparisons and integer logical conditions whose two operands are known. Mutable values, calls, non-finite arithmetic, unsafe conversions and unsupported/malformed control flow remain unknown or are skipped. The stronger AST analysis can intentionally differ from frozen Legacy on newly provable float-condition paths. |
 | `SEM012` | Unresolved variable reference. | warning / semantic | Unknown extension calls and unknown extension event bodies are skipped. Warnings do not fail unless escalated. |
 | `SEM013` | Call to a canonical deprecated LSL function. | warning / lint | SLua-only metadata and replacement hints are excluded. |
 | `SEM014` | Unsupported explicit cast. | error | Only known source/target type pairs are checked. |

@@ -171,11 +171,20 @@ No SEM rule remains Legacy-only in the current matrix.
 - SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
   deduplicated edges, fail-closed skip on unsupported/partial graphs and
   suppression when the same function has SEM009/SEM010 findings.
-- Constant conditions use an AST-only 32-bit evaluator with the Legacy
-  wrapping/division/shift rules, canonical constants, mutable-shadow checks and
-  float truthiness. `ForStatement::condition_missing` preserves genuinely empty
-  `for (;;)`, while `condition_malformed` marks a non-empty parse failure as an
-  unknown condition rather than an infinite loop.
+- Constant conditions use a bounded AST-only numeric evaluator. It supports
+  32-bit integer wrapping/division/shift rules, finite f32 arithmetic and
+  comparisons, canonical integer/float constants, integer-to-float casts,
+  mutable-shadow checks and integer logical operators when both operands
+  are known. LSL evaluates both operands of && and ||; no short-circuit is
+  assumed. Mutable values, calls, non-finite results, float-to-integer
+  conversions other than exact zero, and
+  unsupported mixed-operand operators remain unknown. `ForStatement::condition_missing`
+  preserves genuinely empty `for (;;)`, while `condition_malformed` marks a
+  non-empty parse failure as an unknown condition rather than an infinite loop.
+- This is a deliberate post-migration AST enhancement. Legacy remains frozen;
+  Compare may therefore report intentional SEM011 differences when the AST
+  proves a floating-point condition that the Legacy integer evaluator leaves
+  unknown.
 - Firestorm switch/break and Error/recovery control-flow forms conservatively
   suppress SEM011 for the affected function.
 

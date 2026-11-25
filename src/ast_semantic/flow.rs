@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Ast, BinaryOperator, Block, Expression, ExpressionKind, ForStatement, IfStatement,
-    ReturnStatement, Statement, StatementKind, TopLevel, UnaryOperator,
+    ReturnStatement, Statement, StatementKind, TopLevel, TypeKind, UnaryOperator,
 };
 use crate::builtins;
 use crate::diagnostic::{Diagnostic, Span};
@@ -826,58 +826,6 @@ fn connect_exits(graph: &mut FlowGraph, exits: &[usize], target: usize) -> bool 
     true
 }
 
-fn condition_possibilities(
-    expression: &Expression,
-    empty_is_true: bool,
-    scope: ScopeId,
-    scopes: &ScopeTree,
-) -> Option<(bool, bool)> {
-    if empty_is_true {
-        return Some((true, false));
-    }
-    if contains_error(expression) {
-        return None;
-    }
-    let mut budget = MAX_CONSTANT_NODES;
-    if let Some(value) = evaluate_integer(expression, scope, scopes, 0, &mut budget) {
-        return Some((value != 0, value == 0));
-    }
-    let unwrapped = strip_parentheses(expression);
-    match &unwrapped.kind {
-        ExpressionKind::Float(literal) => {
-            if let Ok(value) = literal.text.parse::<f64>() {
-                Some((value != 0.0, value == 0.0))
-            } else {
-                Some((true, true))
-            }
-        }
-        ExpressionKind::Identifier(identifier) => {
-            if scopes
-                .lookup_value_at(scope, &identifier.name, identifier.span.start)
-                .is_some()
-            {
-                return Some((true, true));
-            }
-            let value = builtins::definitions()
-                .constants
-                .get(identifier.name.as_str())
-                .and_then(|constant| constant.value.parse::<f64>().ok());
-            match value {
-                Some(value) => Some((value != 0.0, value == 0.0)),
-                None => Some((true, true)),
-            }
-        }
-        _ => Some((true, true)),
-    }
-}
-
-fn strip_parentheses(mut expression: &Expression) -> &Expression {
-    while let ExpressionKind::Parenthesized(inner) = &expression.kind {
-        expression = inner;
-    }
-    expression
-}
-
 fn contains_error(expression: &Expression) -> bool {
     match &expression.kind {
         ExpressionKind::Error(_) => true,
@@ -908,71 +856,226 @@ fn contains_error(expression: &Expression) -> bool {
     }
 }
 
-fn evaluate_integer(
+#[derive(Debug, Clone, Copy)]
+enum ConstantNumber {
+    Integer(i32),
+    Float(f32),
+}
+
+impl ConstantNumber {
+    fn truthy(self) -> bool {
+        match self {
+            Self::Integer(value) => value != 0,
+            Self::Float(value) => value != 0.0,
+        }
+    }
+
+    fn as_float(self) -> f32 {
+        match self {
+            Self::Integer(value) => value as f32,
+            Self::Float(value) => value,
+        }
+    }
+}
+
+fn condition_possibilities(
+    expression: &Expression,
+    empty_is_true: bool,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+) -> Option<(bool, bool)> {
+    if empty_is_true {
+        return Some((true, false));
+    }
+    if contains_error(expression) {
+        return None;
+    }
+
+    let mut budget = MAX_CONSTANT_NODES;
+    let Some(value) = evaluate_constant_number(expression, scope, scopes, 0, &mut budget) else {
+        // Unknown values deliberately preserve both paths. In particular, a
+        // mutable local/global is never treated as a constant merely because
+        // its initializer happens to be a literal.
+        return Some((true, true));
+    };
+    let truthy = value.truthy();
+    Some((truthy, !truthy))
+}
+
+fn evaluate_constant_number(
     expression: &Expression,
     scope: ScopeId,
     scopes: &ScopeTree,
     depth: usize,
     budget: &mut usize,
-) -> Option<i32> {
+) -> Option<ConstantNumber> {
     if depth > MAX_CONSTANT_DEPTH || *budget == 0 {
         return None;
     }
     *budget -= 1;
+
     match &expression.kind {
         ExpressionKind::Parenthesized(inner) => {
-            evaluate_integer(inner, scope, scopes, depth + 1, budget)
+            evaluate_constant_number(inner, scope, scopes, depth + 1, budget)
         }
-        ExpressionKind::Integer(literal) => parse_integer_text(&literal.text),
+        ExpressionKind::Integer(literal) => {
+            parse_integer_text(&literal.text).map(ConstantNumber::Integer)
+        }
+        ExpressionKind::Float(literal) => literal
+            .text
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(ConstantNumber::Float),
         ExpressionKind::Identifier(identifier) => {
             if scopes
                 .lookup_value_at(scope, &identifier.name, identifier.span.start)
                 .is_some()
             {
-                None
-            } else {
-                canonical_integer(&identifier.name)
+                return None;
+            }
+            let constant = builtins::definitions()
+                .constants
+                .get(identifier.name.as_str())?;
+            match constant.type_name.as_str() {
+                "integer" => canonical_integer(&identifier.name).map(ConstantNumber::Integer),
+                "float" => constant
+                    .value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .map(ConstantNumber::Float),
+                _ => None,
             }
         }
         ExpressionKind::Unary(unary) => {
-            let value = evaluate_integer(&unary.operand, scope, scopes, depth + 1, budget)?;
-            match unary.operator {
-                UnaryOperator::Plus => Some(value),
-                UnaryOperator::Minus => Some(value.wrapping_neg()),
-                UnaryOperator::Bang => Some((value == 0) as i32),
-                UnaryOperator::Tilde => Some(!value),
+            let value = evaluate_constant_number(&unary.operand, scope, scopes, depth + 1, budget)?;
+            match (unary.operator, value) {
+                (UnaryOperator::Plus, value) => Some(value),
+                (UnaryOperator::Minus, ConstantNumber::Integer(value)) => {
+                    Some(ConstantNumber::Integer(value.wrapping_neg()))
+                }
+                (UnaryOperator::Minus, ConstantNumber::Float(value)) => {
+                    let result = -value;
+                    result.is_finite().then_some(ConstantNumber::Float(result))
+                }
+                (UnaryOperator::Bang, ConstantNumber::Integer(value)) => {
+                    Some(ConstantNumber::Integer((value == 0) as i32))
+                }
+                (UnaryOperator::Bang, ConstantNumber::Float(_)) => None,
+                (UnaryOperator::Tilde, ConstantNumber::Integer(value)) => {
+                    Some(ConstantNumber::Integer(!value))
+                }
+                (UnaryOperator::Tilde, ConstantNumber::Float(_)) => None,
             }
         }
         ExpressionKind::Binary(binary) => {
-            let left = evaluate_integer(&binary.left, scope, scopes, depth + 1, budget)?;
-            let right = evaluate_integer(&binary.right, scope, scopes, depth + 1, budget)?;
-            match binary.operator {
-                BinaryOperator::OrOr => Some((left != 0 || right != 0) as i32),
-                BinaryOperator::AndAnd => Some((left != 0 && right != 0) as i32),
-                BinaryOperator::BitOr => Some(left | right),
-                BinaryOperator::BitXor => Some(left ^ right),
-                BinaryOperator::BitAnd => Some(left & right),
-                BinaryOperator::Equal => Some((left == right) as i32),
-                BinaryOperator::NotEqual => Some((left != right) as i32),
-                BinaryOperator::Less => Some((left < right) as i32),
-                BinaryOperator::LessEqual => Some((left <= right) as i32),
-                BinaryOperator::Greater => Some((left > right) as i32),
-                BinaryOperator::GreaterEqual => Some((left >= right) as i32),
-                BinaryOperator::ShiftLeft => (0..32)
-                    .contains(&right)
-                    .then(|| left.wrapping_shl(right as u32)),
-                BinaryOperator::ShiftRight => (0..32)
-                    .contains(&right)
-                    .then(|| left.wrapping_shr(right as u32)),
-                BinaryOperator::Add => Some(left.wrapping_add(right)),
-                BinaryOperator::Subtract => Some(left.wrapping_sub(right)),
-                BinaryOperator::Multiply => Some(left.wrapping_mul(right)),
-                BinaryOperator::Divide => (right != 0).then(|| left.wrapping_div(right)),
-                BinaryOperator::Remainder => (right != 0).then(|| left.wrapping_rem(right)),
+            // LSL evaluates both operands of && and || (there is no
+            // short-circuiting). Both values must therefore be statically
+            // known before the logical result can be folded.
+            let left = evaluate_constant_number(&binary.left, scope, scopes, depth + 1, budget)?;
+            let right = evaluate_constant_number(&binary.right, scope, scopes, depth + 1, budget)?;
+            if matches!(
+                binary.operator,
+                BinaryOperator::AndAnd | BinaryOperator::OrOr
+            ) {
+                let (ConstantNumber::Integer(left), ConstantNumber::Integer(right)) = (left, right)
+                else {
+                    return None;
+                };
+                return Some(ConstantNumber::Integer(match binary.operator {
+                    BinaryOperator::AndAnd => (left != 0 && right != 0) as i32,
+                    BinaryOperator::OrOr => (left != 0 || right != 0) as i32,
+                    _ => unreachable!(),
+                }));
+            }
+            evaluate_constant_binary(binary.operator, left, right)
+        }
+        ExpressionKind::Cast(cast) => {
+            let value = evaluate_constant_number(&cast.operand, scope, scopes, depth + 1, budget)?;
+            match (cast.ty.kind, value) {
+                (TypeKind::Integer, ConstantNumber::Integer(value)) => {
+                    Some(ConstantNumber::Integer(value))
+                }
+                (TypeKind::Float, ConstantNumber::Integer(value)) => {
+                    let result = value as f32;
+                    result.is_finite().then_some(ConstantNumber::Float(result))
+                }
+                (TypeKind::Float, ConstantNumber::Float(value)) => {
+                    Some(ConstantNumber::Float(value))
+                }
+                // Both signed-zero bit patterns convert unambiguously to
+                // integer zero. Other float-to-integer casts stay unknown
+                // rather than relying on rounding or out-of-range rules.
+                (TypeKind::Integer, ConstantNumber::Float(value))
+                    if value.to_bits() & 0x7fff_ffff == 0 =>
+                {
+                    Some(ConstantNumber::Integer(0))
+                }
+                _ => None,
             }
         }
-        _ => None,
+        ExpressionKind::Error(_) => None,
+        ExpressionKind::String(_)
+        | ExpressionKind::List(_)
+        | ExpressionKind::Vector(_)
+        | ExpressionKind::Rotation(_)
+        | ExpressionKind::Call(_)
+        | ExpressionKind::Component(_)
+        | ExpressionKind::Assignment(_)
+        | ExpressionKind::Increment(_)
+        | ExpressionKind::LazyIndex(_) => None,
     }
+}
+
+fn evaluate_constant_binary(
+    operator: BinaryOperator,
+    left: ConstantNumber,
+    right: ConstantNumber,
+) -> Option<ConstantNumber> {
+    use BinaryOperator::*;
+
+    if let (ConstantNumber::Integer(left), ConstantNumber::Integer(right)) = (left, right) {
+        let result = match operator {
+            BitOr => left | right,
+            BitXor => left ^ right,
+            BitAnd => left & right,
+            Equal => (left == right) as i32,
+            NotEqual => (left != right) as i32,
+            Less => (left < right) as i32,
+            LessEqual => (left <= right) as i32,
+            Greater => (left > right) as i32,
+            GreaterEqual => (left >= right) as i32,
+            ShiftLeft if (0..32).contains(&right) => left.wrapping_shl(right as u32),
+            ShiftRight if (0..32).contains(&right) => left.wrapping_shr(right as u32),
+            Add => left.wrapping_add(right),
+            Subtract => left.wrapping_sub(right),
+            Multiply => left.wrapping_mul(right),
+            Divide if right != 0 => left.wrapping_div(right),
+            Remainder if right != 0 => left.wrapping_rem(right),
+            _ => return None,
+        };
+        return Some(ConstantNumber::Integer(result));
+    }
+
+    let left = left.as_float();
+    let right = right.as_float();
+    let result = match operator {
+        Equal => return Some(ConstantNumber::Integer((left == right) as i32)),
+        NotEqual => return Some(ConstantNumber::Integer((left != right) as i32)),
+        Less => return Some(ConstantNumber::Integer((left < right) as i32)),
+        LessEqual => return Some(ConstantNumber::Integer((left <= right) as i32)),
+        Greater => return Some(ConstantNumber::Integer((left > right) as i32)),
+        GreaterEqual => return Some(ConstantNumber::Integer((left >= right) as i32)),
+        Add => left + right,
+        Subtract => left - right,
+        Multiply => left * right,
+        Divide if right != 0.0 => left / right,
+        // Modulo/bitwise/shift semantics are not assumed for mixed or float
+        // operands. Leaving them unknown is safer than inventing a conversion.
+        _ => return None,
+    };
+    result.is_finite().then_some(ConstantNumber::Float(result))
 }
 
 fn parse_integer_text(text: &str) -> Option<i32> {
@@ -1047,6 +1150,171 @@ mod limit_parity_tests {
             MAX_CONSTANT_DEPTH,
             crate::semantic::MAX_CONSTANT_EXPRESSION_DEPTH,
             "AST and Legacy constant-evaluation depth budgets must stay aligned"
+        );
+    }
+}
+
+#[cfg(test)]
+mod constant_condition_tests {
+    use crate::ast::{parse_ast, parse_ast_with_options, AstParseOptions};
+    use crate::diagnostic::Diagnostic;
+    use crate::lex;
+
+    fn missing_return_functions(source: &str) -> Vec<String> {
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast(&tokens);
+        assert!(syntax.is_empty(), "{syntax:?}");
+        crate::ast_semantic::analyze_ast(&ast, &syntax)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.code == "SEM011")
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    #[test]
+    fn float_arithmetic_and_comparisons_prune_impossible_cfg_edges() {
+        let source = r#"
+            integer true_float_if() {
+                if (1.5 + 0.5 == 2.0) return 1;
+            }
+            integer false_float_if() {
+                if (1.5 + 0.5 != 2.0) return 1;
+            }
+            integer false_float_while() {
+                while (2.0 - 2.0) { return 1; }
+            }
+            integer true_float_while() {
+                while (2.0 - 1.0) { }
+            }
+            integer false_float_for() {
+                for (; 0.0; ) { return 1; }
+            }
+            integer true_float_for() {
+                for (; 2.0 - 1.0; ) { }
+            }
+            integer canonical_pi() {
+                if (PI > 3.0) return 1;
+            }
+            integer canonical_two_pi_true() {
+                if (TWO_PI > 3.0) return 1;
+            }
+            integer do_return() {
+                do { return 1; } while (0.0);
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function false_float_if may reach the end without returning a value",
+                "function false_float_while may reach the end without returning a value",
+                "function false_float_for may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn logical_conditions_require_both_operands_to_be_known() {
+        let source = r#"
+            integer false_and_with_error() {
+                if (FALSE && (1 / 0)) return 1;
+            }
+            integer true_or_with_call() {
+                if (TRUE || unknown()) return 1;
+            }
+            integer true_and() {
+                if (TRUE && (2 > 1)) return 1;
+            }
+            integer false_or() {
+                if (FALSE || (0.0 == 1.0)) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function false_and_with_error may reach the end without returning a value",
+                "function true_or_with_call may reach the end without returning a value",
+                "function false_or may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn mutable_values_and_non_numeric_conditions_remain_unknown() {
+        let source = r#"
+            integer mutable_condition(integer condition) {
+                if (condition) return 1;
+            }
+            integer non_finite_condition() {
+                if (1.0 / 0.0) return 1;
+            }
+            integer invalid_float_logical() {
+                if (1.0 && 1) return 1;
+            }
+            integer invalid_float_not() {
+                if (!1.0) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec![
+                "function mutable_condition may reach the end without returning a value",
+                "function non_finite_condition may reach the end without returning a value",
+                "function invalid_float_logical may reach the end without returning a value",
+                "function invalid_float_not may reach the end without returning a value",
+            ]
+        );
+    }
+
+    #[test]
+    fn float_cast_from_integer_is_known_but_unsafe_reverse_cast_is_not() {
+        let source = r#"
+            integer known_float_cast() {
+                if ((float)1 > 0.0) return 1;
+            }
+            integer unknown_integer_cast() {
+                if ((integer)1.5) return 1;
+            }
+            integer zero_float_cast() {
+                if ((integer)0.0 == 0) return 1;
+            }
+            default { state_entry() { } }
+        "#;
+
+        assert_eq!(
+            missing_return_functions(source),
+            vec!["function unknown_integer_cast may reach the end without returning a value",]
+        );
+    }
+
+    #[test]
+    fn switch_cfg_keeps_existing_gate_and_analysis_contract() {
+        let source = r#"
+            integer switch_return(integer value) {
+                switch (value) {
+                    case 1: return 1;
+                    default: return 2;
+                }
+            }
+            default { state_entry() { } }
+        "#;
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) =
+            parse_ast_with_options(&tokens, AstParseOptions::lsl().with_switches_enabled(true));
+        assert!(syntax.is_empty(), "{syntax:?}");
+        let diagnostics = crate::ast_semantic::analyze_ast(&ast, &syntax);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic: &Diagnostic| diagnostic.code != "SEM011"),
+            "{diagnostics:?}"
         );
     }
 }

@@ -182,6 +182,34 @@ fn focused_sources_covering_rule_families_match() {
 }
 
 #[test]
+fn ast_float_condition_refinement_is_reported_as_an_intentional_sem011_delta() {
+    let source = r#"
+        integer definitely_returns() {
+            if (1.5 + 0.5 == 2.0) return 1;
+        }
+        default { state_entry() { } }
+    "#;
+    let mut run = AnalysisRun::new().unwrap();
+    let index = run.add_prepared_text("float-flow.lsl", source).unwrap();
+    let unit = run.unit(index).unwrap();
+    let analysis = unit.analyze_with_engine(AnalysisEngine::Compare).unwrap();
+    let report = analysis.comparison().expect("comparison report");
+
+    assert!(
+        !report.matched,
+        "this AST-only refinement must be visible in Compare"
+    );
+    assert!(report.comparison_complete);
+    let sem011 = rule(report, "SEM011");
+    assert_eq!(sem011.legacy_count, 1);
+    assert_eq!(sem011.ast_count, 0);
+    assert_eq!(sem011.missing_total, Some(1));
+    assert_eq!(sem011.extra_total, Some(0));
+    assert_eq!(report.legacy_count, 1);
+    assert_eq!(report.ast_count, 0);
+}
+
+#[test]
 fn every_fingerprint_field_is_significant() {
     let base = diagnostic("SEM001");
     let mut perturbed = vec![
