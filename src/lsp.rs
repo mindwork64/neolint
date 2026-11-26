@@ -12,7 +12,7 @@ use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
 use crate::pipeline::{AnalysisRun, CancellableSetupError};
 use crate::preprocessor::PreprocessSettings;
 use crate::source::unit::CancellableAnalysisError;
-use crate::source::{SourceFile, SourceSpan};
+use crate::source::{SourceFile, SourceFileKind, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
@@ -72,6 +72,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         config,
         documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
+        dependencies_by_root: HashMap::new(),
         next_revision: 0,
     };
     let mut worker = AnalysisWorker::new()?;
@@ -167,6 +168,8 @@ struct ServerState {
     /// Per-root diagnostic snapshots, keyed by the URI they belong to.
     /// A single included URI may be present in several root snapshots.
     published_by_root: HashMap<Url, RootDiagnostics>,
+    /// Source documents actually loaded by each root's most recent analysis.
+    dependencies_by_root: HashMap<Url, HashSet<PathBuf>>,
     next_revision: u64,
 }
 
@@ -180,8 +183,14 @@ struct AnalysisTask {
 struct AnalysisResult {
     root_uri: Url,
     root_version: i32,
-    snapshot_revisions: HashMap<Url, u64>,
+    dependencies: HashSet<PathBuf>,
+    dependency_revisions: HashMap<PathBuf, HashMap<Url, u64>>,
     diagnostics: Result<RootDiagnostics, String>,
+}
+
+struct AnalyzedDocument {
+    diagnostics: RootDiagnostics,
+    dependencies: HashSet<PathBuf>,
 }
 
 struct RunningAnalysis {
@@ -200,8 +209,8 @@ struct PendingAnalyses {
 /// A single background worker with a latest-task-per-root pending queue.
 ///
 /// New edits replace queued work for the same root. One task may already be
-/// running; its result is accepted only while every open-document snapshot
-/// still matches the live document revisions.
+/// running; its result is accepted only while the root and its dependency-path
+/// revision signatures still match the live document state.
 struct AnalysisWorker {
     pending: Arc<(Mutex<PendingAnalyses>, Condvar)>,
     results: Receiver<AnalysisResult>,
@@ -227,52 +236,35 @@ impl AnalysisWorker {
         })
     }
 
-    fn schedule(
+    fn schedule_many(
         &self,
-        root_uri: Url,
+        root_uris: impl IntoIterator<Item = Url>,
         documents: Arc<HashMap<Url, DocumentState>>,
         config: LintConfig,
     ) {
-        let Some(task) =
-            make_analysis_task(root_uri.clone(), Arc::clone(&documents), config.clone())
-        else {
+        let tasks: Vec<_> = root_uris
+            .into_iter()
+            .filter_map(|uri| make_analysis_task(uri, Arc::clone(&documents), config.clone()))
+            .collect();
+        if tasks.is_empty() {
             return;
-        };
+        }
         let (lock, ready) = &*self.pending;
         let mut pending = lock.lock().expect("analysis queue mutex poisoned");
-        if schedule_pending_task(&mut pending, task, &documents, &config) {
+        if schedule_pending_tasks(&mut pending, tasks) {
             ready.notify_one();
         }
     }
 
-    fn cancel_pending(
-        &self,
-        root_uri: &Url,
-        documents: &Arc<HashMap<Url, DocumentState>>,
-        config: Option<&LintConfig>,
-    ) {
+    fn close_root(&self, root_uri: &Url) {
         let (lock, ready) = &*self.pending;
         let mut pending = lock.lock().expect("analysis queue mutex poisoned");
         pending.tasks.remove(root_uri);
         pending.order.retain(|uri| uri != root_uri);
         if let Some(running) = &pending.running {
-            // Closing any document invalidates every in-flight snapshot because
-            // tasks capture the complete open-document set.
-            running.cancellation.cancel();
-            if &running.root_uri != root_uri {
-                if let Some(config) = config {
-                    if let Some(retry) = make_analysis_task(
-                        running.root_uri.clone(),
-                        Arc::clone(documents),
-                        config.clone(),
-                    ) {
-                        enqueue_pending(&mut pending, retry);
-                    }
-                }
+            if &running.root_uri == root_uri {
+                running.cancellation.cancel();
             }
-        }
-        if let Some(config) = config {
-            refresh_pending_tasks(&mut pending, documents, config);
         }
         ready.notify_one();
     }
@@ -314,47 +306,42 @@ fn make_analysis_task(
     })
 }
 
-fn schedule_pending_task(
-    pending: &mut PendingAnalyses,
-    task: AnalysisTask,
-    documents: &Arc<HashMap<Url, DocumentState>>,
-    config: &LintConfig,
-) -> bool {
+fn schedule_pending_tasks(pending: &mut PendingAnalyses, tasks: Vec<AnalysisTask>) -> bool {
+    let targeted_roots: HashSet<_> = tasks.iter().map(|task| task.root_uri.clone()).collect();
     if let Some(running) = &pending.running {
-        // Every task captures the complete open-document set. Any edit makes
-        // the active snapshot stale, even when a different root was edited.
-        running.cancellation.cancel();
-        if running.root_uri != task.root_uri {
-            // Preserve the interrupted root in FIFO order using the newest
-            // document snapshot, rather than losing its pending diagnostics.
-            if let Some(retry) = make_analysis_task(
-                running.root_uri.clone(),
-                Arc::clone(documents),
-                config.clone(),
-            ) {
-                enqueue_pending(pending, retry);
-            }
+        // Only interrupt active work when one of its own roots is affected.
+        if targeted_roots.contains(&running.root_uri) {
+            running.cancellation.cancel();
         }
     }
-    refresh_pending_tasks(pending, documents, config);
-    enqueue_pending(pending, task)
+    let mut scheduled = false;
+    for task in tasks {
+        scheduled |= enqueue_pending(pending, task);
+    }
+    scheduled
 }
 
-fn refresh_pending_tasks(
-    pending: &mut PendingAnalyses,
-    documents: &Arc<HashMap<Url, DocumentState>>,
-    config: &LintConfig,
-) {
-    let mut refreshed_tasks = HashMap::with_capacity(pending.tasks.len());
-    let mut refreshed_order = VecDeque::with_capacity(pending.order.len());
-    for uri in pending.order.drain(..) {
-        if let Some(task) = make_analysis_task(uri.clone(), Arc::clone(documents), config.clone()) {
-            refreshed_order.push_back(uri.clone());
-            refreshed_tasks.insert(uri, task);
+fn affected_roots_for_document(state: &ServerState, changed_uri: &Url) -> Vec<Url> {
+    let mut roots = HashSet::new();
+    if is_lsl_document(changed_uri) && state.documents.contains_key(changed_uri) {
+        roots.insert(changed_uri.clone());
+    }
+    let changed_path = changed_uri
+        .to_file_path()
+        .ok()
+        .map(|path| normalize_path(&path));
+    for (root_uri, dependencies) in &state.dependencies_by_root {
+        if state.documents.contains_key(root_uri)
+            && changed_path
+                .as_ref()
+                .is_some_and(|path| dependencies.contains(path))
+        {
+            roots.insert(root_uri.clone());
         }
     }
-    pending.tasks = refreshed_tasks;
-    pending.order = refreshed_order;
+    let mut roots: Vec<_> = roots.into_iter().collect();
+    roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    roots
 }
 
 fn enqueue_pending(pending: &mut PendingAnalyses, task: AnalysisTask) -> bool {
@@ -368,18 +355,32 @@ fn enqueue_pending(pending: &mut PendingAnalyses, task: AnalysisTask) -> bool {
     true
 }
 
+fn dependency_revision_snapshot(
+    dependencies: &HashSet<PathBuf>,
+    documents: &HashMap<Url, DocumentState>,
+) -> HashMap<PathBuf, HashMap<Url, u64>> {
+    let mut open_by_path = HashMap::<PathBuf, HashMap<Url, u64>>::new();
+    for (uri, document) in documents {
+        if let Ok(path) = uri.to_file_path() {
+            open_by_path
+                .entry(normalize_path(&path))
+                .or_default()
+                .insert(uri.clone(), document.revision);
+        }
+    }
+    dependencies
+        .iter()
+        .map(|path| (path.clone(), open_by_path.remove(path).unwrap_or_default()))
+        .collect()
+}
+
 fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) -> bool {
-    state.documents.len() == result.snapshot_revisions.len()
-        && result.snapshot_revisions.iter().all(|(uri, revision)| {
-            state
-                .documents
-                .get(uri)
-                .is_some_and(|document| document.revision == *revision)
-        })
-        && state
-            .documents
-            .get(&result.root_uri)
-            .is_some_and(|document| document.version == result.root_version)
+    state
+        .documents
+        .get(&result.root_uri)
+        .is_some_and(|document| document.version == result.root_version)
+        && dependency_revision_snapshot(&result.dependencies, &state.documents)
+            == result.dependency_revisions
 }
 
 fn analysis_worker_loop(
@@ -409,11 +410,6 @@ fn analysis_worker_loop(
             }
         };
 
-        let snapshot_revisions = task
-            .documents
-            .iter()
-            .map(|(uri, document)| (uri.clone(), document.revision))
-            .collect();
         let result = analyze_document(
             &task.root_uri,
             task.documents
@@ -434,16 +430,27 @@ fn analysis_worker_loop(
         if was_cancelled {
             continue;
         }
-        let diagnostics = match result {
-            Ok(diagnostics) => Ok(diagnostics),
-            Err(AnalyzeDocumentError::Failure(error)) => Err(error),
+        let (dependencies, diagnostics) = match result {
+            Ok(analysis) => (analysis.dependencies, Ok(analysis.diagnostics)),
+            Err(AnalyzeDocumentError::Failure(error)) => {
+                let dependencies = task
+                    .root_uri
+                    .to_file_path()
+                    .ok()
+                    .map(|path| HashSet::from([normalize_path(&path)]))
+                    .unwrap_or_default();
+                (dependencies, Err(error))
+            }
             Err(AnalyzeDocumentError::Cancelled) => continue,
         };
+        let dependency_revisions =
+            dependency_revision_snapshot(&dependencies, task.documents.as_ref());
         if result_sender
             .send(AnalysisResult {
                 root_uri: task.root_uri,
                 root_version: task.root_version,
-                snapshot_revisions,
+                dependencies,
+                dependency_revisions,
                 diagnostics,
             })
             .is_err()
@@ -589,7 +596,7 @@ fn handle_notification(
             let params: lsp_types::DidOpenTextDocumentParams =
                 serde_json::from_value(notification.params)?;
             let document = params.text_document;
-            if !is_lsl_document(&document.uri) {
+            if document.uri.scheme() != "file" {
                 return Ok(());
             }
             state.next_revision = state.next_revision.saturating_add(1);
@@ -601,7 +608,7 @@ fn handle_notification(
                     revision: state.next_revision,
                 },
             );
-            analyze_or_schedule(connection, state, worker, &document.uri)?;
+            schedule_affected_roots(connection, state, worker, &document.uri)?;
         }
         "textDocument/didChange" => {
             let params: lsp_types::DidChangeTextDocumentParams =
@@ -622,7 +629,7 @@ fn handle_notification(
                 document.version = params.text_document.version;
                 document.revision = state.next_revision;
             }
-            analyze_or_schedule(connection, state, worker, &uri)?;
+            schedule_affected_roots(connection, state, worker, &uri)?;
         }
         "textDocument/didSave" => {
             let params: lsp_types::DidSaveTextDocumentParams =
@@ -649,7 +656,7 @@ fn handle_notification(
                 }
             }
             if state.documents.contains_key(&uri) {
-                analyze_or_schedule(connection, state, worker, &uri)?;
+                schedule_affected_roots(connection, state, worker, &uri)?;
             }
         }
         "textDocument/didClose" => {
@@ -658,13 +665,16 @@ fn handle_notification(
             let was_tracked =
                 remove_tracked_document(&mut state.documents, &params.text_document.uri);
             if was_tracked {
-                worker.cancel_pending(
-                    &params.text_document.uri,
-                    &state.documents,
-                    state.config.as_ref(),
-                );
+                let closed_uri = params.text_document.uri;
+                let mut affected = affected_roots_for_document(state, &closed_uri);
+                affected.retain(|root| root != &closed_uri);
+                worker.close_root(&closed_uri);
+                state.dependencies_by_root.remove(&closed_uri);
+                schedule_roots(connection, state, worker, affected)?;
+                clear_root_diagnostics(connection, state, &closed_uri)?;
+            } else {
+                clear_root_diagnostics(connection, state, &params.text_document.uri)?;
             }
-            clear_root_diagnostics(connection, state, &params.text_document.uri)?;
         }
         _ => {}
     }
@@ -679,25 +689,34 @@ fn is_lsl_document(uri: &Url) -> bool {
     uri.scheme() == "file" && uri.path().to_ascii_lowercase().ends_with(".lsl")
 }
 
-fn analyze_or_schedule(
+fn schedule_affected_roots(
     connection: &Connection,
     state: &mut ServerState,
     worker: &AnalysisWorker,
-    root_uri: &Url,
+    changed_uri: &Url,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if !state.documents.contains_key(root_uri) {
+    let roots = affected_roots_for_document(state, changed_uri);
+    schedule_roots(connection, state, worker, roots)
+}
+
+fn schedule_roots(
+    connection: &Connection,
+    state: &mut ServerState,
+    worker: &AnalysisWorker,
+    roots: Vec<Url>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if roots.is_empty() {
         return Ok(());
     }
     let Some(config) = &state.config else {
-        publish_for_root(connection, state, root_uri, HashMap::new())?;
+        for root_uri in roots {
+            if state.documents.contains_key(&root_uri) {
+                publish_for_root(connection, state, &root_uri, HashMap::new())?;
+            }
+        }
         return Ok(());
     };
-
-    worker.schedule(
-        root_uri.clone(),
-        Arc::clone(&state.documents),
-        config.clone(),
-    );
+    worker.schedule_many(roots, Arc::clone(&state.documents), config.clone());
     Ok(())
 }
 
@@ -710,13 +729,32 @@ fn handle_analysis_result(
     if !analysis_snapshot_is_current(state, &result) {
         // A newer document snapshot arrived while the task was running.
         // Replacing the pending task coalesces any intermediate edits.
-        analyze_or_schedule(connection, state, worker, &result.root_uri)?;
+        schedule_roots(connection, state, worker, vec![result.root_uri.clone()])?;
         return Ok(());
     }
 
     match result.diagnostics {
-        Ok(diagnostics) => publish_for_root(connection, state, &result.root_uri, diagnostics)?,
+        Ok(diagnostics) => {
+            state
+                .dependencies_by_root
+                .insert(result.root_uri.clone(), result.dependencies);
+            publish_for_root(connection, state, &result.root_uri, diagnostics)?;
+        }
         Err(error) => {
+            // Keep the last successful dependency set. A failed disk read or
+            // preprocessing attempt must not erase the edges that let a later
+            // include edit recover this root.
+            state
+                .dependencies_by_root
+                .entry(result.root_uri.clone())
+                .or_insert_with(|| {
+                    result
+                        .root_uri
+                        .to_file_path()
+                        .ok()
+                        .map(|path| HashSet::from([normalize_path(&path)]))
+                        .unwrap_or_default()
+                });
             eprintln!("NeoLint analysis failed for {}: {error}", result.root_uri);
             publish_for_root(connection, state, &result.root_uri, HashMap::new())?;
             send_show_message(
@@ -747,7 +785,7 @@ fn analyze_document(
     config: &LintConfig,
     open_documents: &HashMap<Url, DocumentState>,
     cancellation: &AnalysisCancellationToken,
-) -> Result<HashMap<Url, Vec<LspDiagnostic>>, AnalyzeDocumentError> {
+) -> Result<AnalyzedDocument, AnalyzeDocumentError> {
     if cancellation.is_cancelled() {
         return Err(AnalyzeDocumentError::Cancelled);
     }
@@ -793,6 +831,7 @@ fn analyze_document(
             }
         })?;
 
+    let dependencies = source_dependencies(root_uri, unit.manager().files());
     let mut open_paths = HashMap::<PathBuf, Url>::new();
     for uri in open_documents.keys() {
         if cancellation.is_cancelled() {
@@ -884,7 +923,28 @@ fn analyze_document(
     if cancellation.is_cancelled() {
         return Err(AnalyzeDocumentError::Cancelled);
     }
-    Ok(output)
+    Ok(AnalyzedDocument {
+        diagnostics: output,
+        dependencies,
+    })
+}
+
+fn source_dependencies(root_uri: &Url, files: &[Arc<SourceFile>]) -> HashSet<PathBuf> {
+    let mut dependencies = HashSet::new();
+    if let Ok(root_path) = root_uri.to_file_path() {
+        dependencies.insert(normalize_path(&root_path));
+    }
+    for source in files {
+        if source.kind() != SourceFileKind::Included {
+            continue;
+        }
+        let path = source
+            .canonical_path()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(source.display_name()));
+        dependencies.insert(normalize_path(&path));
+    }
+    dependencies
 }
 
 fn uri_for_open_source(
@@ -1169,6 +1229,7 @@ mod tests {
             )])
             .into(),
             published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::new(),
             next_revision: 1,
         };
         let stale_version = 7;
@@ -1259,62 +1320,10 @@ mod tests {
     }
 
     #[test]
-    fn new_snapshot_cancels_active_analysis_and_requeues_it_before_the_new_root() {
-        let uri_a = Url::parse("file:///tmp/running.lsl").unwrap();
-        let uri_b = Url::parse("file:///tmp/edited.lsl").unwrap();
-        let documents: Arc<HashMap<Url, DocumentState>> = Arc::new(HashMap::from([
-            (
-                uri_a.clone(),
-                DocumentState {
-                    text: Arc::from("root A v2"),
-                    version: 2,
-                    revision: 2,
-                },
-            ),
-            (
-                uri_b.clone(),
-                DocumentState {
-                    text: Arc::from("root B v3"),
-                    version: 3,
-                    revision: 3,
-                },
-            ),
-        ]));
-        let cancellation = AnalysisCancellationToken::new();
-        let mut pending = PendingAnalyses {
-            running: Some(RunningAnalysis {
-                root_uri: uri_a.clone(),
-                cancellation: cancellation.clone(),
-            }),
-            ..PendingAnalyses::default()
-        };
-        let task_b =
-            make_analysis_task(uri_b.clone(), Arc::clone(&documents), LintConfig::default())
-                .unwrap();
-
-        assert!(schedule_pending_task(
-            &mut pending,
-            task_b,
-            &documents,
-            &LintConfig::default(),
-        ));
-        assert!(cancellation.is_cancelled());
-        assert_eq!(
-            pending.order,
-            VecDeque::from([uri_a.clone(), uri_b.clone()])
-        );
-        assert_eq!(pending.tasks.get(&uri_a).unwrap().root_version, 2);
-        assert_eq!(pending.tasks.get(&uri_b).unwrap().root_version, 3);
-        assert!(Arc::ptr_eq(
-            &pending.tasks.get(&uri_a).unwrap().documents,
-            &documents
-        ));
-    }
-
-    #[test]
-    fn analysis_result_is_rejected_when_any_open_document_snapshot_changes() {
+    fn analysis_result_validates_only_root_and_actual_dependency_revisions() {
         let root_uri = Url::parse("file:///tmp/root.lsl").unwrap();
-        let include_uri = Url::parse("file:///tmp/shared.lsl").unwrap();
+        let include_uri = Url::parse("file:///tmp/shared.inc").unwrap();
+        let unrelated_uri = Url::parse("file:///tmp/unrelated.lsl").unwrap();
         let mut state = ServerState {
             config: Some(LintConfig::default()),
             documents: HashMap::from([
@@ -1334,51 +1343,290 @@ mod tests {
                         revision: 11,
                     },
                 ),
+                (
+                    unrelated_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("unrelated"),
+                        version: 2,
+                        revision: 12,
+                    },
+                ),
             ])
             .into(),
             published_by_root: HashMap::new(),
-            next_revision: 11,
+            dependencies_by_root: HashMap::new(),
+            next_revision: 12,
         };
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 4,
-            snapshot_revisions: HashMap::from([(root_uri.clone(), 10), (include_uri.clone(), 11)]),
+            dependencies: HashSet::from([
+                normalize_path(&root_uri.to_file_path().unwrap()),
+                normalize_path(&include_uri.to_file_path().unwrap()),
+            ]),
+            dependency_revisions: HashMap::from([
+                (
+                    normalize_path(&root_uri.to_file_path().unwrap()),
+                    HashMap::from([(root_uri.clone(), 10)]),
+                ),
+                (
+                    normalize_path(&include_uri.to_file_path().unwrap()),
+                    HashMap::from([(include_uri.clone(), 11)]),
+                ),
+            ]),
             diagnostics: Ok(HashMap::new()),
         };
 
         assert!(analysis_snapshot_is_current(&state, &result));
 
+        // An unrelated editor buffer may change or close without invalidating
+        // a root that does not depend on it.
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&unrelated_uri)
+            .unwrap()
+            .revision = 13;
+        assert!(analysis_snapshot_is_current(&state, &result));
+        Arc::make_mut(&mut state.documents).remove(&unrelated_uri);
+        assert!(analysis_snapshot_is_current(&state, &result));
+
+        // Editing or closing a dependency invalidates the root result.
         Arc::make_mut(&mut state.documents)
             .get_mut(&include_uri)
             .unwrap()
-            .revision = 12;
+            .revision = 14;
         assert!(!analysis_snapshot_is_current(&state, &result));
-
         Arc::make_mut(&mut state.documents)
             .get_mut(&include_uri)
             .unwrap()
             .revision = 11;
-        Arc::make_mut(&mut state.documents).remove(&root_uri);
+        Arc::make_mut(&mut state.documents).remove(&include_uri);
         assert!(!analysis_snapshot_is_current(&state, &result));
+        Arc::make_mut(&mut state.documents).insert(
+            include_uri.clone(),
+            DocumentState {
+                text: Arc::from("include"),
+                version: 7,
+                revision: 11,
+            },
+        );
 
+        // A dependency that was not open when the task started is captured as
+        // `None`; opening it while analysis is running invalidates the result.
+        let unopened_include = Url::parse("file:///tmp/new-include.inc").unwrap();
+        let mut result_with_closed_dep = result;
+        let unopened_path = normalize_path(&unopened_include.to_file_path().unwrap());
+        result_with_closed_dep
+            .dependencies
+            .insert(unopened_path.clone());
+        result_with_closed_dep
+            .dependency_revisions
+            .insert(unopened_path, HashMap::new());
+        assert!(analysis_snapshot_is_current(
+            &state,
+            &result_with_closed_dep
+        ));
         Arc::make_mut(&mut state.documents).insert(
-            root_uri.clone(),
+            unopened_include,
             DocumentState {
-                text: Arc::from("root"),
-                version: 4,
-                revision: 10,
-            },
-        );
-        let newly_opened_uri = Url::parse("file:///tmp/new.lsl").unwrap();
-        Arc::make_mut(&mut state.documents).insert(
-            newly_opened_uri,
-            DocumentState {
-                text: Arc::from("new"),
+                text: Arc::from("new include"),
                 version: 1,
-                revision: 12,
+                revision: 15,
             },
         );
-        assert!(!analysis_snapshot_is_current(&state, &result));
+        assert!(!analysis_snapshot_is_current(
+            &state,
+            &result_with_closed_dep
+        ));
+
+        // Root closure always invalidates the result, independently of the
+        // dependency map.
+        Arc::make_mut(&mut state.documents).remove(&root_uri);
+        assert!(!analysis_snapshot_is_current(
+            &state,
+            &result_with_closed_dep
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_tracks_all_open_uri_aliases_for_a_local_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("neolint-lsp-path-alias-{unique}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let real_path = workspace.join("shared.inc");
+        let alias_path = workspace.join("shared-alias.inc");
+        fs::write(&real_path, "integer shared = 1;\n").unwrap();
+        std::os::unix::fs::symlink(&real_path, &alias_path).unwrap();
+
+        let root_uri = Url::from_file_path(workspace.join("root.lsl")).unwrap();
+        let canonical_uri = Url::from_file_path(&real_path).unwrap();
+        let alias_uri = Url::from_file_path(&alias_path).unwrap();
+        let path = normalize_path(&real_path);
+        let documents = HashMap::from([
+            (
+                root_uri.clone(),
+                DocumentState {
+                    text: Arc::from("root"),
+                    version: 1,
+                    revision: 1,
+                },
+            ),
+            (
+                canonical_uri.clone(),
+                DocumentState {
+                    text: Arc::from("include"),
+                    version: 1,
+                    revision: 2,
+                },
+            ),
+        ]);
+        let dependencies = HashSet::from([path.clone()]);
+        let snapshot = dependency_revision_snapshot(&dependencies, &documents);
+        assert_eq!(snapshot[&path], HashMap::from([(canonical_uri.clone(), 2)]));
+
+        let mut with_alias = documents;
+        with_alias.insert(
+            alias_uri.clone(),
+            DocumentState {
+                text: Arc::from("include alias"),
+                version: 1,
+                revision: 3,
+            },
+        );
+        let alias_snapshot = dependency_revision_snapshot(&dependencies, &with_alias);
+        assert_eq!(
+            alias_snapshot[&path],
+            HashMap::from([(canonical_uri, 2), (alias_uri, 3)])
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn affected_roots_are_only_roots_that_depend_on_the_changed_document() {
+        let root_a = Url::parse("file:///tmp/a.lsl").unwrap();
+        let root_b = Url::parse("file:///tmp/b.lsl").unwrap();
+        let root_c = Url::parse("file:///tmp/c.lsl").unwrap();
+        let shared = Url::parse("file:///tmp/shared.inc").unwrap();
+        let private_a = Url::parse("file:///tmp/a-only.inc").unwrap();
+        let documents = HashMap::from([
+            (
+                root_a.clone(),
+                DocumentState {
+                    text: Arc::from("a"),
+                    version: 1,
+                    revision: 1,
+                },
+            ),
+            (
+                root_b.clone(),
+                DocumentState {
+                    text: Arc::from("b"),
+                    version: 1,
+                    revision: 2,
+                },
+            ),
+            (
+                root_c.clone(),
+                DocumentState {
+                    text: Arc::from("c"),
+                    version: 1,
+                    revision: 3,
+                },
+            ),
+        ]);
+        let state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: Arc::new(documents),
+            published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::from([
+                (
+                    root_a.clone(),
+                    HashSet::from([
+                        normalize_path(&root_a.to_file_path().unwrap()),
+                        normalize_path(&shared.to_file_path().unwrap()),
+                        normalize_path(&private_a.to_file_path().unwrap()),
+                    ]),
+                ),
+                (
+                    root_b.clone(),
+                    HashSet::from([
+                        normalize_path(&root_b.to_file_path().unwrap()),
+                        normalize_path(&shared.to_file_path().unwrap()),
+                    ]),
+                ),
+                (
+                    root_c.clone(),
+                    HashSet::from([normalize_path(&root_c.to_file_path().unwrap())]),
+                ),
+            ]),
+            next_revision: 3,
+        };
+
+        assert_eq!(
+            affected_roots_for_document(&state, &shared),
+            vec![root_a.clone(), root_b.clone()]
+        );
+        assert_eq!(
+            affected_roots_for_document(&state, &root_c),
+            vec![root_c.clone()]
+        );
+        assert_eq!(affected_roots_for_document(&state, &root_a), vec![root_a]);
+    }
+
+    #[test]
+    fn dependency_changes_cancel_only_an_active_affected_root() {
+        let uri_a = Url::parse("file:///tmp/a.lsl").unwrap();
+        let uri_b = Url::parse("file:///tmp/b.lsl").unwrap();
+        let documents = Arc::new(HashMap::from([
+            (
+                uri_a.clone(),
+                DocumentState {
+                    text: Arc::from("a2"),
+                    version: 2,
+                    revision: 2,
+                },
+            ),
+            (
+                uri_b.clone(),
+                DocumentState {
+                    text: Arc::from("b2"),
+                    version: 2,
+                    revision: 3,
+                },
+            ),
+        ]));
+        let cancellation = AnalysisCancellationToken::new();
+        let mut pending = PendingAnalyses {
+            running: Some(RunningAnalysis {
+                root_uri: uri_a.clone(),
+                cancellation: cancellation.clone(),
+            }),
+            ..PendingAnalyses::default()
+        };
+        let make = |uri: &Url| {
+            make_analysis_task(uri.clone(), Arc::clone(&documents), LintConfig::default()).unwrap()
+        };
+
+        // Editing an unrelated root does not interrupt the active analysis.
+        assert!(schedule_pending_tasks(&mut pending, vec![make(&uri_b)]));
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(pending.order, VecDeque::from([uri_b.clone()]));
+
+        // A shared dependency change targets both roots and cancels the active
+        // one; its replacement occupies the queued position exactly once.
+        assert!(schedule_pending_tasks(
+            &mut pending,
+            vec![make(&uri_a), make(&uri_b)]
+        ));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            pending.order,
+            VecDeque::from([uri_b.clone(), uri_a.clone()])
+        );
+        assert_eq!(pending.tasks.get(&uri_a).unwrap().root_version, 2);
     }
 
     fn test_diagnostic(message: &str) -> LspDiagnostic {
@@ -1463,6 +1711,33 @@ mod tests {
     }
 
     #[test]
+    fn source_dependencies_include_every_loaded_include_not_only_diagnostic_sources() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("neolint-lsp-dependencies-{unique}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let root_path = workspace.join("root.lsl");
+        let include_path = workspace.join("shared.inc");
+        fs::write(&include_path, "integer helper = 1;\n").unwrap();
+        let root_uri = Url::from_file_path(&root_path).unwrap();
+        let mut run = AnalysisRun::new().unwrap();
+        let unit_index = run
+            .add_preprocessed_text(
+                root_path.to_str().unwrap(),
+                "#include \"shared.inc\"\ndefault { state_entry() {} }\n",
+                PreprocessSettings::full(),
+            )
+            .unwrap();
+        let unit = run.unit(unit_index).unwrap();
+        let dependencies = source_dependencies(&root_uri, unit.manager().files());
+        assert!(dependencies.contains(&normalize_path(&root_uri.to_file_path().unwrap())));
+        assert!(dependencies.contains(&normalize_path(&include_path)));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn open_document_analysis_uses_the_configured_engine_and_publishes_root_diagnostics() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1495,7 +1770,10 @@ mod tests {
             &AnalysisCancellationToken::new(),
         )
         .unwrap();
-        let actual_diagnostics = actual.get(&uri).unwrap();
+        assert!(actual
+            .dependencies
+            .contains(&normalize_path(&uri.to_file_path().unwrap())));
+        let actual_diagnostics = actual.diagnostics.get(&uri).unwrap();
         assert!(!actual_diagnostics.is_empty());
         assert!(actual_diagnostics
             .iter()
