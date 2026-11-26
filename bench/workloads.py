@@ -186,6 +186,71 @@ def multi_file(root: pathlib.Path, files: int) -> pathlib.Path:
     return directory
 
 
+def flow_worklist(root: pathlib.Path, declarations: int) -> pathlib.Path:
+    """Many definitely initialized locals followed by reads through the solver."""
+    lines = ["integer flow_worklist()", "{"]
+    for index in range(declarations):
+        lines.append(f"    integer value_{index} = {index};")
+    for index in range(declarations):
+        lines.append(f"    llOwnerSay((string)value_{index});")
+    lines.extend([
+        "    return 1;", "}", "default", "{", "    state_entry()", "    {",
+        "        llOwnerSay((string)flow_worklist());", "    }", "}",
+    ])
+    return _write(root / f"flow_worklist_{declarations}.lsl", "\n".join(lines) + "\n")
+
+
+def flow_side_effects(root: pathlib.Path, declarations: int) -> pathlib.Path:
+    """Known locals updated by scalar increments and arithmetic compound writes."""
+    lines = ["integer flow_side_effects()", "{"]
+    for index in range(declarations):
+        lines.append(f"    integer value_{index} = {index};")
+    for index in range(declarations):
+        if index % 2:
+            lines.append(f"    value_{index} += 2;")
+        else:
+            lines.append(f"    value_{index}++;")
+    for index in range(declarations):
+        lines.append(f"    llOwnerSay((string)value_{index});")
+    lines.extend([
+        "    return 1;", "}", "default", "{", "    state_entry()", "    {",
+        "        llOwnerSay((string)flow_side_effects());", "    }", "}",
+    ])
+    return _write(root / f"flow_side_effects_{declarations}.lsl", "\n".join(lines) + "\n")
+
+
+def flow_budget(root: pathlib.Path, declarations: int) -> pathlib.Path:
+    """A valid unit designed to cross the cumulative CFG fact-work budget."""
+    path = flow_worklist(root, declarations)
+    text = path.read_text(encoding="utf-8")
+    marker = "    return 1;\n"
+    assert marker in text
+    text = text.replace(
+        marker,
+        '    return 1;\n    llOwnerSay("after return: budget must fail closed");\n',
+        1,
+    )
+    return _write(root / "flow_budget.lsl", text)
+
+
+def switch_dispatch(root: pathlib.Path, cases: int) -> pathlib.Path:
+    """A constant numeric switch with many individually reachable CFG arms."""
+    lines = [
+        "#define USE_SWITCHES",
+        "integer switch_dispatch()", "{",
+        f"    integer selected = {cases // 2};",
+        "    switch (selected)", "    {",
+    ]
+    for index in range(cases):
+        lines.append(f"        case {index}: return {index};")
+    lines.extend([
+        "        default: return -1;",
+        "    }", "}", "default", "{", "    state_entry()", "    {",
+        "        llOwnerSay((string)switch_dispatch());", "    }", "}",
+    ])
+    return _write(root / f"switch_dispatch_{cases}.lsl", "\n".join(lines) + "\n")
+
+
 def stdin_source(root: pathlib.Path) -> pathlib.Path:
     text = (
         "integer gValue;\n"

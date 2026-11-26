@@ -363,6 +363,7 @@ fn every_firestorm_identity_ast_span_bridges_and_resolves() {
                 }
                 myList[2] = "value";
                 integer extracted = (integer)myList[index];
+                (quaternion)(myList[range]);
             }
         }
     "#;
@@ -384,7 +385,7 @@ fn every_firestorm_identity_ast_span_bridges_and_resolves() {
 
 #[test]
 fn every_macro_firestorm_ast_span_resolves_through_the_map() {
-    let source = "#define USE_SWITCHES\n#define USE_LAZY_LISTS\ndefault { state_entry() { switch (value) { case 1: break; } myList[2] = \"value\"; } }\n";
+    let source = "#define USE_SWITCHES\n#define USE_LAZY_LISTS\ndefault { state_entry() { switch (value) { case 1: break; } myList[2] = \"value\"; (quaternion)myList[4]; } }\n";
     let mut run = AnalysisRun::new().unwrap();
     let index = run
         .add_preprocessed_text("root.lsl", source, PreprocessSettings::firestorm())

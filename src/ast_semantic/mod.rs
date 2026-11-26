@@ -17,7 +17,9 @@ pub(crate) mod types;
 pub(crate) mod usage;
 
 use crate::ast::Ast;
+use crate::builtins;
 use crate::diagnostic::Diagnostic;
+use crate::target::{OsslAllowlist, TargetProfile};
 
 /// Run the AST semantic rules with an assumed-reliable lexical environment.
 ///
@@ -50,20 +52,68 @@ pub fn analyze_ast_with_environment(
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
 ) -> Vec<Diagnostic> {
-    let scopes = scopes::ScopeTree::build(ast);
+    analyze_ast_with_target_options(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+        TargetProfile::default(),
+        &OsslAllowlist::default(),
+    )
+}
+
+/// Run AST semantic analysis for an explicit platform/runtime profile.
+///
+/// The target profile is independent from the preprocessor dialect. Rules that
+/// lack verified behavior for a selected target fail closed rather than
+/// inheriting Second Life Mono assumptions.
+pub fn analyze_ast_with_target(
+    ast: &Ast,
+    syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
+    target: TargetProfile,
+) -> Vec<Diagnostic> {
+    analyze_ast_with_target_options(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+        target,
+        &OsslAllowlist::default(),
+    )
+}
+
+/// Run AST semantic analysis with an explicit target and OSSL allowlist.
+pub fn analyze_ast_with_target_options(
+    ast: &Ast,
+    syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+) -> Vec<Diagnostic> {
+    let api_catalog = builtins::catalog_for_target(target);
+    let standard_functions = &api_catalog.functions;
+    let ossl_functions = &api_catalog.ossl_functions;
+    let builtin_functions = &api_catalog.callable_functions;
+    let builtin_events = &api_catalog.events;
+    let scopes = scopes::ScopeTree::build_with_catalog(ast, api_catalog, target);
     let functions = types::collect_user_functions(ast);
     let expressions = expressions::collect_facts(ast, &scopes);
     let calls = calls::collect_calls(ast, &scopes);
     let mut diagnostics = Vec::new();
     diagnostics.extend(rules::duplicate_globals::check(ast));
     diagnostics.extend(rules::duplicate_locals::check(&scopes));
-    diagnostics.extend(rules::duplicate_events::check(ast));
-    diagnostics.extend(rules::state_namespace::check(ast, &scopes));
-    diagnostics.extend(rules::builtin_calls::check(
+    diagnostics.extend(rules::duplicate_events::check(ast, builtin_events));
+    diagnostics.extend(rules::state_namespace::check_with_builtins(
+        ast,
+        &scopes,
+        builtin_functions,
+    ));
+    diagnostics.extend(rules::builtin_calls::check_with_builtins(
         &calls,
         &scopes,
         &functions,
         syntax_diagnostics,
+        builtin_functions,
+        target,
     ));
     diagnostics.extend(rules::user_calls::check(
         &calls,
@@ -71,7 +121,7 @@ pub fn analyze_ast_with_environment(
         &functions,
         syntax_diagnostics,
     ));
-    diagnostics.extend(rules::event_signatures::check(ast));
+    diagnostics.extend(rules::event_signatures::check(ast, builtin_events));
     diagnostics.extend(rules::explicit_casts::check(
         &expressions.expressions,
         &scopes,
@@ -116,29 +166,39 @@ pub fn analyze_ast_with_environment(
         &scopes,
         &functions,
     ));
-    diagnostics.extend(rules::unresolved_variables::check(
+    diagnostics.extend(rules::unresolved_variables::check_with_builtins(
         ast,
         &expressions.expressions,
         &calls,
         &scopes,
         &functions,
+        builtin_functions,
     ));
-    diagnostics.extend(rules::deprecated_calls::check(&calls, &functions));
-    diagnostics.extend(rules::state_targets::check(ast));
+    diagnostics.extend(rules::deprecated_calls::check_with_builtins(
+        &calls,
+        &functions,
+        builtin_functions,
+    ));
+    diagnostics.extend(rules::state_targets::check(ast, builtin_events));
     diagnostics.extend(rules::state_transitions::check(
         ast,
         syntax_diagnostics,
         environment_reliable,
+        target,
     ));
-    diagnostics.extend(rules::unreachable_states::check(
+    diagnostics.extend(rules::unreachable_states::check_with_builtins(
         ast,
         syntax_diagnostics,
         environment_reliable,
+        builtin_functions,
     ));
+    let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(rules::return_hazards::check(
         ast,
+        &scopes,
         syntax_diagnostics,
         environment_reliable,
+        &jumps.invalid_code_scopes,
     ));
     diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
     diagnostics.extend(rules::condition_assignments::check(
@@ -146,18 +206,21 @@ pub fn analyze_ast_with_environment(
         syntax_diagnostics,
         environment_reliable,
     ));
-    diagnostics.extend(rules::detection_context::check(
+    diagnostics.extend(rules::detection_context::check_with_builtins(
         &calls,
         &functions,
         syntax_diagnostics,
         environment_reliable,
+        builtin_functions,
+        builtin_events,
     ));
-    diagnostics.extend(rules::math_errors::check(
+    diagnostics.extend(rules::math_errors::check_with_builtins(
         &expressions.expressions,
         &scopes,
         &functions,
         syntax_diagnostics,
         environment_reliable,
+        builtin_functions,
     ));
     diagnostics.extend(rules::operator_types::check(
         &expressions.expressions,
@@ -174,7 +237,6 @@ pub fn analyze_ast_with_environment(
         environment_reliable,
     ));
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
-    let jumps = flow::check_jumps(ast, &scopes);
     diagnostics.extend(jumps.diagnostics);
     diagnostics.extend(flow::check_missing_returns(
         ast,
@@ -186,8 +248,46 @@ pub fn analyze_ast_with_environment(
         usage::unit_is_reliable(ast, syntax_diagnostics, environment_reliable, &expressions);
     diagnostics.extend(rules::unused_variables::check(&scopes, &used, reliable));
     diagnostics.extend(rules::unused_parameters::check(&scopes, &used, reliable));
-    diagnostics.extend(rules::unreachable_functions::check(
-        ast, &calls, &functions, reliable,
+    diagnostics.extend(rules::unreachable_functions::check_with_builtins(
+        ast,
+        &calls,
+        &functions,
+        reliable,
+        builtin_functions,
+    ));
+    diagnostics.extend(rules::target_api::check(
+        &calls,
+        &functions,
+        standard_functions,
+        target,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::ossl_allowlist::check(
+        &calls,
+        &functions,
+        target,
+        ossl_allowlist,
+        ossl_functions,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::target_events::check(
+        ast,
+        &builtins::definitions().events,
+        builtin_events,
+        target,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::target_constants::check(
+        &expressions.expressions,
+        &scopes,
+        &builtins::definitions().constants,
+        scopes.builtin_constants(),
+        target,
+        syntax_diagnostics,
+        environment_reliable,
     ));
     diagnostics
 }

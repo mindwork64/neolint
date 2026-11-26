@@ -1018,7 +1018,7 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Assignment(assignment) => {
                 if let ExpressionKind::LazyIndex(lazy) = &assignment.target.kind {
-                    if lazy.indices.len() != 1 {
+                    if lazy.indices.len() != 1 && lazy.indices.len() <= 2 {
                         self.push_error(
                             "PAR007",
                             "lazy-list indexed assignment requires exactly one index",
@@ -1039,6 +1039,7 @@ impl<'a> Parser<'a> {
                 self.validate_lazy_expression(&assignment.value);
             }
             ExpressionKind::Cast(cast) => {
+                let quaternion_alias = self.is_firestorm_quaternion_alias(&cast.ty);
                 // Firestorm's typed-reference regex allows one optional pair of
                 // parentheses around the identifier/index expression.
                 let operand = match &cast.operand.kind {
@@ -1047,19 +1048,29 @@ impl<'a> Parser<'a> {
                 };
                 if let ExpressionKind::LazyIndex(lazy) = &operand.kind {
                     let valid_count = if cast.ty.kind == TypeKind::List {
-                        (1..=2).contains(&lazy.indices.len())
+                        lazy.indices.len() == 2
                     } else {
                         lazy.indices.len() == 1
                     };
-                    if !valid_count {
-                        self.push_error(
-                            "PAR007",
-                            "lazy-list cast requires one index, or two for a list range",
-                            lazy.span,
-                        );
+                    // parse_lazy_index already reports the >2 case, so do not
+                    // emit a second arity diagnostic for the same source span.
+                    if !valid_count && lazy.indices.len() <= 2 {
+                        let message = if cast.ty.kind == TypeKind::List {
+                            "list lazy-list extraction requires both start and end indices"
+                        } else {
+                            "scalar lazy-list extraction requires exactly one index"
+                        };
+                        self.push_error("PAR007", message, lazy.span);
                     }
                     self.validate_lazy_index_children(lazy);
                 } else {
+                    if quaternion_alias {
+                        self.push_error(
+                            "PAR007",
+                            "Firestorm 'quaternion' is only a type alias for lazy-list extraction",
+                            cast.span,
+                        );
+                    }
                     self.validate_lazy_expression(&cast.operand);
                 }
             }
@@ -1102,6 +1113,18 @@ impl<'a> Parser<'a> {
             | ExpressionKind::String(_)
             | ExpressionKind::Error(_) => {}
         }
+    }
+
+    fn is_firestorm_quaternion_alias(&self, ty: &Type) -> bool {
+        let Ok(index) = self
+            .tokens
+            .binary_search_by_key(&ty.span.start, |token| token.span.start)
+        else {
+            return false;
+        };
+        self.tokens
+            .get(index)
+            .is_some_and(|token| token.span == ty.span && token.lexeme == "quaternion")
     }
 
     fn validate_lazy_index_children(&mut self, lazy: &LazyIndexExpression) {
@@ -1233,18 +1256,34 @@ impl<'a> Parser<'a> {
                 }),
             });
         }
-        if self.check(TokenKind::LParen)
+        let standard_cast = self.check(TokenKind::LParen)
             && is_type_token(self.peek_kind_at(1))
+            && self.peek_kind_at(2) == TokenKind::RParen;
+        let lazy_quaternion_cast = self.options.lazy_lists_enabled()
+            && self.check(TokenKind::LParen)
+            && self.peek_kind_at(1) == TokenKind::Identifier
             && self.peek_kind_at(2) == TokenKind::RParen
-        {
+            && self
+                .tokens
+                .get(self.current + 1)
+                .is_some_and(|token| token.lexeme == "quaternion");
+        if standard_cast || lazy_quaternion_cast {
             let start_span = self.here_span();
             self.advance();
-            let ty_token = self.current;
-            let ty = self.parse_type()?;
+            let ty = if lazy_quaternion_cast {
+                let token = self.tokens.get(self.current)?;
+                let ty = Type {
+                    kind: TypeKind::Rotation,
+                    span: token.span,
+                };
+                self.advance();
+                ty
+            } else {
+                self.parse_type()?
+            };
             self.advance(); // ')'
             let operand = self.parse_prefix(depth + 1)?;
             let span = join_spans(start_span, operand.span);
-            let _ = ty_token;
             return Some(Expression {
                 span,
                 kind: ExpressionKind::Cast(CastExpression {

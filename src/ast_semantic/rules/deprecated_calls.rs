@@ -3,15 +3,16 @@
 use std::collections::HashMap;
 
 use crate::ast::ExpressionKind;
-use crate::builtins;
+use crate::builtins::{self, FunctionCatalog};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::CallSite;
 use super::super::types::UserFunctionSignature;
 
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     let deprecated = &builtins::definitions().deprecated_functions;
     let mut candidates = Vec::new();
@@ -20,6 +21,7 @@ pub(crate) fn check(
             continue;
         };
         if !deprecated.contains(&callee.name)
+            || !builtin_functions.contains_key(callee.name.as_str())
             || functions.contains_key(callee.name.as_str())
             || !site.call.matched_close
             || site.call.close_paren_span.start < site.call.open_paren_span.end

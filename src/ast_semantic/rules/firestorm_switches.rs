@@ -6,7 +6,7 @@ use crate::ast::{
     Ast, BinaryOperator, Expression, ExpressionKind, Statement, StatementKind, SwitchLabel,
     SwitchStatement, TopLevel, UnaryOperator,
 };
-use crate::builtins::{self, ConstantDefinition};
+use crate::builtins::ConstantDefinition;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 
 use super::super::scopes::{ScopeId, ScopeTree};
@@ -26,6 +26,33 @@ enum ConstantValue {
     Vector(Vec<ConstantValue>),
     Rotation(Vec<ConstantValue>),
     ListLength(usize),
+}
+
+/// Opaque constant value shared with the flow-sensitive switch dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SwitchConstantValue(ConstantValue);
+
+impl SwitchConstantValue {
+    pub(crate) fn is_compatible_with(&self, other: &Self) -> bool {
+        matches!(
+            (&self.0, &other.0),
+            (ConstantValue::Integer(_), ConstantValue::Integer(_))
+                | (ConstantValue::Integer(_), ConstantValue::Float(_))
+                | (ConstantValue::Float(_), ConstantValue::Integer(_))
+                | (ConstantValue::Float(_), ConstantValue::Float(_))
+                | (ConstantValue::String(_), ConstantValue::String(_))
+                | (ConstantValue::String(_), ConstantValue::Key(_))
+                | (ConstantValue::Key(_), ConstantValue::String(_))
+                | (ConstantValue::Key(_), ConstantValue::Key(_))
+                | (ConstantValue::Vector(_), ConstantValue::Vector(_))
+                | (ConstantValue::Rotation(_), ConstantValue::Rotation(_))
+                | (ConstantValue::ListLength(_), ConstantValue::ListLength(_))
+        )
+    }
+
+    pub(crate) fn equals(&self, other: &Self) -> bool {
+        self.0.equals(&other.0)
+    }
 }
 
 impl ConstantValue {
@@ -49,6 +76,14 @@ impl ConstantValue {
             }
             (Self::ListLength(left), Self::ListLength(right)) => left == right,
             _ => false,
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        match self {
+            Self::Float(value) => value.is_finite(),
+            Self::Vector(values) | Self::Rotation(values) => values.iter().all(Self::is_finite),
+            Self::Integer(_) | Self::String(_) | Self::Key(_) | Self::ListLength(_) => true,
         }
     }
 
@@ -103,7 +138,7 @@ pub(crate) fn check(
 
     let mut diagnostics = Vec::new();
     let mut work = switches.len();
-    let constants = &builtins::definitions().constants;
+    let constants = scopes.builtin_constants();
 
     for (switch, scope) in switches {
         if has_syntax_error_in_switch(switch, syntax_diagnostics)
@@ -397,6 +432,26 @@ fn contains_error(expression: &Expression) -> bool {
         }
     }
     false
+}
+
+/// Evaluate one Firestorm switch expression or case label with the same
+/// constant semantics used by SEM028–SEM033. The caller owns the shared node
+/// budget so a large switch cannot multiply the per-expression work limit.
+pub(crate) fn evaluate_switch_constant_value(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    budget: &mut usize,
+) -> Option<SwitchConstantValue> {
+    let value = evaluate_at(
+        expression,
+        scope,
+        scopes,
+        scopes.builtin_constants(),
+        0,
+        budget,
+    )?;
+    value.is_finite().then_some(SwitchConstantValue(value))
 }
 
 fn evaluate_constant(

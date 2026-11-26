@@ -215,6 +215,11 @@ def build_fixtures(root: pathlib.Path) -> dict:
     created["malformed"] = workloads.malformed(root, errors=500)
     created["diagnostic_flood"] = workloads.diagnostic_flood(root, findings=10000)
     created["multi_file"] = workloads.multi_file(root, files=24)
+    created["flow_worklist"] = workloads.flow_worklist(root, declarations=300)
+    created["flow_side_effects"] = workloads.flow_side_effects(root, declarations=300)
+    created["flow_budget"] = workloads.flow_budget(root, declarations=1200)
+    created["switch_dispatch"] = workloads.switch_dispatch(root, cases=100)
+    created["switch_budget"] = workloads.switch_dispatch(root, cases=140)
     created["stdin"] = workloads.stdin_source(root)
     return created
 
@@ -291,6 +296,20 @@ def build_rows(fixtures: dict) -> list[Row]:
             SAMPLES_FLOOD,
             note="reduced samples: rendered-diagnostic cap",
         )
+    )
+    rows.extend(
+        [
+            Row("flow_worklist/default", [replace(fixtures["flow_worklist"])], SAMPLES_SYNTHETIC,
+                note="300 initialized numeric locals plus 300 reads; normal CFG fact propagation"),
+            Row("flow_side_effects/default", [replace(fixtures["flow_side_effects"])], SAMPLES_SYNTHETIC,
+                note="300 locals with increments and arithmetic compound assignments"),
+            Row("flow_budget/default", [replace(fixtures["flow_budget"])], SAMPLES_NEAR_LIMIT,
+                note="1,200 initialized numeric locals; intentionally crosses cumulative fact-work budget"),
+            Row("switch_dispatch/default", ["--dialect", "firestorm", replace(fixtures["switch_dispatch"])], SAMPLES_SYNTHETIC,
+                note="100 constant numeric switch arms; exercises case dispatch and fallthrough"),
+            Row("switch_budget/default", ["--dialect", "firestorm", replace(fixtures["switch_budget"])], SAMPLES_SYNTHETIC,
+                note="140 switch arms; shared label-evaluation budget falls back to all arms"),
+        ]
     )
     rows.append(
         Row(
@@ -690,7 +709,19 @@ def main(argv=None):
     fixtures = build_fixtures(fixtures_root())
     rows = build_rows(fixtures)
     if args.quick:
-        rows = [row for row in rows if row.name in {"startup", "corpus_small/default", "stdin/default"}]
+        rows = [
+            row for row in rows
+            if row.name in {
+                "startup",
+                "corpus_small/default",
+                "flow_worklist/default",
+                "flow_side_effects/default",
+                "flow_budget/default",
+                "switch_dispatch/default",
+                "switch_budget/default",
+                "stdin/default",
+            }
+        ]
         for row in rows:
             row.samples = 5
 

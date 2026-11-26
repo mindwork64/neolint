@@ -1,7 +1,6 @@
 //! SEM045: invalid operand types for unary, logical, bitwise and increment operators.
 
 use crate::ast::{BinaryOperator, ExpressionKind, IncrementOperator, UnaryOperator};
-use crate::builtins;
 use crate::diagnostic::{Diagnostic, Severity};
 
 use super::super::expressions::ExpressionSite;
@@ -91,8 +90,8 @@ pub(crate) fn check(
                 let Some(symbol) =
                     scopes.lookup_value_at(site.scope, &identifier.name, identifier.span.start)
                 else {
-                    if builtins::definitions()
-                        .constants
+                    if scopes
+                        .builtin_constants()
                         .contains_key(identifier.name.as_str())
                     {
                         diagnostics.push(semantic_error(

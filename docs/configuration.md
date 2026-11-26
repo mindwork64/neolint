@@ -12,6 +12,8 @@ severity.SEM004 = warning
 # AST is the default in v1.1.0 and later.
 # Set this to legacy only when preserving the v1.0.0 engine is required.
 engine = ast
+target = opensim-yengine
+target_version = 0.9.3.1
 ```
 
 Blank lines and text after `#` are ignored. Leading and trailing whitespace is ignored.
@@ -26,18 +28,98 @@ Blank lines and text after `#` are ignored. Leading and trailing whitespace is i
 | `dialect = lsl\|firestorm` | Select the preprocessing dialect; `firestorm` enables preprocessing. |
 | `include_dir = PATH` | Add an include search directory (repeatable). |
 | `engine = legacy\|ast\|compare` | Select the analysis engine; `ast` is the default, and `legacy` restores the v1.0.0 analysis pipeline. |
+| `target_version = VERSION` | Select OpenSim API version 0.9.2.2, 0.9.3.0, 0.9.3.1, or master-2026-11-25. XEngine supports API20 only. |
+| `target = PROFILE` | Select a platform/runtime profile; defaults to `second-life-mono`. Independent of the preprocessing dialect. |
+| `ossl_allowlist = strict` | Enable OSSL checking even with an empty allowlist; all known OSSL calls warn unless added below. Requires an OpenSim target. |
+| `ossl_function = NAME` | Add an OSSL function to the project's expected-enabled allowlist (repeatable; requires an OpenSim target). |
 
-Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, and invalid engine values cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `ast`; add `engine = legacy` to restore the v1.0.0 Legacy pipeline.
+Rule codes must contain only uppercase ASCII letters and digits. Unknown settings, malformed lines, invalid severity names, invalid rule codes, invalid engine values, invalid target profiles, malformed OSSL names, and OSSL names absent from the selected runtime interface cause a configuration error and exit code 2. A configuration file without an `engine` line stays valid and selects `ast`; add `engine = legacy` to restore the v1.0.0 Legacy pipeline.
 
 Multiple `severity.*` lines, multiple `disable` lines, and multiple `include_dir` lines are supported. Disabled-rule filtering and severity overrides are applied only to displayed diagnostics, before CLI overrides. Include directories preserve file order; quoted includes search the including file's directory first. `#pragma once` is a neolint convenience, not a verified Firestorm guarantee.
 
 ## Precedence
 
 1. Default diagnostic severity and the default `engine = ast`.
-2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, and `engine`.
-3. Command-line `--disable`, `--severity`, `--dialect`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
+2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, `engine`, and `target`.
+3. Command-line `--disable`, `--severity`, `--dialect`, `--target`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
 
-The command line wins for the same rule. A non-empty CLI include-directory list replaces the configured list; CLI `--dialect` overrides the configured dialect; CLI `--engine` overrides the configured engine. Rule disabling and severity overrides affect only the displayed diagnostic stream: a disabled rule does not appear in that stream, and a severity of `warning` or `info` does not cause exit code 1 unless changed to `error`. In `--engine compare` mode the parity report is computed from the raw pre-configuration streams, so it can still report a disabled rule and select exit code 3; severity overrides do not change the report's raw severities.
+The command line wins for the same rule. A non-empty CLI include-directory list replaces the configured list; CLI `--dialect` overrides the configured dialect; CLI `--target` overrides the configured target; CLI `--strict-ossl` enables an empty or populated OSSL allowlist; CLI `--ossl-function` entries are added to the configured OSSL allowlist; CLI `--engine` overrides the configured engine. Rule disabling and severity overrides affect only the displayed diagnostic stream: a disabled rule does not appear in that stream, and a severity of `warning` or `info` does not cause exit code 1 unless changed to `error`. In `--engine compare` mode the parity report is computed from the raw pre-configuration streams, so it can still report a disabled rule and select exit code 3; severity overrides do not change the report's raw severities.
+
+
+## Target platform and runtime profiles
+
+The target profile is separate from `dialect`. The dialect controls source
+preprocessing and Firestorm syntax gates; the target selects the intended
+simulator platform and script runtime.
+
+Supported selectors:
+
+| Selector | Platform | Runtime |
+| --- | --- | --- |
+| `second-life-mono` | Second Life | Mono (default) |
+| `second-life-lso` | Second Life | Legacy LSO |
+| `second-life-luau` | Second Life | LSL compiled for Luau |
+| `opensim-xengine` | OpenSimulator | Historical XEngine (OpenSim versions before 0.9.3.0) |
+| `opensim-yengine` | OpenSimulator | YEngine (OpenSim 0.9.3.0+) |
+
+Use `--target PROFILE` or `target = PROFILE`. For example:
+
+```sh
+neolint --target opensim-yengine script.lsl
+neolint --dialect firestorm --target second-life-mono script.lsl
+neolint --target opensim-yengine --ossl-function osGetAgentIP script.lsl
+```
+
+Firestorm is not a runtime. Combining `--dialect firestorm` with an OpenSim
+target does not mean that OpenSim implements every Firestorm extension; it
+only selects the source preprocessor dialect independently of the selected
+runtime. The current target-aware rule slice is deliberately narrow:
+`SEM034`/`SEM035` are emitted only for the verified Second Life Mono profile.
+Other targets fail closed for those diagnostics until their behavior is
+independently verified. Their silence is not proof that the corresponding
+construct is accepted by the target compiler.
+
+The frozen Legacy engine is not target-profile aware. Selecting a `target`
+with `--engine legacy` is rejected rather than silently ignored. AST is the
+default; Compare passes the target to its AST analyzer while retaining the
+existing Legacy comparison stream.
+
+The AST analyzer uses pinned, version-specific OpenSim API snapshots. Each
+snapshot contains standard LSL function signatures (including overloads),
+OSSL signatures, event handlers and constants. XEngine API20 has 425 standard
+LSL functions, 258 OSSL signatures, 35 events and 770 constants. YEngine
+snapshots cover API20, API22, API23 and API24; the latest pinned API24 snapshot
+has 473 standard LSL functions / 474 signatures, 296 OSSL signatures, 37
+events and 888 constants.
+
+Select a version with target_version = VERSION or --target-version VERSION.
+opensim-yengine defaults to API24 (master-2026-11-25). opensim-xengine is
+pinned to API20 only; later OpenSim releases removed XEngine. The catalogues
+are generated from pinned upstream compiler/API sources, with source
+revisions recorded in data/README.md.
+
+SEM047 reports standard Second Life LSL functions missing from the selected
+OpenSim API. SEM049 reports canonical Second Life event handlers absent from
+the selected event surface. SEM050 reports canonical SL constants absent from
+the selected constants table. Function overloads are selected using argument
+count and inferred types; ambiguous return types remain unknown.
+
+OSSL is a separate API surface. Its presence in a simulator build does not
+mean a region enables that function. Region security configuration, threat
+levels and permissions still control availability. By default NeoLint makes
+no assumption about OSSL availability. Set ossl_allowlist = strict (or pass
+--strict-ossl) to enable checking; repeated ossl_function = NAME entries
+(or --ossl-function NAME) describe the OSSL functions expected to be enabled
+on the target region. SEM048 warns when a known OSSL call is not listed. This
+is a project-side expectation, not a query of live region permissions.
+
+The selected catalogue flows through built-in call checks, overload
+resolution, return-type inference, event checking, constants, call-graph
+analysis, state namespace and reachability rules. A profile is an API
+snapshot, not a live compiler/simulator connection. No real Second Life
+Viewer or OpenSim process was available for in-world execution tests; those
+must be performed against the actual deployment before claiming runtime
+equivalence.
 
 ## Engine migration (v1.1.0)
 
@@ -56,15 +138,17 @@ signatures are unchanged.
   the switches feature gate is enabled. `SEM034` rejects global-function state
   changes that Mono does not support; `SEM035` warns on the historical
   if-without-else compatibility workaround. `SEM036` rejects value returns
-  from events, and `SEM037` warns on directly unreachable statements after
-  unconditional returns or event state transitions. `SEM038` rejects empty
+  from events, and `SEM037` warns on unreachable statements proven by the
+  bounded control-flow graph, including constant branches, loop exits, jumps
+  and Firestorm switch paths. `SEM038` rejects empty
   states, `SEM039` rejects elements with list type inside a list, and `SEM040`
   warns when list equality/inequality compares lengths rather than contents.
   `SEM041` warns on a bare plain assignment in an `if` condition; an extra pair
   of parentheses marks the assignment as intentional. `SEM042` warns when
   detection-context functions can be reached from events that do not provide
   the required detection data. `SEM043` warns on statically provable math-domain hazards, including zero
-  divisors and invalid `llSqrt`/`llPow` arguments; `SEM044` warns when a populated named state
+  divisors, invalid `llSqrt`/`llPow`/`llAcos`/`llAsin` arguments and non-positive
+  `llLog`/`llLog10` arguments; `SEM044` warns when a populated named state
   has no transition path from `default`; `SEM045` reports known-invalid operator
   operand types; `SEM046` rejects known-incompatible arithmetic and comparison
   operand pairs.

@@ -124,7 +124,13 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, and `SEM046`, default to **error**.
+All SEM diagnostics have kind semantic except SEM013, SEM023, SEM024,
+SEM025, SEM026, SEM030–SEM033, SEM035, SEM037, SEM040–SEM044, and SEM048,
+which are lint. SEM012, SEM013, SEM023, SEM024–SEM026, SEM030–SEM033,
+SEM035, SEM037, SEM040–SEM044, and SEM048 default to warning. SEM047,
+SEM049, and SEM050 are AST-only semantic errors. The frozen Legacy/Compare
+parity range remains SEM001–SEM023.
+
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -138,7 +144,7 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM008` | Invalid explicit return presence/type. | error | Only explicit returns are checked. |
 | `SEM009` | Duplicate jump label in one function/event scope. | error | Labels in different code scopes are independent. |
 | `SEM010` | Undefined or inaccessible jump target. | error | Jumping into a nested block is rejected. |
-| `SEM011` | Value-returning function may reach the end without returning. | error | Conservative analysis; complex or malformed control flow may not be checked. |
+| `SEM011` | Value-returning function may reach the end without returning. | error | AST-only CFG folds bounded finite integer/float expressions and propagates definitely known local integer/float values with a forward worklist to a fixed point. Safe scalar increments, arithmetic compound assignments, single nested writes and direct assignment/increment condition results are tracked when provable; ambiguous multiple writes invalidate only touched locals. Constant Firestorm switch dispatch uses scalar/composite equality (including string/key, vector/rotation and list-length equality); local flow facts can select numeric cases. Source-order fallthrough is preserved. Unknown/unsupported/over-budget labels, incompatible SEM029 case types, and multiple SEM028 defaults keep all possible arms reachable. Per-environment facts, bounded expression scans, worklist iterations, edge visits, switch dispatch and cumulative fact processing are bounded; budget exhaustion suppresses conclusions for that body. Mutable globals/parameters and call results remain unknown. |
 | `SEM012` | Unresolved variable reference. | warning / semantic | Unknown extension calls and unknown extension event bodies are skipped. Warnings do not fail unless escalated. |
 | `SEM013` | Call to a canonical deprecated LSL function. | warning / lint | SLua-only metadata and replacement hints are excluded. |
 | `SEM014` | Unsupported explicit cast. | error | Only known source/target type pairs are checked. |
@@ -161,19 +167,23 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM031` | A Firestorm switch has no `default` label. | warning / lint | AST-only. `default` is optional syntax; this is a completeness warning, not a parser error. |
 | `SEM032` | The switch expression is a compile-time constant. | warning / lint | AST-only. Reports once on the switch expression; evaluation is bounded and conservative. |
 | `SEM033` | The switch expression has list type. | warning / lint | AST-only. Firestorm switch lowering compares the list value; LSL list equality compares list lengths rather than element contents. |
-| `SEM034` | A state change occurs inside a global user-defined function. | error / semantic | AST-only. Mono rejects state changes from global functions. The narrow direct `if`-without-`else` form is reported as SEM035 instead. Malformed statements, unclosed function bodies, unreliable environments and budget overflow are skipped. |
-| `SEM035` | A state change relies on the historical Mono `if`-without-`else` workaround. | warning / lint | AST-only. Matches only a direct unbraced state-change then-branch with no `else`; this is an unsupported compatibility behavior, not portable LSL. |
-| `SEM036` | An event handler returns a value. | error / semantic | AST-only. The compiler may accept this, but the official LSL reference says it crashes at runtime. Applies to canonical and extension event handlers; malformed bodies and unreliable units are skipped. |
-| `SEM037` | A statement is unreachable after an unconditional `return` or event state transition. | warning / lint | AST-only. Reports only the first unreachable statement in a straight-line sequence, or after an `if/else` whose both branches terminate. Same-state transitions, unknown state targets, conditional one-sided exits, loops and switch dispatch are not treated as terminating. Any jump/label or malformed body suppresses both rules for that code scope. |
+| `SEM034` | A state change occurs inside a global user-defined function. | error / semantic | AST-only, Second Life Mono target only. The narrow direct `if`-without-`else` form is reported as SEM035 instead. Other target profiles fail closed until their behavior is verified. Malformed statements, unclosed function bodies, unreliable environments and budget overflow are skipped. |
+| `SEM035` | A state change relies on the historical Mono `if`-without-`else` workaround. | warning / lint | AST-only, Second Life Mono target only. Matches only a direct unbraced state-change then-branch with no `else`; this is an unsupported compatibility behavior, not portable LSL. Other targets fail closed pending verification. |
+| `SEM036` | An event handler returns a value. | error / semantic | AST-only. The compiler may accept this, but the official LSL reference says it crashes at runtime. Applies to canonical and extension event handlers; malformed bodies and unreliable units are skipped. For compatibility, bodies containing jump/label control flow are conservatively skipped for this check. |
+| `SEM037` | A statement is unreachable according to the control-flow graph. | warning / lint | AST-only. Uses the bounded shared CFG, including constant conditions, loops, valid jump edges, and Firestorm switch dispatch using supported scalar/composite equality (integer/float, string/key, vector/rotation and list-length equality). Numeric local flow facts can also select cases. Source-order fallthrough/default and break to the innermost switch are preserved; unknown/unsupported/over-budget labels, incompatible SEM029 types and multiple SEM028 defaults preserve all arms. Reports the first unreachable non-empty statement in each straight-line sequence. Invalid jump scopes, parser errors, malformed nodes and budget exhaustion suppress the affected body. |
 | `SEM038` | A state has no event handlers. | error / semantic | AST-only. Checks complete `default` and named states; malformed states and states overlapped by parser errors are skipped. |
 | `SEM039` | A list element has list type. | error / semantic | AST-only. Checks nested literals, visible list variables, list-returning calls and other expressions whose type is provably `list`. Unknown types and malformed expressions are skipped. |
 | `SEM040` | Equality/inequality compares two lists. | warning / lint | AST-only. Reports only when both operand types are known to be `list`. `==` compares lengths only; `!=` returns their length difference. |
 | `SEM041` | Bare plain assignment in an `if` condition. | warning / lint | AST-only. Matches a top-level unparenthesized `=` assignment; an extra pair of parentheses marks intentional assignment. Compound assignments and assignments nested inside larger expressions are skipped. |
 | `SEM042` | Detection-context-only function is reachable from an incompatible event. | warning / lint | AST-only. Propagates known event contexts through direct user-function calls. `llDetectedGrab` and `llDetectedTouch*` are touch-only, `llDetectedLinkNumber` is restricted to touch/collision events, `llDetectedDamage` requires a damage event, and `llAdjustDamage` requires `on_damage`. Unknown extension events and unreferenced helpers are not guessed; parser errors, unreliable environments and graph-budget overflow suppress the rule. |
-| `SEM043` | A math operation has a statically provable domain error. | warning / lint | AST-only. Checks `/`, `%`, `/=` and `%=` for known zero divisors, plus `llSqrt` with a negative argument and `llPow` with a negative base and known non-integer exponent. Only valid built-in calls with known numeric arguments are evaluated; user-function shadowing, mutable variables, unknown values and malformed calls are skipped. Mono returns `NaN` for imaginary results; legacy LSO triggers a Math Error. Parser errors, unreliable environments and work/depth budget exhaustion suppress the rule. |
+| `SEM043` | A math operation has a statically provable domain error. | warning / lint | AST-only. Checks `/`, `%`, `/=` and `%=` for known zero divisors; `llSqrt` with a negative argument; `llPow` with a negative base and known non-integer exponent; and `llAcos`/`llAsin` with known arguments outside `[-1.0, 1.0]`; `llLog`/`llLog10` with known non-positive arguments are also reported because LSL silently returns `0.0` instead of a logarithm. Only valid built-in calls with known numeric arguments are evaluated; user-function shadowing, mutable variables, unknown values and malformed calls are skipped. Invalid inverse-trigonometric results are `NaN` in Mono and trigger a Math Error in legacy LSO. Parser errors, unreliable environments and work/depth budget exhaustion suppress the rule. |
 | `SEM044` | A populated named state has no transition path from `default`. | warning / lint | AST-only. Builds a bounded over-approximation from state-change statements in event handlers. Conditional and otherwise unreachable transitions count as possible edges; unknown targets, malformed/duplicate states, parser errors, unreliable environments and budget exhaustion are handled conservatively (4,096 states, 32,768 traversal units and 128 nested statement levels maximum). Empty states remain covered by SEM038. |
 | `SEM045` | An operator operand is incompatible or an increment target is not writable. | error / semantic | AST-only. Checks unary `-`, `!`, `~`, logical/bitwise/shift operators, and `++`/`--` on known variables. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. Built-in constants cannot be incremented or decremented. Unary plus is intentionally outside the rule. |
 | `SEM046` | A known binary arithmetic/comparison operator has incompatible operand types. | error / semantic | AST-only. Validates `+`, `-`, `*`, `/`, `%`, equality and relational operators against the shared LSL type-result matrix. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. List equality remains covered by SEM040 when both operands are lists. |
+| `SEM047` | A canonical Second Life LSL function is absent from the selected OpenSim runtime interface. | error / semantic | AST-only target-aware check for opensim-xengine and opensim-yengine. Uses pinned ILSL_Api.cs function-name snapshots; does not infer that an unknown/OSSL call is invalid. User-defined functions shadowing a canonical name are not reported. This checks interface presence, not live region behavior or all API semantic differences. |
+| `SEM048` | A known OSSL call is not listed in the project's explicit OpenSim OSSL allowlist. | warning / lint | AST-only. Emitted only for an OpenSim target when ossl_allowlist = strict / --strict-ossl is selected or at least one ossl_function / --ossl-function entry is configured. The allowlist describes what the project expects to be enabled; it does not query region security settings. No list means no OSSL availability assumption. |
+| `SEM049` | A canonical Second Life LSL event handler is absent from the selected OpenSim compiler/runtime. | error / semantic | AST-only target-aware check. XEngine uses its own lexer/parser event productions; YEngine uses the event-code enum intersected with handler declarations. Only complete event handlers in reliable input are considered. |
+| `SEM050` | A canonical Second Life LSL constant is absent from the selected OpenSim API snapshot. | error / semantic | AST-only target-aware check. Uses the selected version's constants table; local/global variables shadowing the same name are respected. Parser errors and unreliable preprocessing suppress the rule. |
 
 ## Illustrative minimal examples
 
@@ -276,7 +286,7 @@ default { state_entry() { return 1; } }
 ```
 
 ```lsl
-// SEM037: code after an unconditional return is unreachable
+// SEM037: the CFG proves this following statement is unreachable
 integer value() { return 1; llOwnerSay("never executed"); }
 default { state_entry() { } }
 ```
@@ -293,7 +303,7 @@ default { state_entry() { llOwnerSay((string)llDetectedKey(0)); } }
 ```
 
 ```lsl
-// SEM043: zero divisor and imaginary math-domain examples
+// SEM043: zero divisors, invalid math domains and silent log fallbacks
 integer divide(integer value) { return value / (3 - 3); }
 default {
     state_entry() {
@@ -301,6 +311,10 @@ default {
         value %= FALSE;
         float root = llSqrt(-1.0); // NaN in Mono; Math Error in LSO
         float power = llPow(-2.0, 0.5); // NaN in Mono; Math Error in LSO
+        float acos = llAcos(1.5); // NaN in Mono; Math Error in LSO
+        float asin = llAsin(-1.5); // NaN in Mono; Math Error in LSO
+        float logarithm = llLog(0.0); // LSL returns 0.0
+        float logarithm10 = llLog10(-1.0); // LSL returns 0.0
     }
 }
 ```
@@ -416,12 +430,44 @@ default { state_entry() { integer value; float result = value.x; } }
 - SEM025 uses the same syntactic read/use model and the same fail-closed gate. Because the scope model registers parameters only for user functions and canonical events, unknown extension-event parameters are excluded structurally rather than by a second policy.
 - SEM026 is reachability, not dead-code elimination: roots are matched direct identifier calls in event bodies and global initializers, and edges are matched direct identifier calls in user-function bodies. Built-in callees, indirect calls and calls without a real closing parenthesis never create edges; first-definition duplicate handling follows SEM001. A function called only from another unreachable function is still reported, because this is reachability, not a claim that no call sites exist. The graph is bounded and any node/edge/work overflow emits no SEM026 rather than reporting a partial result; error-severity preprocessor or lexical diagnostics suppress it through the same fail-closed gate as SEM024/SEM025.
 - SEM027 is an AST-only semantic error for global initializers that are definitely not simple values. It accepts scalar literals, visible global-variable references, built-in constants, vectors/rotations made from simple numeric components, and flat lists made from simple values. It does not constant-fold operators or function calls. Parenthesized forms and nested list literals are rejected to match the simple-assignable grammar; malformed expressions and inputs that exceed the bounded 128-node/64-depth check, or units with error-severity preprocessor/lexical diagnostics, are skipped.
-- SEM028–SEM033 are Firestorm-switch-only AST diagnostics. They are active only when the switch feature gate is enabled. The CFG models case dispatch, source-order fallthrough, `default`, and `break` to the innermost switch exit, so SEM011 can analyze value-returning functions containing switches instead of suppressing the whole function. A switch with no `default` retains an unmatched path; a `break` retains a path to the statement after the switch.
+- SEM028–SEM033 are Firestorm-switch-only AST diagnostics. They are active
+  only when the switch feature gate is enabled. The CFG evaluates constant
+  switch values and case labels with the same scalar/composite equality rules
+  used by those diagnostics: integer/float coercion, string/key equality,
+  vector/rotation component equality and list-length equality. Numeric
+  switch values can additionally use definite local data-flow facts.
+  Source-order fallthrough remains intact. If the value or any label is
+  unknown, unsupported or over budget, all possible arms are retained.
+  Incompatible SEM029 case types and multiple SEM028 defaults also disable
+  dispatch pruning. A known value with no matching case selects default or
+  preserves an unmatched path when there is no default. Break targets the
+  innermost switch even through loop nesting;
+  a nested switch owns its own break target.
 - SEM036 reports a value-return from an event handler because the official Second Life Wiki documents that the compiler can accept it even though executing it crashes the script. `return;` remains valid. Parser-damaged bodies and unreliable lexical/preprocessor units are skipped.
-- SEM037 reports only the first unreachable statement in a straight-line sequence after a definite return, a two-branch terminating `if/else`, or a transition to a different declared state inside an event. A state statement targeting the current state or an unknown state is not treated as terminal. Loops and switch dispatch remain conservative. Bodies containing `jump`/labels or malformed syntax are skipped for both SEM036 and SEM037; work/depth overflow suppresses the entire rule family.
+- SEM037 uses the shared bounded CFG to report the first unreachable
+  non-empty statement in each straight-line sequence, including inside nested
+  blocks, conditional branches, loop bodies and switch arms. The forward
+  worklist propagates definitely known local numeric values through reachable
+  joins, loop back-edges and valid jump/label edges. Safe increments and
+  arithmetic compound assignments update facts; ambiguous multiple writes
+  invalidate only potentially written locals. Assignment/increment results can
+  determine conditions when known. Mutable globals and parameters stay unknown.
+  Per-environment facts, side-effect/error-expression scans, worklist
+  iterations, CFG edge visits, switch dispatch and cumulative fact processing
+  are bounded. Oversized expressions fail closed before recursive flow
+  analysis. CFG joins intersect incoming must-states in place instead of
+  cloning whole maps for each edge. Constant switch dispatch uses the Firestorm evaluator's integer/float,
+  string/key, vector/rotation and list-length equality semantics. Numeric local
+  facts can additionally select a case; unknown or unsupported values keep all
+  possible arms reachable. Source-order fallthrough and default/no-match rules
+  are preserved. Break exits the innermost switch, even through nested loops;
+  nested switches shadow the
+  enclosing target. Invalid jump scopes, duplicate/missing labels, syntax
+  errors, error nodes, unclosed blocks and budget exhaustion suppress SEM037
+  for the affected body. SEM036 keeps its conservative jump/label suppression.
 - SEM041 follows the documented LSLint convention for the common `=`/`==` typo: only a bare plain assignment at the top level of an `if` condition is warned. Wrapping the assignment in an additional pair of parentheses, as in `if ((target = llGetOwner()))`, explicitly marks it as intentional. Compound assignments, assignments inside larger expressions, and other control-flow conditions are outside this rule. Parser-damaged conditions and unreliable preprocessor/lexical environments are skipped.
 - SEM042 propagates known event contexts through matched direct user-function calls. General `llDetected*` functions require a detection event; `llDetectedGrab` and `llDetectedTouch*` are touch-only; `llDetectedLinkNumber` is restricted to touch/collision events; `llDetectedDamage` is limited to `on_damage`/`final_damage`; and `llAdjustDamage` is `on_damage`-only. Unknown extension events contribute no guessed context, unreferenced functions are ignored, and the check fails closed for parser errors, unreliable environments or call-graph budget overflow.
-- SEM043 reports valid numeric `/`, integer `%`, `/=`, or `%=` operations with a provably zero divisor. It also reports `llSqrt` with a known negative argument and `llPow` with a known negative base plus a known non-integer exponent. The bounded evaluator handles literals, unshadowed numeric built-in constants, parentheses, unary numeric operators, numeric casts and side-effect-free constant arithmetic. It does not evaluate mutable variables or user-defined function calls; built-in shadowing, invalid signatures and malformed calls are respected. Exponents outside the signed-integer range or with non-finite values remain unknown. Vector `%` remains a cross product. Imaginary results are `NaN` in Mono and a Math Error in legacy LSO. Any parser error, unreliable lexical/preprocessor environment or evaluator budget/depth exhaustion suppresses the rule.
+- SEM043 reports valid numeric `/`, integer `%`, `/=`, or `%=` operations with a provably zero divisor. It also reports `llSqrt` with a known negative argument, `llPow` with a known negative base plus a known non-integer exponent, and `llAcos`/`llAsin` with known arguments outside `[-1.0, 1.0]`. `llLog`/`llLog10` with known non-positive arguments are reported separately because LSL returns `0.0` instead of a logarithm. The bounded evaluator handles literals, unshadowed numeric built-in constants, parentheses, unary numeric operators, numeric casts and side-effect-free constant arithmetic. It does not evaluate mutable variables or user-defined function calls; built-in shadowing, invalid signatures and malformed calls are respected. Exponents outside the signed-integer range or with non-finite values remain unknown. Vector `%` remains a cross product. Imaginary results are `NaN` in Mono and a Math Error in legacy LSO. Any parser error, unreliable lexical/preprocessor environment or evaluator budget/depth exhaustion suppresses the rule.
 - SEM044 builds a conservative state-transition graph starting at `default` and warns on populated named states with no path from that root. Every state-change statement in a valid event body is treated as a possible edge, even when nested in a conditional or textually unreachable code; this favors false negatives over false positives. Transitions inside global functions are not used because those are separately diagnosed by SEM034/SEM035. Empty states are left to SEM038. The rule skips duplicate/malformed state sets, parser errors, unreliable environments and budget/depth exhaustion. This is structural reachability from `default`, not a model of a script restored from an inventory snapshot in a previously active state.
 - SEM045 validates only operator/type combinations with confirmed LSL constraints: unary `-` accepts integer/float/vector/rotation, `!` and `~` require integer, logical/bitwise/shift operators require two integers, and increment/decrement require a known integer/float variable. Unknown values are not guessed. Built-in constants are not writable. Unary plus is intentionally excluded. Any parser error, unreliable lexical/preprocessor environment or more than 65,536 expression sites suppresses the rule.
 - SEM046 validates ordinary arithmetic and comparison operators only when both operand types are known. It reuses the shared LSL result-type matrix, so accepted vector/rotation arithmetic, string/list concatenation, mixed numeric operations and implicit string/key equality conversions stay aligned with expression inference. Unknown values are not guessed; parser errors, unreliable input or expression-site budget exhaustion suppress the rule.

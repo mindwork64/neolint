@@ -8,6 +8,8 @@ DIAGNOSTIC_SOURCES = (
     "src/lexer.rs",
     "src/parser.rs",
     "src/semantic.rs",
+    "src/main.rs",
+    "src/source/unit.rs",
 ) + tuple(
     str(path.relative_to(ROOT))
     for directory in ("src/preprocessor", "src/ast", "src/ast_semantic")
@@ -38,6 +40,19 @@ class DocumentationTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         for target in re.findall(r"\]\((docs/[^)#]+)(?:#[^)]*)?\)", readme):
             self.assertTrue((ROOT / target).is_file(), f"missing README link: {target}")
+
+    def test_cli_reference_documents_all_include_directory_spellings(self):
+        cli = (ROOT / "docs/cli-reference.md").read_text()
+        for spelling in ("`-I DIR`", "`-IDIR`", "`--include-dir DIR`", "`--include-dir=DIR`"):
+            self.assertIn(spelling, cli, f"cli-reference.md omits {spelling}")
+
+    def test_firestorm_docs_separate_dialect_from_syntax_gates(self):
+        firestorm = (ROOT / "docs/firestorm-preprocessor.md").read_text()
+        language = (ROOT / "docs/language-support.md").read_text()
+        self.assertIn("USE_SWITCHES", firestorm)
+        self.assertIn("USE_LAZY_LISTS", firestorm)
+        self.assertIn("does **not** turn on switch or lazy-list parsing", firestorm)
+        self.assertIn("The preprocessor dialect alone does not enable either extension", language)
 
     def test_release_workflow_names_both_supported_targets(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()

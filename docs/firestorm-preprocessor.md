@@ -2,7 +2,10 @@
 
 Neolint's `--dialect firestorm` profile enables full preprocessing plus the
 documented Firestorm preprocessing behaviors that are safe and deterministic to
-reproduce. It does **not** enable switch or lazy-list syntax; those remain Phase 5.
+reproduce. Selecting the dialect does **not** turn on switch or lazy-list parsing
+by itself: the AST parser accepts those forms only when their independent
+Firestorm gates are active, typically through `USE_SWITCHES` and
+`USE_LAZY_LISTS`. See [Language support](language-support.md#firestorm-extensions-opt-in).
 
 ## `//fspreprocessor off`
 
@@ -152,10 +155,13 @@ Documented differences from neolint's policy:
 
 #### 4. Still unverified
 
-No Firestorm viewer was built or executed. The stub does not model the inventory
-service, the asynchronous asset backend, its timing or in-flight duplicate
-requests, the UI, or Firestorm's exact cache directory lifetime. Viewer-level `#pragma once` behaviour therefore remains
-unverified, and Issue #109 stays open for that evidence.
+The standalone probe does not execute the Firestorm viewer. It does not model
+the inventory service, the asynchronous asset backend, its timing or in-flight
+duplicate requests, the UI, or Firestorm's exact cache directory lifetime.
+Viewer-level `#pragma once` behaviour therefore remains unverified. Issue #109
+was closed after the scoped neolint tests, Boost.Wave probe and pinned-source
+reconstruction were completed; that resolution does not claim live Viewer
+integration.
 
 ## Switch and lazy-list syntax
 
@@ -167,6 +173,46 @@ gates are on; explicit `--engine legacy`
 runs the Legacy engine, which does not parse them. The gates are
 driven by `PreprocessSettings` and the active `USE_SWITCHES`/`USE_LAZY_LISTS`
 macros, with `//fspreprocessor off` taking priority.
+
+### Lazy-list forms confirmed by the pinned source
+
+At Firestorm commit `7e44160d001b719d17ee93816425c570974b9a8b`,
+`reformat_lazy_lists()` in `indra/newview/fslslpreproc.cpp` performs two
+separate transformations:
+
+- `identifier[index] = rhs` becomes `identifier = lazy_list_set(identifier,
+  index, [rhs])`. The matcher excludes `==`, balances nested brackets in the
+  index and nested parentheses in the RHS, skips comments and string literals,
+  and accepts a semicolon or closing parenthesis as the RHS boundary.
+- Typed reads map `integer`, `float`, `string`, `key`, `vector`, `rotation` and
+  `list` to their corresponding `llList2*` functions. `quaternion` is an
+  additional spelling for `llList2Rot`, not an LSL value type. One optional pair
+  of parentheses around the indexed reference is preserved.
+
+The source-level regex can rewrite malformed arities into calls that the LSL
+compiler subsequently rejects. NeoLint models valid forms, not every textual
+match of that regex: scalar extractions have one index; list extraction accepts
+a two-index range only; the one-index list spelling is rejected because the
+regex lowers it to `llList2List(src, index)`, while the
+[canonical function signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires `src, start, end`. More than two indices, bare reads, compound
+writes and non-identifier bases are diagnosed. This is intentionally stricter than merely
+matching the regex and avoids treating invalid generated calls as valid syntax.
+
+NeoLint keeps these constructs in the AST and does not emulate Firestorm's
+source rewriting. The regex patterns were also checked with a one-off C++ probe
+compiled against the locally pinned Boost.Regex 1.90 implementation. That probe
+is exploratory evidence, not a checked-in test or CI gate; the committed Rust
+tests verify NeoLint's parser, feature gates, recovery and source-map behavior.
+
+A separate user-run smoke test in Firestorm-Releasex64 6.6.17.70368 (Mono)
+confirmed the supported Lazy List forms in a logged-in Viewer and live region:
+the preprocessor output contained the expected `lazy_list_set` and `llList2*`
+rewrites, and the script executed with the expected values (42, 2.5, the
+expected string/key/vector/rotation values and a range length of 3). The
+one-index `(list)items[index]` form became a two-argument `llList2List` call
+and was rejected by the simulator compiler. This smoke test covers Lazy Lists;
+it does not verify the separate `#pragma once` inventory/cache integration.
 
 ## Not implemented
 

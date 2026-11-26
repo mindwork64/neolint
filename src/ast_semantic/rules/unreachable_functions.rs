@@ -8,23 +8,29 @@
 use std::collections::HashMap;
 
 use crate::ast::Ast;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
-use super::super::callgraph::unreachable_functions;
 use super::super::calls::CallSite;
 use super::super::types::UserFunctionSignature;
 
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     ast: &Ast,
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
     reliable: bool,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if !reliable {
         return Vec::new();
     }
 
-    let reachability = unreachable_functions(ast, calls, functions);
+    let reachability = super::super::callgraph::unreachable_functions_with_builtins(
+        ast,
+        calls,
+        functions,
+        builtin_functions,
+    );
     if reachability.suppressed {
         return Vec::new();
     }

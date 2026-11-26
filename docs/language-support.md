@@ -40,31 +40,83 @@ User-defined functions can return one of these types or omit a return type when 
 
 Neolint recognizes blocks, empty statements, local declarations, expression statements, assignments, function calls, `if`/`else`, `for`, `while`, `do-while`, `return`, `jump` labels, and state changes.
 
-### State changes and Mono compatibility
+### State changes and runtime profiles
 
 A `state target;` statement is valid in an event handler. A top-level
-user-defined (global) function is a different context: the Mono compiler
-rejects ordinary state changes from these functions with the diagnostic
-`Global functions can't change state`. Neolint's AST engine reports
-`SEM034` for these placements, whether or not the function is currently
-reachable from an event handler.
+user-defined (global) function is a different context: the Second Life Mono
+compiler rejects ordinary state changes from these functions with the
+diagnostic `Global functions can't change state`. The AST engine reports
+`SEM034` for these placements when the selected target is `second-life-mono`.
 
 The Second Life Wiki documents one historical compiler bugfeature:
 `if (condition) state target;` with the state change as the direct, unbraced
-then-branch and no `else`. The same page records that Rand Linden had previously
-said this workaround was no longer valid. A 2026 Mono/LSL-Luau compatibility
-report demonstrates different execution behavior for this exact pattern.
-Neolint therefore reports this narrow shape as `SEM035`, a warning—not as a
-supported workaround or portable LSL. Do not use it in new code; perform state
-transitions in event handlers. Braced branches, `if/else`, and loop bodies do
-not qualify and receive `SEM034`.
+then-branch and no `else`. The same page records that this workaround was
+described as no longer valid. Neolint reports this narrow shape as `SEM035`,
+a warning—not as a supported workaround or portable LSL. Do not use it in new
+code; perform state transitions in event handlers.
 
-These are AST-only diagnostics. Legacy output remains frozen, and Compare still
-compares only `SEM001`–`SEM023`. The rule skips malformed state-change
-statements, incomplete function bodies, unreliable lexical/preprocessor units,
-and inputs exceeding its bounded traversal budget. The official references are
-the [LSL State documentation](https://wiki.secondlife.com/wiki/State) and the
-[2026 Mono/LSL-Luau state-change compatibility report](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
+These two diagnostics are currently enabled only for `second-life-mono`.
+They are deliberately suppressed for LSO, LSL-on-Luau, OpenSim XEngine and
+OpenSim YEngine until the exact compiler/runtime behavior is verified for each
+target. No warning on those targets must not be read as proof that a global
+function state change is valid there. Legacy output remains frozen, and
+Compare retains its existing `SEM001`–`SEM023` parity contract.
+
+The selected target is independent of `--dialect`. Firestorm controls the
+preprocessor dialect and its opt-in parser gates; it is not a runtime. The
+supported initial target selectors are `second-life-mono` (default),
+`second-life-lso`, `second-life-luau`, `opensim-xengine`, and
+`opensim-yengine`.
+
+second-life-luau means LSL compiled to Luau, not the separate SLua language.
+OpenSim XEngine is a historical target: OpenSimulator removed it in 0.9.3.0
+and uses YEngine in that release line.
+
+The AST analyzer uses versioned OpenSim API snapshots generated from the
+upstream compiler/runtime sources and pinned in data/README.md. Each snapshot
+includes standard LSL function overloads, OSSL signatures, event handlers and
+constants. XEngine uses its own lexer/parser event productions; YEngine uses
+its event-code enum intersected with the handler interface.
+
+The snapshots currently cover:
+- XEngine API20 (OpenSim 0.9.2.2): 425 standard functions, 258 OSSL
+  signatures, 35 events and 770 constants.
+- YEngine API20/API22/API23/API24: 425/434/457/473 standard functions,
+  258/258/289/296 OSSL signatures, 36/36/37/37 events, and
+  770/780/815/888 constants.
+
+Use target_version to select an OpenSim API version. YEngine defaults to the
+pinned API24 snapshot; XEngine is available only for API20. The data includes
+overloads and language-level type mappings. SEM047 reports canonical SL
+functions absent from the selected OpenSim API. SEM049 reports canonical
+SL event handlers absent from the selected compiler. SEM050 reports
+canonical SL constants absent from the selected constants table. Function
+overloads are resolved using arity and known argument types; ambiguous
+expression return types remain unknown.
+
+OSSL availability is not inferred from the interface. A function present in
+the simulator build may still be disabled on a particular region by security
+configuration, threat level, or permission. Enable an explicit project
+allowlist with ossl_allowlist = strict / --strict-ossl; repeated
+ossl_function = osName / --ossl-function osName entries describe the
+functions expected to be enabled. SEM048 warns when a known OSSL call is
+outside that list. The rule does not inspect live region permissions.
+
+The selected API catalogue also drives built-in call checks, return-type
+inference, event checks, constants, call-graph analysis, state namespace and
+reachability. Second Life Mono, LSO and LSL-on-Luau currently share the
+canonical Linden Lab API metadata; runtime-specific compiler behavior is
+only enabled where independently confirmed. Static catalogue tests pass, but
+no connected Second Life Viewer/OpenSim simulator was available for in-world
+execution verification.
+
+The rule skips malformed state-change statements, incomplete function bodies,
+unreliable lexical/preprocessor units, and inputs exceeding its bounded
+traversal budget. References: the
+[LSL State documentation](https://wiki.secondlife.com/wiki/State),
+[Second Life compiler targets](https://lsl.dev/fundamentals/script-editor/),
+[OpenSimulator scripting documentation](https://opensimulator.dev/wiki/Scripting_Documentation),
+and the [Mono/LSL-Luau state-change compatibility report](https://feedback.secondlife.com/slua-alpha/p/state-changes-discrepancy-in-lsl-luau-vs-mono).
 
 ### Return statements and unreachable code
 
@@ -75,15 +127,44 @@ script. Neolint reports this as `SEM036` for canonical and extension event
 handlers. Use a value-return only from a user-defined function with a matching
 return type.
 
-`SEM037` warns when Neolint can prove that the first following statement is
-unreachable after an unconditional `return`, after an `if/else` whose two
-branches both terminate, or after an event handler changes to a different,
-known state. A transition to the current state is not a terminator because LSL
-performs no state-change side effects in that case. Conditional one-sided
-returns/transitions, loops and switch dispatch are not treated as guaranteed
-terminators. Bodies containing `jump`/labels or malformed syntax are skipped to
-avoid false positives. This is a bounded, conservative check rather than a full
-statement-reachability proof.
+SEM037 uses Neolint's bounded control-flow graph to report unreachable
+statements. In addition to literal and built-in constants, it propagates
+definitely known local numeric values from declarations and assignments.
+At every reachable CFG join, a value is retained only when all incoming paths
+agree; a branch that returns does not constrain the surviving path. A bounded
+forward worklist iterates through loop back-edges and valid jump/label edges
+to a fixed point. Safe increments and arithmetic compound assignments update
+facts; one nested write is tracked through its containing expression, while
+ambiguous multiple writes invalidate only touched locals. Assignment and
+increment results can determine conditions when known. Mutable globals and
+parameters are never assumed constant. Per-environment fact storage, side
+effect/error-expression scans, worklist iterations, CFG edge visits, switch
+dispatch and total fact-processing work are bounded; oversized expressions or
+budget exhaustion suppress conclusions for the affected body. CFG joins
+intersect incoming must-states in place to avoid cloning whole fact maps for
+each edge.
+
+The CFG also reasons about loop exit paths, valid jump/label edges, and
+Firestorm constant switch dispatch. It uses scalar/composite equality for
+integer/float, string/key, vector/rotation and list-length values; numeric local
+facts can also select cases. When the switch value and every case label are
+known, only matching cases are entered and source-order fallthrough is
+preserved; a known unmatched value selects default or the no-match exit.
+Unknown values, unsupported/over-budget labels, incompatible case types and
+multiple default labels retain all possible arms. This prevents invalid
+switch syntax/types from becoming false reachability proofs. Break always
+targets the innermost switch, even when nested
+inside a loop; a nested switch owns its own break target. This allows Neolint
+to find dead statements after a switch whose feasible arms all terminate, while
+preserving the exit for reachable breaks and unmatched cases.
+
+A transition to a different, unique known state terminates an event handler.
+A transition to the current state has no state-change side effect, and unknown
+targets are not treated as valid transitions. Invalid jump scopes, malformed
+syntax, error nodes, unclosed blocks and analysis-budget exhaustion suppress
+the affected body. The check reports only the first unreachable non-empty
+statement in each straight-line sequence; it is not a general optimizer or
+runtime model.
 
 References: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
 [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and the
@@ -156,10 +237,13 @@ References: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wik
 LSL integer/float division and integer remainder by zero cause a runtime
 `Math Error`; this includes `/=`, `%=` and vector division by a scalar zero.
 The AST engine reports warning `SEM043` when a bounded constant evaluator can
-prove the divisor is zero. It also checks the built-ins `llSqrt` and `llPow`:
-a negative square-root argument, or a negative power base with a non-integer
-exponent, produces an imaginary result. The documented runtime difference is
-important: Mono returns `NaN`, while legacy LSO triggers a `Math Error`.
+prove the divisor is zero. It also checks `llSqrt`, `llPow`, `llAcos` and `llAsin`:
+a negative square-root argument, a negative power base with a non-integer
+exponent, or an `llAcos`/`llAsin` argument outside `[-1.0, 1.0]` produces an
+imaginary result. The documented runtime difference is important: Mono returns
+`NaN`, while legacy LSO triggers a `Math Error`. The logarithm built-ins
+`llLog` and `llLog10` are also checked: for arguments `<= 0.0`, LSL returns
+`0.0` instead of a logarithm, which can silently corrupt a calculation.
 
 ```lsl
 integer quotient = 10 / (3 - 3); // SEM043
@@ -167,6 +251,10 @@ integer remainder = 10 % FALSE; // SEM043
 float negative_zero = 1.0 / -0.0; // SEM043
 float invalid_root = llSqrt(-1.0); // SEM043
 float invalid_power = llPow(-2.0, 0.5); // SEM043
+float invalid_acos = llAcos(1.5); // SEM043
+float invalid_asin = llAsin(-1.5); // SEM043
+float invalid_log = llLog(0.0); // SEM043: LSL returns 0.0
+float invalid_log10 = llLog10(-1.0); // SEM043: LSL returns 0.0
 ```
 
 The evaluator understands literals, unshadowed numeric built-in constants,
@@ -279,17 +367,33 @@ forms:
 myList[index] = value;          // single-index assignment
 (integer)myList[index];         // typed extraction
 (string)myList[index];
-(list)myList[index];
 (list)myList[first,last];       // list range extraction
 ```
 
-Supported typed extractions are integer, float, string, key, vector, rotation,
-and list. The typed reference may be fully parenthesized. The parser preserves
-LHS/RHS/index structure and spans; it does not rewrite source to
-`lazy_list_set` or `llList2*`. Bare reads without a typed cast, compound indexed
-assignment, deletion, more than two indices, and non-identifier bases are not
-part of confirmed Firestorm behavior and are not promised here. `quaternion` is
-not added to the type system.
+Supported scalar typed extractions are integer, float, string, key, vector,
+and rotation, each with exactly one index. List extraction accepts a
+`first,last` range (exactly two indices). The
+typed reference may have one optional pair of parentheses, including
+`(integer)(myList[index])`.
+
+Firestorm also accepts `(quaternion)myList[index]` and its parenthesized
+reference form. This is a Firestorm-only spelling alias for `rotation`: the
+upstream preprocessor lowers it to `llList2Rot`. NeoLint represents the cast as
+`rotation`; the `Type.span` retains the source spelling `quaternion`.
+`quaternion` is not an LSL value type, declaration type, or general-purpose
+cast target; it is accepted only for a single-index rotation extraction while
+the Firestorm lazy-list gate is enabled. `(list)myList[index]` is rejected:
+Firestorm's textual rewrite emits `llList2List(myList, index)`, but the
+[canonical function signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires both start and end indices.
+
+The parser preserves LHS/RHS/index structure and source spans; it does not
+rewrite source to `lazy_list_set` or `llList2*`. Bare indexed reads without a
+typed cast, compound indexed assignment, deletion, more than two indices, and
+non-identifier bases are rejected rather than guessed. Nested calls and bracket
+expressions in indices, and nested calls/casts/list literals in assignment RHSs,
+are retained as ordinary AST children. Comments and string contents do not
+create lazy-list nodes.
 
 ### Enabling gates
 

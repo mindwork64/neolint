@@ -20,11 +20,15 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
 | `--preprocess` | Enable the standard LSL preprocessor. |
 | `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
+| `--target-version VERSION` | Select a pinned OpenSim API version: 0.9.2.2, 0.9.3.0, 0.9.3.1 or master-2026-11-25. Requires an OpenSim target. |
+| `--target PROFILE` | Select the target platform/runtime independently from the preprocessing dialect. Defaults to `second-life-mono`. |
+| `--strict-ossl` | Enable OSSL allowlist checking, including an explicitly empty allowlist; requires an OpenSim target. |
+| `--ossl-function NAME` | Add an OSSL function to the explicit project allowlist (repeatable; requires an OpenSim target). |
 | `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
-| `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
-| `--include-dir=DIR`, `--dialect=DIALECT`, `--engine=ENGINE` | Equals forms of the corresponding options. |
+| `-I DIR`, `-IDIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
+| `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--target-version=VERSION`, `--ossl-function=NAME`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
-Options may be repeated where meaningful. `--disable` and `--severity` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
+Options may be repeated where meaningful. `--disable`, `--severity`, and `--ossl-function` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--target` overrides the target profile, CLI `--ossl-function` adds to the configured OSSL allowlist, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
 
 Without preprocessing flags, the default AST path uses identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map, but macros and includes are not expanded and Firestorm extension gates stay off. Only explicit `--engine legacy` without preprocessing keeps the historical direct Legacy path, whose diagnostics are unchanged from previous releases. Unit-based runs of every engine, including `--engine legacy --preprocess`, apply display suppression before the rendered-diagnostic cap, so disabling a rule can avoid a terminal `PRE039`. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
 
@@ -43,8 +47,8 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
-`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` are AST-only lint diagnostics.
-`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, and `SEM046` are AST-only semantic errors. The Firestorm switch
+`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, and `SEM048` are AST-only lint diagnostics.
+`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`–`SEM047`, `SEM049`, and `SEM050` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
 user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
@@ -55,7 +59,7 @@ context-bound detection functions are reachable from incompatible events;
 `SEM043` warns on statically provable math-domain hazards; `SEM044` warns
 when a populated state has no transition path from `default`; `SEM045` rejects
 known-invalid operator operand types; `SEM046` rejects known-incompatible
-arithmetic and comparison operands. These codes appear in
+arithmetic and comparison operands; `SEM047` reports canonical SL functions missing from the selected OpenSim API; `SEM048` checks the explicit OSSL allowlist; `SEM049` and `SEM050` report unavailable canonical SL events and constants. These codes appear in
 default and explicit `--engine ast`
 output, are never emitted by explicit `--engine legacy`, and are not part of the
 Compare parity report, which continues to cover only `SEM001`–`SEM023`.
@@ -91,11 +95,16 @@ neolint --engine compare --format json script.lsl
 preprocess = true
 dialect = firestorm
 include_dir = ./includes
+target = opensim-yengine
+ossl_function = osGetAgentIP
+ossl_function = osTeleportAgent
 ```
 
 - `preprocess` is `true` or `false`.
 - `dialect` is `lsl` or `firestorm`; `firestorm` enables preprocessing.
 - `include_dir` may appear repeatedly and preserves file order.
+- `target` is independent of `dialect`; supported values are `second-life-mono`, `second-life-lso`, `second-life-luau`, `opensim-xengine`, and `opensim-yengine`.
+- `ossl_function` may appear repeatedly and describes the OSSL functions expected to be enabled in the selected OpenSim region. It is a project allowlist, not a live region permission query.
 
 Quoted includes search the including file's directory first, then the include directories in order; angle includes search only the include directories. URL, `http(s)`, `ftp`, and UNC/network paths are rejected. `#pragma once` is a documented neolint convenience, not a guaranteed Firestorm capability. `//fspreprocessor off` is a Firestorm-only script-wide kill switch and emits an informational `PRE037`; it does not affect the exit code.
 

@@ -1,15 +1,17 @@
 //! SEM003: canonical event handler parameter count and type checks.
 
 use crate::ast::{Ast, TopLevel};
-use crate::builtins;
 use crate::diagnostic::Diagnostic;
+use std::collections::HashMap;
 
 use super::super::scopes::type_name;
 use super::semantic_error;
 
-pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
+pub(crate) fn check(
+    ast: &Ast,
+    events: &HashMap<String, crate::builtins::Signature>,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let events = &builtins::definitions().events;
     for item in &ast.items {
         let TopLevel::State(state) = item else {
             continue;

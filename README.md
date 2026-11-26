@@ -33,7 +33,7 @@
 
 ## At a glance
 
-Current version: `1.1.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0)
+Current version: `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)
 
 | | |
 |:--|:--|
@@ -42,7 +42,7 @@ Current version: `1.1.0` · [stable release](https://github.com/mindwork64/neoli
 | **Analysis engine** | AST by default · Legacy compatibility mode |
 | **Execution** | Local CLI · deterministic · offline during normal lint runs |
 | **Release binaries** | Linux x86_64 · Windows x86_64 |
-| **Current version** | `1.1.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0) |
+| **Current version** | `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0) |
 
 Neolint is a linter, **not an LSL compiler**. A clean report means only that the checks implemented by neolint found no issue; it does not guarantee acceptance or correct behavior in Second Life or another simulator. The official compiler and target runtime remain authoritative.
 
@@ -50,12 +50,12 @@ Neolint is a linter, **not an LSL compiler**. A clean report means only that the
 
 ### 1. Download
 
-Choose the archive for your platform from the **[v1.1.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0)**:
+Choose the archive for your platform from the **[v1.2.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)**:
 
 | Platform | Archive |
 |:--|:--|
-| Linux x86_64 | <code>neolint-v1.1.0-x86_64-unknown-linux-gnu.tar.gz</code> |
-| Windows x86_64 | <code>neolint-v1.1.0-x86_64-pc-windows-msvc.zip</code> |
+| Linux x86_64 | <code>neolint-v1.2.0-x86_64-unknown-linux-gnu.tar.gz</code> |
+| Windows x86_64 | <code>neolint-v1.2.0-x86_64-pc-windows-msvc.zip</code> |
 
 Verify the downloaded archive using its adjacent <code>.sha256</code> file. The [installation guide](docs/getting-started.md#verify-a-download) contains platform-specific verification commands and full installation steps.
 
@@ -107,9 +107,9 @@ Neolint organizes findings into four diagnostic families:
 The AST engine is the default in v1.1.0. The previous Legacy engine remains available for compatibility; <code>compare</code> mode is provided for maintainers investigating differences between the two.
 
 **Also included:**
-- Standard LSL preprocessing and an opt-in Firestorm preprocessor profile.
+- Standard LSL preprocessing and an opt-in Firestorm preprocessor profile, independent from target runtime profiles (`second-life-mono`, `second-life-lso`, `second-life-luau`, `opensim-xengine`, `opensim-yengine`). OpenSim profiles include version-pinned LSL/OSSL function overloads, event handlers and constants, plus an explicit OSSL allowlist.
 - Include directories, macro expansion, source locations, and related diagnostic locations.
-- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable math-domain hazards, and invalid operator operands (`SEM024`–`SEM046`).
+- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable math-domain hazards, and invalid operator operands (`SEM024`–`SEM046`), OpenSim API checks (`SEM047`, `SEM049`, `SEM050`) and explicit OSSL allowlist checks (`SEM048`).
 - Human-readable output and structured JSON diagnostics.
 - Configurable rule suppression and severity overrides.
 

@@ -177,6 +177,22 @@ fn lazy_list_base_and_index_count_as_reads() {
 }
 
 #[test]
+fn quaternion_lazy_list_extraction_reads_its_base_and_index() {
+    let source =
+        "default { state_entry() { list values; integer index; (quaternion)values[index]; } }\n";
+    let options = AstParseOptions::lsl().with_lazy_lists_enabled(true);
+    assert!(sem024(&semantic_valid_with(source, options)).is_empty());
+}
+
+#[test]
+fn function_calls_inside_lazy_list_indices_are_reachable() {
+    let source = "integer get_index() { return 0; }\ndefault { state_entry() { list values; (integer)values[get_index()]; } }\n";
+    let options = AstParseOptions::lsl().with_lazy_lists_enabled(true);
+    let diagnostics = semantic_valid_with(source, options);
+    assert!(sem026(&diagnostics).is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn plain_assignment_target_is_not_a_read() {
     let source = "default { state_entry() { integer value; value = 1; } }\n";
     let start = source.find("value").unwrap();

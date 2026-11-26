@@ -68,6 +68,33 @@ class CrossPassConsistencyTests(unittest.TestCase):
         self.assertEqual([problem["row"] for problem in problems], ["drifting"])
 
 
+class FlowWorkloadTests(unittest.TestCase):
+    def test_flow_workloads_are_deterministic_and_cover_budget_paths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            first = pathlib.Path(first_dir)
+            second = pathlib.Path(second_dir)
+            generated = [
+                ("flow_worklist", lambda root: bench.workloads.flow_worklist(root, 4)),
+                ("flow_side_effects", lambda root: bench.workloads.flow_side_effects(root, 4)),
+                ("flow_budget", lambda root: bench.workloads.flow_budget(root, 4)),
+                ("switch_dispatch", lambda root: bench.workloads.switch_dispatch(root, 3)),
+            ]
+            for name, make in generated:
+                first_path = make(first)
+                second_path = make(second)
+                self.assertEqual(first_path.read_bytes(), second_path.read_bytes(), name)
+
+            budget = (first / "flow_budget.lsl").read_text(encoding="utf-8")
+            switch = (first / "switch_dispatch_3.lsl").read_text(encoding="utf-8")
+            self.assertIn("after return: budget must fail closed", budget)
+            self.assertIn("#define USE_SWITCHES", switch)
+            self.assertIn("case 0: return 0;", switch)
+            self.assertIn("case 2: return 2;", switch)
+            self.assertIn("default: return -1;", switch)
+
+
 class HarnessSourceDigestTests(unittest.TestCase):
     def test_digest_covers_every_harness_source_file(self):
         digest = bench.harness_source_digest()

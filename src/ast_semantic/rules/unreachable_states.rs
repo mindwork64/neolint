@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::ast::{Ast, Block, Statement, StatementKind, SwitchLabel, TopLevel};
-use crate::builtins;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 const MAX_STATE_GRAPH_WORK: usize = 32_768;
@@ -22,10 +22,11 @@ const GOD_ONLY_BUILTIN_FUNCTIONS: &[&str] = &[
 /// an event body is considered possible, including transitions in conditional
 /// and otherwise unreachable branches. This can hide a finding, but cannot
 /// create one merely because a condition or branch was guessed incorrectly.
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     ast: &Ast,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if ast.items.len() > MAX_STATE_GRAPH_WORK
         || !environment_reliable
@@ -113,9 +114,7 @@ pub(crate) fn check(
             "default".to_owned()
         } else {
             if conflicting_names.contains_key(state.name.as_str())
-                || (builtins::definitions()
-                    .functions
-                    .contains_key(state.name.as_str())
+                || (builtin_functions.contains_key(state.name.as_str())
                     && !GOD_ONLY_BUILTIN_FUNCTIONS.contains(&state.name.as_str()))
             {
                 return Vec::new();

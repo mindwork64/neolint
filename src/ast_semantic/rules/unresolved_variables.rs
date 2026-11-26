@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, ExpressionKind, TopLevel};
-use crate::builtins;
+use crate::builtins::{self, FunctionCatalog};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::CallSite;
@@ -23,22 +23,31 @@ impl ByteRange {
     }
 }
 
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     ast: &Ast,
     sites: &[ExpressionSite<'_>],
     calls: &[CallSite<'_>],
     scopes: &ScopeTree,
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
-    let mut excluded = unknown_event_ranges(ast);
-    excluded.extend(unknown_call_argument_ranges(calls, functions));
+    let mut excluded = unknown_event_ranges(ast, scopes.builtin_events());
+    excluded.extend(unknown_call_argument_ranges(
+        calls,
+        functions,
+        builtin_functions,
+        scopes.builtin_events(),
+    ));
     let mut callees = HashSet::new();
     for site in calls {
         if let ExpressionKind::Identifier(callee) = &site.call.callee.kind {
             callees.insert((callee.span.start, callee.span.end));
         }
     }
-    let constants = &builtins::definitions().constants;
+    let constants = scopes.builtin_constants();
+    // Canonical SL constants absent from an OpenSim profile are diagnosed by
+    // SEM050; suppress the generic SEM012 duplicate for the same identifier.
+    let canonical_constants = &builtins::definitions().constants;
     let mut diagnostics = Vec::new();
     for site in sites {
         let ExpressionKind::Identifier(identifier) = &site.expression.kind else {
@@ -52,6 +61,7 @@ pub(crate) fn check(
         }
         if callees.contains(&(identifier.span.start, identifier.span.end))
             || constants.contains_key(identifier.name.as_str())
+            || canonical_constants.contains_key(identifier.name.as_str())
             || scopes
                 .lookup_value_at(site.scope, &identifier.name, identifier.span.start)
                 .is_some()
@@ -72,8 +82,10 @@ pub(crate) fn check(
     diagnostics
 }
 
-fn unknown_event_ranges(ast: &Ast) -> Vec<ByteRange> {
-    let canonical = &builtins::definitions().events;
+fn unknown_event_ranges(
+    ast: &Ast,
+    target_events: &HashMap<String, crate::builtins::Signature>,
+) -> Vec<ByteRange> {
     let mut ranges = Vec::new();
     for item in &ast.items {
         let TopLevel::State(state) = item else {
@@ -83,9 +95,11 @@ fn unknown_event_ranges(ast: &Ast) -> Vec<ByteRange> {
             continue;
         }
         for event in &state.events {
-            if event.name.is_empty() || canonical.contains_key(event.name.as_str()) {
+            if event.name.is_empty() || target_events.contains_key(event.name.as_str()) {
                 continue;
             }
+            // An unsupported event body is diagnosed by SEM049. Suppress
+            // secondary unresolved-variable noise within that body.
             let Some(body) = &event.body else {
                 continue;
             };
@@ -104,15 +118,16 @@ fn unknown_event_ranges(ast: &Ast) -> Vec<ByteRange> {
 fn unknown_call_argument_ranges(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &FunctionCatalog,
+    known_events: &HashMap<String, crate::builtins::Signature>,
 ) -> Vec<ByteRange> {
-    let definitions = builtins::definitions();
     let mut ranges = Vec::new();
     for site in calls {
         let ExpressionKind::Identifier(callee) = &site.call.callee.kind else {
             continue;
         };
-        if definitions.functions.contains_key(callee.name.as_str())
-            || definitions.events.contains_key(callee.name.as_str())
+        if builtin_functions.contains_key(callee.name.as_str())
+            || known_events.contains_key(callee.name.as_str())
             || functions.contains_key(callee.name.as_str())
         {
             continue;

@@ -2200,8 +2200,9 @@ the guard runs before the allocation or traversal it bounds.
 | Rendered diagnostics (invocation) | `MAX_TOTAL_DIAGNOSTICS` | 10,000 | CLI aggregation (`src/main.rs:582`) | Per CLI invocation | Truncate, append terminal `PRE039` | `global_cli_diagnostic_cap_truncates_all_later_files_and_keeps_one_pre039`, `invocation_cap_applies_to_ast_and_compare` |
 | AST recursion depth | `MAX_AST_RECURSION_DEPTH` | 256 | Parser entry for statements and expressions (`src/ast/parser.rs:460`, `:1114`) | Per unit | `AST001`, deepest construct skipped | `AST001` cases in `tests/ast_parser.rs`, `tests/ast_firestorm.rs` |
 | AST parser worker stack | `PARSER_STACK_BYTES` | 16 MiB | Dedicated parser thread (`src/ast/parser.rs:2695`) | Per parse | `AST002` if the worker cannot start | `worker_failure_returns_empty_ast_and_one_safe_diagnostic` |
-| AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` growth and traversal (`src/ast_semantic/flow.rs:19-22`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
-| AST constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` | 128 / 64 | `evaluate_integer` budget (`src/ast_semantic/flow.rs:23-24`) | Per expression | Evaluation yields "not constant"; dependent rule is suppressed | Phase 6C/6D suites |
+| AST control-flow analysis | `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` / `MAX_CFG_WORK` | 4,096 / 8,192 / 128 / 16,384 | `FlowGraph` construction (`src/ast_semantic/flow.rs`) | Per function | Marks the graph failed; flow rules are suppressed, no diagnostic | Phase 6C/6D suites |
+| AST flow data-flow solver | `MAX_DATAFLOW_WORK` / `MAX_DATAFLOW_FACT_WORK` / `MAX_DATAFLOW_EDGE_WORK` | 131,072 / 1,048,576 / 1,048,576 | FlowGraph::solve_constants worklist, fact processing, edge visits and switch dispatch (src/ast_semantic/flow.rs) | Per function | Solver returns unknown; dependent flow rules are suppressed for the body | Fixed-point, loop, jump/label and switch-dispatch flow tests |
+| AST flow constant evaluation | `MAX_CONSTANT_NODES` / `MAX_CONSTANT_DEPTH` / `MAX_CONSTANT_FACTS` | 128 / 64 / 4,096 | Bounded expression evaluator and `insert_constant_fact` (`src/ast_semantic/flow.rs`) | Per expression / code body | Expression becomes unknown; local environment is disabled if the fact cap is exceeded | Phase 6C/6D suites |
 | Type inference depth | `MAX_TYPE_DEPTH` | 256 | `infer_expression_type` (`src/ast_semantic/types.rs:11`, `:86`) | Per expression | Type inference yields unknown; dependent rules are suppressed | Defensive: the parser cap fires first (see below) |
 | Call-graph analysis | `MAX_CALL_GRAPH_NODES` / `MAX_CALL_GRAPH_EDGES` / `MAX_CALL_GRAPH_WORK` | 4,096 / 8,192 / 16,384 | Graph construction and reachability (`src/ast_semantic/callgraph.rs:24-28`) | Per unit | Whole graph suppressed; `SEM026` emits nothing | `call_graph_budget_overflow_suppresses_sem026`, `production_edge_budget_overflow_suppresses_sem026`, `production_work_budget_overflow_suppresses_sem026` |
 | Legacy control-flow analysis | `MAX_CFG_TOKENS_PER_FUNCTION` / `MAX_CFG_NODES` / `MAX_CFG_EDGES` / `MAX_CFG_DEPTH` | 16,384 / 4,096 / 8,192 / 128 | Legacy flow scanner (`src/semantic.rs:1684-1687`) | Per function | Flow rule is suppressed | Legacy semantic tests |
@@ -3112,15 +3113,32 @@ rewriting source:
 
 - single-index assignment: `identifier[index] = rhs`;
 - typed extraction: `(integer|float|string|key|vector|rotation)identifier[index]`;
-- list extraction: `(list)identifier[index]` and `(list)identifier[first,last]`;
-- the optional fully parenthesized typed-reference form.
+- list-range extraction: `(list)identifier[first,last]` (exactly two indices);
+- one optional parenthesis pair around the typed reference;
+- Firestorm's `(quaternion)identifier[index]` alias, lowered upstream to
+  `llList2Rot` and represented by NeoLint as a rotation cast; `Type.span`
+  retains the original `quaternion` spelling without adding a public AST field.
 
-Firestorm does not confirm bare reads, compound indexed assignment, deletion,
-more than two indices, or non-identifier bases; the parser diagnoses the
-unsupported structural forms it can prove locally. `quaternion` is not added as
-a type: the frozen lexer/type model has no quaternion token, and Phase 5 does not
-invent one. No source-to-source replacement with `lazy_list_set`/`llList2*` is
-performed.
+The alias is available only with the lazy-list gate and only when its operand is
+one indexed identifier. It is not added to `TypeKind`, the lexer keyword set, or
+ordinary declaration/cast grammar. This keeps the seven-value-type LSL model
+unchanged while retaining the Firestorm source spelling and type span.
+
+Firestorm does not transform bare reads, compound indexed assignment or
+non-identifier bases into supported lazy-list operations. The parser diagnoses
+those forms; it also rejects invalid index arities (for example, a scalar
+extraction with a range, `(list)identifier[index]`, or more than two indices)
+instead of pretending the resulting generated built-in call is valid. The
+single-index list form is textually rewritten upstream to a two-argument
+`llList2List` call even though the [canonical signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires three arguments; this upstream regex match is therefore not accepted
+as a valid compiler form. Nested calls/brackets in index expressions and nested
+calls, casts, strings and list literals in RHSs remain
+AST children. Comment/string contents are not interpreted as code. No
+source-to-source replacement with `lazy_list_set`/`llList2*` is performed.
+
+The upstream transformation is pinned to
+[Firestorm `fslslpreproc.cpp` at `7e44160d`](https://github.com/FirestormViewer/phoenix-firestorm/blob/7e44160d001b719d17ee93816425c570974b9a8b/indra/newview/fslslpreproc.cpp#L852-L936).
 
 **Spans and safety.** All extension nodes carry prepared `Span`s and pass the
 same worker-stack, AST001/AST002, recovery and SourceMap bridge contracts as
@@ -3185,10 +3203,12 @@ built-in/user call returns. Identifier resolution uses declaration spans so
 use-before-declaration and nested shadowing follow Legacy source-order rules.
 Function declarations are not treated as values.
 
-**Signatures.** User signatures come from the first AST function with a body;
-built-in function/event signatures and constants come from the existing vendored
-`builtins::definitions()` data. No duplicate catalogue was added. Untyped user
-functions have the Legacy `void` return type.
+**Signatures.** User signatures come from AST function declarations. Built-in
+function/event signatures and constants come from the immutable target
+catalogue selected for the active platform/runtime/API version. Canonical
+Second Life definitions remain the baseline; OpenSim snapshots preserve their
+own overloads, events and constants. Untyped user functions have the Legacy
+`void` return type.
 
 **Rules.** SEM002/SEM004 (built-in arity/type), SEM003 (canonical event parameter
 count/type), and SEM005/SEM006 (user arity/type) are implemented in focused rule
@@ -3254,8 +3274,11 @@ ancestor of the jump scope.
 for/while/do-while, returns, labels, forward/backward jumps and empty `for`
 conditions (`ForStatement::condition_missing`). Nodes, edges, work and depth are
 capped; edges are deduplicated; unsupported or incomplete graphs skip the whole
-function. A function with SEM009/SEM010 findings is suppressed. Unsupported
-Firestorm switch/break and Error/recovery flow forms are skipped conservatively.
+function. A function with SEM009/SEM010 findings is suppressed. At the
+original end-of-Phase-6C migration boundary, Firestorm switch/break and
+Error/recovery flow forms were skipped conservatively.
+Subsequent post-migration refinements below add supported switch analysis while
+malformed Error/recovery forms continue to fail closed.
 
 **Conditions.** An AST-only evaluator proves the Legacy integer constant cases
 with 32-bit wrapping, division/remainder/shift guards, unary/binary operators,
@@ -3273,7 +3296,47 @@ switch/break. No intentional diagnostic deltas exist in this slice.
 
 **Boundary at the end of 6C.** SEM012–SEM019, SEM022 and SEM023 remained
 Legacy-only. No new SEM codes, severity changes, CLI/pipeline selection or Legacy
-behavior changes.
+behavior changes at the time of the original migration.
+
+#### Post-migration flow-analysis refinement
+
+The deep-analysis workstream extends the AST condition evaluator used by the
+SEM011 CFG beyond the original Legacy-compatible subset. It now folds bounded
+finite f32 arithmetic and numeric comparisons, recognizes canonical float
+constants, supports integer-to-float casts, and folds integer &&/|| only
+when both operands are known, matching LSL's eager evaluation of both
+operands. This lets if, for, while and do/while edges be pruned when a condition
+is provably constant and every operand is known and side-effect-free. Float
+operands to integer-only logical/unary operators remain unknown.
+
+The evaluator now also uses bounded local data-flow facts for numeric scalar
+locals. Values from local initializers and simple assignments propagate through
+straight-line code. At an `if/else` join, only values that agree across all
+reachable branches that fall through remain known; a branch that returns does
+not constrain the surviving branch. Reassignments, increments and compound
+assignments update or invalidate facts. Mutable globals and parameters, user
+calls, malformed expressions, non-finite arithmetic, unsupported mixed numeric
+operators, unsafe float-to-integer casts and budget exhaustion remain unknown.
+A bounded forward worklist merges incoming environments at CFG joins and
+iterates to a fixed point through loop back-edges and valid jump/label edges.
+Only values that agree on every reachable incoming path survive a join.
+For-loop initializers, conditions and increments execute in source order.
+Safe scalar increments and arithmetic compound assignments update local facts.
+Right-associative assignment chains are evaluated from the inner assignment
+outward. A single nested write is tracked through its containing expression;
+expressions with multiple writes whose relative evaluation order is not assumed
+invalidate only the potentially written locals. Compound assignments with
+effectful right operands remain unknown when their read/write ordering is
+ambiguous. Assignment and increment expression results can also prune
+conditions when their values are definite. Mutable globals and parameters
+are never treated as constants. Per-environment fact
+storage, side-effect expression traversal, worklist iterations, CFG edge visits,
+switch dispatch and cumulative fact-processing work are bounded; budget
+exhaustion suppresses conclusions for the affected body. There is no
+interprocedural propagation. Legacy remains frozen, so Compare can show
+intentional SEM011 differences for paths proved by the extended AST analysis
+but not by Legacy. LSL's eager logical evaluation is documented in
+[LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators).
 
 #### Phase 6D implementation record
 
@@ -3752,7 +3815,7 @@ over exit-status parity for a suppressed diagnostic.
 - [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
 - [x] v1.1.0 release promotion — AST default is now on stable `main`; Legacy retained; Compare opt-in.
 - [x] **Phase 7 (this Issue)** — implementation record complete on the experimental branch: SEM024–SEM026 are implemented, documented, and regression-tested.
-- [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md); gaps are tracked as Issues #108–#111. Phase 8 is not permission to remove Legacy or change stable `main`.
+- [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md). Follow-ups #108–#111 were subsequently completed and closed; their resolutions are summarized there. Phase 8 is not permission to remove Legacy or change stable `main`.
 - [x] Stable-main promotion — AST is the default in v1.1.0; Legacy remains available and Compare remains opt-in.
 
 ---
@@ -3768,11 +3831,21 @@ because LSL list equality compares lengths. Constant evaluation and duplicate
 checking are bounded and fail closed on malformed switch expressions, parser
 errors in the switch, or an unreliable lexical/preprocessor environment.
 
-The value-return CFG now models switch dispatch to each case/default arm,
-source-order fallthrough, a no-match path when default is absent, and `break` to
-the innermost switch's exit node. This replaces the previous blanket SEM011
-suppression for every function containing a switch or break. Legacy remains
-unchanged, and the SEM001–SEM023 Compare contract does not include SEM028–SEM033.
+The value-return CFG evaluates Firestorm switch constants with the same
+comparison semantics as SEM028–SEM033: integer/float coercion, string/key
+equality, vector/rotation component equality and list-length equality. Numeric
+switch expressions can additionally use definitely known local integer/float
+facts from the CFG data-flow environment. Only matching case entries are
+selected, then execution follows source-order fallthrough. A known value with
+no matching case selects default or the no-match exit. If the value or any
+case label is unknown, unsupported or over budget, every possible arm and the
+appropriate default/no-match path remain reachable. Incompatible SEM029 case
+types and multiple SEM028 defaults also disable pruning. Break targets the
+innermost switch even when nested inside if/for/while/do-while; a nested switch
+shadows that target, so its break does not escape its enclosing loop/switch.
+This replaces the previous blanket SEM011 suppression for switch-containing
+functions. Legacy remains unchanged, and the SEM001–SEM023 Compare contract
+does not include SEM028–SEM033.
 
 ### Post-v1.1.0 AST-only semantic addition: SEM027
 
@@ -3822,101 +3895,88 @@ Evidence: [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State);
 
 ---
 
-## 16. Module structure (proposed, not created in Phase 0)
+## 16. Module layout (implemented)
 
 ```
 src/
   main.rs                 CLI; option parsing; output; exit codes
-  lib.rs                  public API surface (legacy re-exports stay stable)
-  diagnostic.rs           Diagnostic/Span/Severity/DiagnosticKind (shared, frozen)
+  lib.rs                  public Rust library API and re-exports
+  config.rs               line-oriented lint configuration
+  builtins.rs             vendored canonical LSL metadata
+  target.rs               runtime target and API profile definitions
+  diagnostic.rs           Diagnostic/Span/Severity/DiagnosticKind
   diagnostic/
-    resolve.rs            Span bridge use, LegacyDiagnostic tag/root checks,
-                          UnifiedDiagnosticInput -> RenderedDiagnostic
-  lexer.rs                tokenizer only; no directive knowledge
-  parser.rs               legacy token parser: parse_legacy + frozen parse alias
-  semantic.rs             legacy semantic analyzer (frozen behavior)
-  builtins.rs             vendored LSL metadata (unchanged)
-  config.rs               lint configuration (extended additively later)
-
-  source/
-    mod.rs                re-exports
-    file.rs               SourceId { unit, file }, SourceFile, kinds, text
-    line_index.rs         byte offset -> line/column (lexer-compatible)
-    map.rs                unit-bound SourceMap, PreparedSpan, SourceSpan,
-                          private SourceOrigin, OriginId, SpanError, segments,
-                          validated origin arena, EOF anchor, checked resolve_*
-                          with foreign-identity rejection
-    manager.rs            per-unit loading, path policy, cycles, limits
-    unit.rs               RunId/AnalysisUnitId assignment, opaque AnalysisUnit
-                          handle with legacy_root(), source namespace, optional
-                          PreparedSource/SourceMap pair, diagnostics
-
-  preprocessor/
-    mod.rs                preprocess(), PreprocessConfig/Options, PreparedSource with
-                          unit id, prepared_span (only bridge), eof_span
-    identity.rs           Phase 1 identity pass-through
-    directive.rs          Phase 2 raw-text directive scanner
-    macros.rs             macro table, definitions, expansion
-    expr.rs               #if expression evaluator
-    include.rs            include graph, path parsing/resolution
-    builtins.rs           confirmed __FILE__/__LINE__ predefined macros
-    diagnostics.rs        PreprocessDiagnostic constructors, PRE codes
-
-  ast/
-    mod.rs                AST root and re-exports
-    node.rs               node types with spans
-    parser.rs             AST parser and recovery: independent parse_ast
-    ext.rs                Firestorm-only AST nodes/options
-
-  ast_semantic/
-    mod.rs                Phase 6 analyzer entry point
-    scopes.rs
-    types.rs
-    flow.rs
-    rules/                per-rule modules, ownership matrix
-
+    resolve.rs            source-map resolution and rendered diagnostics
+  lexer.rs                tokenizer; no directive knowledge
+  parser.rs               Legacy token parser
+  semantic.rs             Legacy semantic analyzer
+  engine/
+    mod.rs                Legacy/AST/Compare selection and dispatch
+    wiring.rs             parser/semantic diagnostic ownership
+    compare.rs            bounded SEM001–SEM023 comparison
   pipeline.rs             per-unit orchestration shared by CLI/tests
+  source/
+    mod.rs                source model re-exports
+    file.rs               SourceId, SourceFile, kinds and text
+    line_index.rs         byte offset to line/column
+    map.rs                unit-bound SourceMap, spans, origins and resolution
+    manager.rs             per-unit file loading, path policy, cycles and limits
+    unit.rs                AnalysisUnit, unit/run identity and diagnostics
+  preprocessor/
+    mod.rs                preprocessing API and orchestration
+    config.rs             dialect and preprocessing settings
+    token.rs              prepared preprocessing tokens
+    identity.rs           no-expansion identity preparation
+    directive.rs          raw directive scanner and pragma handling
+    macros.rs             macro definitions and expansion support
+    expand.rs              macro expansion engine
+    expr.rs                #if expression evaluator
+    include.rs             include graph, path parsing and resolution
+    builtins.rs            predefined __FILE__/__LINE__ macros
+    diagnostics.rs         preprocessor diagnostic types and PRE codes
+  ast/
+    mod.rs                AST root and parser entry points
+    node.rs               typed AST nodes and spans
+    types.rs               AST expression/type helpers
+    parser.rs              independent AST parser and recovery
+    ext.rs                 Firestorm-only AST nodes and parse options
+  ast_semantic/
+    mod.rs                AST semantic-analysis entry point
+    scopes.rs              lexical scope model
+    types.rs               conservative expression type inference
+    calls.rs               call collection and validation facts
+    expressions.rs         shared expression traversal
+    statements.rs          iterative statement traversal
+    flow.rs                return, jump and control-flow analysis
+    callgraph.rs           bounded user-function reachability graph
+    usage.rs               declaration read/use analysis
+    rules/                 per-rule semantic/lint implementations
 ```
 
 Rules for the structure:
 
 - **Lexer** keeps tokenization, literals, operators, comments, `Span`
   construction, and `Eof`. It must never learn directives, macro tables, or
-  include logic. `#` handling stays as today unless the preprocessor has already
-  removed the text.
-- **Preprocessor** owns everything between raw bytes and prepared bytes:
+  include logic.
+- **Preprocessor** owns the transformation from raw bytes to prepared bytes:
   directive detection, conditional evaluation, macro expansion, include
-  resolution, stringification, pasting, profile built-ins, and the map.
-- **Source Map** lives in `src/source/map.rs` and is owned by an
-  **AnalysisUnit**, not by the CLI invocation, the preprocessor, or the lexer.
-  The preprocessor is its only writer during construction; consumers get an
-  immutable `Arc`. Only the map builder inserts origins, after unit validation;
-  `SourceId`/`OriginId` values never cross unit or run boundaries.
+  resolution, predefined macros and source-map construction.
+- **Source Map** belongs to an **AnalysisUnit**, not the CLI invocation. The
+  preprocessor is its only writer during construction; consumers get immutable
+  source-map data. Unit/run ownership is checked before coordinate geometry.
 - **AST types** live in `src/ast/`; AST semantic rules live in
   `src/ast_semantic/`. The AST must not import preprocessor internals; it only
   sees tokens and spans.
-- **Both parser and semantic engine pairs** are reachable through one pipeline
-  entry point that selects `Legacy`, `Ast`, or `Compare`; they share
-  `Vec<Token>` and the unit's `SourceMap`. `parse_legacy` and `parse_ast` are
-  separate public functions; no engine calls the other for its full result.
-- **Diagnostics** stay in `src/diagnostic.rs` (frozen). The additive
-  `diagnostic/resolve.rs` module owns the `UnifiedDiagnosticInput` conversion:
-  direct location for `Preprocess`, explicit bridge + `SourceMap` for
-  `Prepared`, and tag/root check + pass-through for `Legacy`. It is the only
-  place that builds `RenderedDiagnostic`; no other module may mint a
-  `LegacyDiagnostic` or attach a `SourceId` to one.
-- **`Span` bridge** lives with `PreparedSource` (it needs the prepared text for
-  UTF-8 validation) and returns a unit-stamped `PreparedSpan`; no other module
-  may convert `Span` to prepared coordinates.
-- **Unit identity** is created in `src/source/unit.rs` and embedded in every
-  `SourceId`/`PreparedSpan`/`SourceSpan`/`OriginId`. `RunId` and unit index are
-  generated only there. `SourceMap` checks ownership before geometry; no other
-  module may mint ids, spans, origins, or the opaque `AnalysisUnit` handle.
-
-Modules are created only when their phase starts. Phase 0 does not create empty
-placeholder modules.
-
----
+- **Legacy, AST and Compare** are selected through the engine layer. The parser
+  and semantic implementations remain independent; Compare is bounded and
+  fingerprints only SEM001–SEM023.
+- **Target profiles** in `src/target.rs` select runtime/API metadata separately
+  from the preprocessing dialect. OSSL allowlists remain explicit project
+  configuration, not inferred live permissions.
+- **Diagnostics** pass through the checked source-map resolution path for
+  prepared input; plain-LSL Legacy keeps its direct compatibility path.
+- **Unit identity** is created in `src/source/unit.rs`; source and prepared
+  coordinates cannot be transferred between units or runs.
 
 ## 17. Risks and open questions
 
@@ -3936,20 +3996,22 @@ Risks tracked from the baseline analysis:
    equivalent policy or documented deltas.
 6. Adding a public field to `Diagnostic` or `Token` is a breaking change; prefer
    additive resolution types and keep the core types frozen.
-7. CI runs stable Rust; MSRV 1.75 is not enforced today. New code must avoid
-   post-1.75 std APIs, and an MSRV check should be added when the experimental
-   workflow is extended.
-   **Resolved (Phase 6H):** `.github/workflows/experimental-ci.yml` installs
-   Rust 1.75.0 and runs `cargo test --all-targets --all-features` on it; Phase 8
-   re-verified the same command in its required matrix. New code still avoids
-   post-1.75 std APIs.
-8. The documentation test only scans three source files; new diagnostic families
-   must extend it, or codes can ship undocumented.
-   **Resolved (Phase 6H):** `scripts/test_documentation.py` scans `src/lexer.rs`,
-   `src/parser.rs`, `src/semantic.rs` and every `*.rs` under `src/preprocessor`,
-   `src/ast` and `src/ast_semantic` recursively, so a new `SEM`/`PRE`/`AST`/`LEX`
-   code fails the gate until it is documented. Phase 8 added a documentation test
-   for the AST-only rule family.
+7. CI runs stable Rust; MSRV 1.75 must remain enforced as the compatibility
+   floor, and new code must avoid post-1.75 standard-library APIs.
+   **Resolved:** both `.github/workflows/ci.yml` (stable `main`) and
+   `.github/workflows/experimental-ci.yml` install Rust 1.75.0 and run
+   `cargo +1.75.0 test --all-targets --all-features`. The stable release gate
+   includes this check, not just the experimental workflow.
+8. Every diagnostic code emitted by production code must appear in the
+   diagnostic reference; test-only sentinel codes must not be mistaken for public
+   diagnostics.
+   **Resolved:** `scripts/test_documentation.py` scans `src/main.rs` and
+   `src/source/unit.rs` (including the CLI/unit `PRE039` producers), the Legacy
+   lexer/parser/semantic sources, and every `*.rs` under `src/preprocessor`,
+   `src/ast` and `src/ast_semantic` recursively. A newly emitted
+   `SEM`/`PRE`/`AST`/`LEX` code in those production paths fails the gate until
+   documented. The test suite also checks that the AST-only rule family is
+   represented in the language-support guide.
 9. Preprocessor scope can grow without bound; the phase plan and limits are the
    guardrails.
 10. Firestorm behavior must be documented, not guessed; unknown built-ins stay
@@ -3966,21 +4028,19 @@ Risks tracked from the baseline analysis:
 14. `//fspreprocessor off` is a raw substring match, so it can trigger inside a
     string or comment. This is intentional Firestorm-compatible behavior and
     must not be "fixed" into comment-aware matching.
-15. `#pragma once` is supported by the pinned Boost.Wave but not proven
-    end-to-end through Firestorm's inventory include layer; keep it in the
-    separate compatibility bucket until evidence exists.
-    **Partially resolved (follow-up to Phase 8):** the upstream path is
-    reconstructed from pinned sources (Boost.Wave `boost-1.90.0` commit
-    `d7aa5a3…`, `util/cpp_iterator.hpp:415`/`:1598`,
-    `util/cpp_include_paths.hpp:339`/`:375`, `util/filesystem_compatibility.hpp:69-76`;
-    Firestorm commit `7e44160…`, `indra/newview/fslslpreproc.cpp:57-90`, `:559-754`,
-    `:1312`), and a standalone Boost.Wave 1.90.0 probe with a stubbed
-    inventory/cache hook confirms the library behaviour, including that dot
-    segments are normalised and symlink aliases are not. neolint's
-    Firestorm-profile behaviour has dedicated regression coverage. Real viewer
-    integration and the inventory/asset services remain unverified; see
+15. `#pragma once` is supported by the pinned Boost.Wave, but Firestorm's
+    live Viewer/inventory integration must not be claimed without running that
+    environment.
+    **Scoped evidence completed (Issue #109, PR #113; issue closed):** the
+    upstream path is reconstructed from pinned sources (Boost.Wave
+    `boost-1.90.0` commit `d7aa5a3…`; Firestorm commit `7e44160…`), and a
+    standalone Boost.Wave 1.90.0 probe with a stubbed inventory/cache hook
+    confirms the library behavior. NeoLint's Firestorm-profile behavior has
+    dedicated regression coverage. Live Viewer inventory/asset integration for
+    `#pragma once` remains unverified; see
     `docs/firestorm-preprocessor.md` §"`#pragma once` through the Firestorm
-    include layer".
+    include layer". The separate Lazy List compile/runtime smoke test does not
+    cover this inventory/cache path.
 16. `Span` has no namespace tag. In the preprocessed path every engine `Span`
     is prepared; in plain-LSL mode it is original. Any code that treats an
     engine span as original after preprocessing is a silent mislocation bug.
@@ -4026,13 +4086,16 @@ Decisions and remaining open questions:
   `docs/cli-reference.md`; breaking changes require a separately selected
   JSON v2.
 - **CLI option spelling — resolved by Issue #111 / PR #114.** The implemented
-  preprocessing, dialect, and include-directory options are listed in
-  `neolint --help` and covered by a real-binary regression test.
+  preprocessing, dialect, and include-directory options, including `-IDIR`,
+  are listed in `neolint --help` and covered by a real-binary regression test.
+- **AST/Legacy analysis-budget parity — resolved by Issue #110 / PR #115.**
+  The implementations remain independent, and a regression test guards the
+  corresponding numeric policy values against accidental drift.
 - Whether the prepared buffer is one concatenated string per AnalysisUnit
   (current plan) or one per file (rejected for now: a single buffer keeps token
   spans unambiguous). It is always per unit, never per CLI invocation.
-- MSRV 1.75 is verified by the experimental CI workflow; it is an additional
-  gate beyond the frozen stable quality workflow.
+- MSRV 1.75 is verified by both the stable and experimental CI workflows; the
+  stable `main` release gate runs `cargo +1.75.0 test --all-targets --all-features`.
 
 ---
 
@@ -4142,18 +4205,57 @@ without a value. The check covers canonical and extension event bodies, skips
 parser-damaged bodies and does not affect ordinary user-function return typing
 (SEM008).
 
-`SEM037` is a deliberately conservative dead-code warning. It reports only the
-first statement in a straight-line block after an unconditional return, an
-`if/else` with two terminating branches, or a state change in an event handler
-to a different, declared state. A same-state transition is not terminal because
-LSL performs no state-change side effects when the target is already current.
-Unknown targets are also not treated as valid transitions. Loops and switch
-dispatch never make their containing sequence terminal in this first slice.
-Any jump/label, syntax diagnostic, error node or unclosed nested block suppresses
-both findings for that body. The rule
-uses a 16,384-work and 128-depth budget and suppresses the whole family on
-overflow. Legacy remains unchanged and Compare continues to include only
-SEM001–SEM023.
+SEM037 now consumes the shared bounded control-flow graph instead of the
+original straight-line termination heuristic. The graph retains a mapping from
+each AST statement span to its entry node and computes reachability from the
+function/event entry. The rule reports the first unreachable non-empty statement
+in each straight-line sequence, including within nested blocks, branches, loop
+bodies and switch arms.
+
+The shared graph models statically provable integer/float conditions,
+including definitely known local numeric values from declarations and
+assignments. A bounded forward worklist propagates local values and merges
+incoming states at every reachable join; only values that agree across all
+reachable inputs survive, and a terminating branch does not constrain the
+surviving path. The solver iterates through loop back-edges and valid
+jump/label edges to a fixed point. For-loop initializers, conditions and
+increments are modeled in execution order. Safe scalar increments and
+arithmetic compound assignments update local facts. A single nested write is
+tracked through its containing expression; multiple writes with unspecified
+relative evaluation order invalidate only potentially written local facts.
+Direct assignment and increment results can determine an enclosing condition
+when their values are known. Mutable globals/parameters and call results remain
+unknown. Side-effect and error-expression traversal, per-environment fact
+storage, worklist iterations, CFG edge visits, switch dispatch and cumulative
+fact-processing work are bounded. Oversized expressions fail closed before
+recursive flow reasoning. CFG joins intersect incoming must-states in place
+rather than cloning both maps and allocating a third map on every edge. A
+disabled input disables the merged environment; budget exhaustion suppresses
+conclusions for the affected body.
+
+The CFG models zero- and many-iteration loop paths, valid jump edges, and
+Firestorm constant switch dispatch. The shared evaluator applies integer/float,
+string/key, vector/rotation and list-length equality semantics from SEM028–SEM033;
+numeric switches can additionally use local data-flow facts. Unknown,
+unsupported or over-budget labels, incompatible SEM029 types and multiple
+SEM028 defaults keep all possible arms reachable. Only matching entries are
+dispatched and source-order fallthrough is preserved. A known unmatched value
+selects default or the no-match exit. Break targets the innermost
+switch, including when nested in if/for/while/do-while; a nested switch shadows
+that target. It can prove a
+branch body unreachable when its condition is constant, code after a loop
+unreachable when no exit edge exists, and code after a switch unreachable
+when every feasible arm returns or otherwise terminates. A switch without
+default retains its unmatched exit when the value is unknown; a reachable
+break retains the switch exit. Event state changes to a different, unique
+known state are terminal edges; same-state/unknown targets and global
+function state changes are not.
+
+Invalid jump scopes, missing/duplicate labels, syntax diagnostics, error nodes,
+unclosed nested blocks and CFG/work/depth exhaustion suppress SEM037 for the
+affected body. SEM036 retains its prior conservative suppression for bodies
+containing jumps/labels. Legacy remains unchanged and Compare continues to
+include only SEM001–SEM023.
 
 Evidence: [Second Life Wiki — Return](https://wiki.secondlife.com/wiki/Return),
 [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State), and
@@ -4187,9 +4289,9 @@ Evidence: [Second Life Wiki — llDetectedKey](https://wiki.secondlife.com/wiki/
 
 ### Post-v1.1.0 constant-math warning (SEM043)
 
-SEM043 warns on valid numeric division or integer remainder by a provably zero divisor, including compound `/=` and `%=`. It also reports `llSqrt` with a statically negative argument and `llPow` with a statically negative base plus a known non-integer exponent. Its bounded evaluator handles numeric literals, unshadowed numeric built-in constants, parentheses, unary operators, numeric casts and side-effect-free constant arithmetic. Mutable variables and user-defined call results are never inferred; user-function shadowing of `llSqrt`/`llPow`, invalid arguments and malformed calls are skipped. The rule does not guess non-finite or out-of-range power exponents. Vector `%` cross products are excluded. Imaginary results return `NaN` in Mono and trigger a Math Error in legacy LSO. Parser errors, unreliable lexical/preprocessor environments or evaluator work/depth exhaustion suppress the rule. SEM043 remains AST-only; Legacy and Compare continue to compare only SEM001–SEM023.
+SEM043 warns on valid numeric division or integer remainder by a provably zero divisor, including compound `/=` and `%=`. It also reports `llSqrt` with a statically negative argument, `llPow` with a statically negative base plus a known non-integer exponent, and `llAcos`/`llAsin` with known arguments outside `[-1.0, 1.0]`. The logarithm built-ins `llLog` and `llLog10` are reported when their known argument is non-positive, because LSL returns `0.0` instead of a logarithm. Its bounded evaluator handles numeric literals, unshadowed numeric built-in constants, parentheses, unary operators, numeric casts and side-effect-free constant arithmetic. Mutable variables and user-defined call results are never inferred; user-function shadowing, invalid arguments and malformed calls are skipped. The rule does not guess non-finite or out-of-range power exponents. Vector `%` cross products are excluded. Imaginary results from square root, power and inverse trigonometric calls return `NaN` in Mono and trigger a Math Error in legacy LSO. Parser errors, unreliable lexical/preprocessor environments or evaluator work/depth exhaustion suppress the rule. SEM043 remains AST-only; Legacy and Compare continue to compare only SEM001–SEM023.
 
-Evidence: [Second Life Wiki — LSL Errors](https://wiki.secondlife.com/wiki/LSL_Errors), [llSqrt](https://wiki.secondlife.com/wiki/LlSqrt), [llPow](https://wiki.secondlife.com/wiki/LlPow), [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), and [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
+Evidence: [Second Life Wiki — LSL Errors](https://wiki.secondlife.com/wiki/LSL_Errors), [llSqrt](https://wiki.secondlife.com/wiki/LlSqrt), [llPow](https://wiki.secondlife.com/wiki/LlPow), [llAcos](https://wiki.secondlife.com/wiki/LlAcos), [llAsin](https://wiki.secondlife.com/wiki/LlAsin), [llLog](https://wiki.secondlife.com/wiki/LlLog), [llLog10](https://wiki.secondlife.com/wiki/LlLog10), [LSL Operators](https://wiki.secondlife.com/wiki/LSL_Operators), and [LSL 101 — Integers](https://wiki.secondlife.com/wiki/LSL_101/LSL_in_Focus:_Integers).
 
 
 ### Post-v1.1.0 state reachability warning (SEM044)

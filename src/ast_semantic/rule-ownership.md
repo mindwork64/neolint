@@ -78,9 +78,14 @@ No SEM rule remains Legacy-only in the current matrix.
   suppresses the rule.
 - These diagnostics are AST-only and remain outside the SEM001–SEM023 Compare
   parity set. Legacy remains unchanged.
-- The flow graph models switch dispatch, source-order fallthrough, the optional
-  no-match path, and `break` to the innermost switch exit. This allows SEM011 to
-  analyze switch-containing functions instead of suppressing all such functions.
+- The flow graph evaluates constant Firestorm switch values and case labels
+  using the same equality rules as switch diagnostics: numeric values, strings,
+  keys, vectors, rotations and list-length equality. Flow-sensitive local
+  integer/float facts are also used for numeric switch values. Matching entries
+  are selected while source-order fallthrough, the optional no-match path and
+  break to the innermost switch exit are preserved. Unknown values or
+  unsupported case expressions retain every possible arm instead of guessing.
+  Nested switches own their break targets, including when nested inside loops.
 
 ## AST scope semantics
 
@@ -122,9 +127,11 @@ No SEM rule remains Legacy-only in the current matrix.
 - Identifier lookup uses `ScopeTree::lookup_value_at` and filters bindings whose
   declaration span is after the use, preserving Legacy source-order visibility
   and nested shadowing. Function declarations are not values.
-- User signatures come from the first AST function declaration with a body;
-  built-in signatures and constants come from the existing vendored
-  `builtins::definitions()` metadata. No second catalogue exists.
+- User signatures come from AST function declarations. Built-in signatures,
+  events and constants come from the immutable target catalogue selected for
+  the active platform/runtime/API version. Canonical Second Life definitions
+  remain the baseline; OpenSim snapshots preserve their own overloads, event
+  and constant surfaces.
 - `src/ast_semantic/calls.rs` visits every call exactly once across globals,
   declarations, control flow, switch conditions/case labels/arms, lazy indices,
   calls, lists and vector/rotation literals.
@@ -171,13 +178,43 @@ No SEM rule remains Legacy-only in the current matrix.
 - SEM011 uses a bounded AST CFG with explicit node/edge/work/depth budgets,
   deduplicated edges, fail-closed skip on unsupported/partial graphs and
   suppression when the same function has SEM009/SEM010 findings.
-- Constant conditions use an AST-only 32-bit evaluator with the Legacy
-  wrapping/division/shift rules, canonical constants, mutable-shadow checks and
-  float truthiness. `ForStatement::condition_missing` preserves genuinely empty
-  `for (;;)`, while `condition_malformed` marks a non-empty parse failure as an
-  unknown condition rather than an infinite loop.
-- Firestorm switch/break and Error/recovery control-flow forms conservatively
-  suppress SEM011 for the affected function.
+- Constant conditions use a bounded AST-only numeric evaluator and a local
+  scalar data-flow environment. It supports 32-bit integer wrapping/division/shift
+  rules, finite f32 arithmetic and comparisons, canonical integer/float constants,
+  integer-to-float casts and integer logical operators when both operands are
+  known. Definitely assigned local integer/float values propagate through a
+  forward CFG worklist to a fixed point across branches, loops and valid
+  jump/label edges. Safe scalar increments and arithmetic compound assignments
+  update known values. A single nested write is tracked through its containing
+  expression; multiple writes with unspecified relative evaluation order
+  invalidate only the potentially written local facts. Direct assignment and
+  increment results can determine an enclosing condition when their values are
+  known. Mutable globals/parameters and call results remain unknown. LSL
+  evaluates both operands of logical AND/OR; no short-circuit is assumed.
+  Non-finite results, unsafe float-to-integer conversions and unsupported
+  mixed-operand operators remain unknown. Local facts are capped at 4,096 per
+  environment; side-effect/error-expression scans, CFG edges, switch dispatch
+  work, worklist iterations and cumulative fact-processing work are bounded.
+  Oversized expressions are treated as unknown before recursive flow reasoning.
+  Incompatible SEM029 case labels and duplicate SEM028 defaults keep all switch
+  arms reachable; partial case-label evaluation that exhausts its aggregate
+  budget also falls back to every arm. Exceeding any analysis budget suppresses
+  conclusions for the affected body.
+  Empty for-loop conditions and malformed conditions retain their distinct
+  semantics.
+- This is a deliberate post-migration AST enhancement. Legacy remains frozen;
+  Compare may therefore report intentional SEM011 differences when the AST
+  proves a floating-point condition that the Legacy integer evaluator leaves
+  unknown.
+- Firestorm switches are analyzed by the shared CFG. Constant values prune
+  impossible case dispatches using the same scalar/composite equality semantics
+  as SEM028–SEM033, while flow-sensitive local numeric facts can also select a
+  case. Source-order fallthrough remains intact; unknown values or unsupported
+  labels keep all possible arms reachable. Malformed/recovered control-flow
+  forms and budget exhaustion still suppress SEM011 for the affected function.
+  Constant dispatch is disabled for semantically invalid switches (SEM028 or
+  incompatible SEM029 labels); an unknown or over-budget label set also keeps
+  all arms reachable rather than inferring a partial dispatch.
 
 ## Phase 6D expression validation and assignment semantics
 
@@ -287,19 +324,39 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   event-handler bodies. `SEM036` reports a value-return from an event handler,
   including unknown extension events. `return;` remains valid; function value
   returns remain governed by SEM008.
-- `SEM037` emits at most one warning per straight-line statement sequence, on
-  its first unreachable statement after an unconditional return, an `if/else`
-  whose two branches both terminate, or an event state change to a different
-  known state. Same-state and unknown-target state statements do not terminate
-  the event. A global function's invalid state statement is not treated as a
-  valid termination edge.
-- Loops and switches are never assumed to terminate their enclosing sequence.
-  A body containing a jump/label, parser error, error node or unclosed nested
-  block suppresses both rules for that code scope. The
-  iterative preflight and bounded recursive sequence scan share a 16,384-work
-  and 128-depth budget. Overflow suppresses the whole rule family.
-- Both diagnostics are AST-only, remain outside the SEM001–SEM023 Compare
-  contract, and do not alter Legacy output.
+- SEM037 uses the shared bounded CFG to report the first unreachable
+  non-empty statement in each straight-line sequence. It covers nested blocks,
+  conditional branches, loop bodies, switch arms and statements following
+  guaranteed termination. The CFG prunes statically known conditions using
+  definitely assigned local numeric values. A forward worklist merges facts at
+  each reachable join and iterates loop back-edges and valid jump/label edges
+  to a fixed point. Safe increments and arithmetic compound assignments update
+  facts; ambiguous multiple writes invalidate only touched locals.
+  Right-associative assignment chains are evaluated from the inner assignment
+  outward; compound assignments with effectful right operands remain unknown
+  when read/write ordering cannot be established. Assignment and increment
+  results can also determine conditions.
+- The CFG models zero-iteration and non-terminating for/while/do-while paths,
+  valid jump edges, constant switch dispatch, source-order fallthrough,
+  default, and break to the innermost switch exit. Firestorm string/key/vector/
+  rotation constants and list-length equality use the same comparison semantics
+  as SEM028–SEM033; unknown/unsupported switch values retain all possible arms.
+  A nested switch shadows the surrounding
+  switch break target, while a break inside a loop nested in a switch still
+  exits that switch. A switch whose feasible arms all terminate has no
+  reachable exit; a reachable break or unmatched path keeps the exit reachable.
+- Per-environment facts, side-effect/error-expression traversals, switch
+  dispatch, CFG edge visits, worklist iterations and cumulative fact-processing
+  work are bounded. CFG joins intersect incoming must-states in place, without
+  cloning both maps and allocating a third map for each edge. A disabled input
+  disables the merged environment; a budget overflow never yields a partial
+  reachability result.
+  Invalid jump scopes, duplicate/missing labels, unvalidated jumps in unknown
+  extension events, parser errors, error nodes, unclosed blocks and budget
+  exhaustion suppress SEM037 for the affected body.
+- SEM036 retains its earlier conservative suppression in bodies containing
+  jumps/labels. Both diagnostics are AST-only, outside SEM001–SEM023 Compare,
+  and do not alter Legacy output.
 
 
 ## State and list semantics (SEM038–SEM040)
@@ -331,11 +388,14 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   documented event contexts; unknown extension events and unreachable helper
   functions do not contribute guessed contexts.
 - SEM043 reports type-valid division and integer remainder when a bounded,
-  side-effect-free evaluator proves the divisor is zero. It also checks the
-  built-ins `llSqrt` and `llPow` for statically imaginary results. Mutable
-  variables and user-defined calls are not evaluated, built-in shadowing is
-  respected, and vector `%` remains a cross product. Mono returns `NaN` for
-  these imaginary results; legacy LSO triggers a Math Error.
+  side-effect-free evaluator proves the divisor is zero. It also checks
+  `llSqrt`, `llPow`, `llAcos` and `llAsin` for statically imaginary results;
+  inverse sine/cosine arguments must be within `[-1.0, 1.0]`. It warns when
+  `llLog`/`llLog10` receive known non-positive arguments because LSL silently
+  returns `0.0` instead of a logarithm. Mutable variables and user-defined
+  calls are not evaluated, built-in shadowing is respected, and vector `%`
+  remains a cross product. Mono returns `NaN` for imaginary results; legacy LSO
+  triggers a Math Error for those cases.
 - SEM044 constructs a bounded over-approximation of state transitions from
   event-handler bodies, rooted at `default`. Conditional and textually
   unreachable state changes count as possible edges. Global-function state
@@ -357,3 +417,28 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   complete lexical/preprocessor and parser input fail closed when that input
   is unreliable; their individual resource limits are documented alongside
   each rule.
+
+
+## Target-aware API compatibility rules (SEM047–SEM050)
+
+- SEM047 reports only calls whose names are present in the canonical Second
+  Life LSL function catalogue but absent from the selected OpenSim interface.
+  Unknown names and OSSL calls are not treated as missing LSL APIs. A user
+  function with the same name shadows the built-in and is not reported.
+- SEM048 checks known OSSL calls only when the project explicitly enables
+  its allowlist (ossl_allowlist = strict / --strict-ossl, optionally with
+  repeated ossl_function / --ossl-function entries). An empty strict
+  allowlist warns for every known OSSL call. The rule does not claim knowledge
+  of the target region's security configuration or permissions.
+- Both checks fail closed if parser diagnostics exist or the lexical/
+  preprocessing environment is unreliable. They are AST-only and do not
+  change the frozen SEM001–SEM023 Compare parity contract.
+
+
+- SEM049 compares canonical Second Life event handlers with the selected
+  OpenSim event catalogue. XEngine uses its own lexer/parser event
+  productions; YEngine uses its event-code enum intersected with handler
+  declarations.
+- SEM050 reports canonical Second Life constants absent from the selected
+  OpenSim version's constants table. Scope lookup happens first, so a user
+  variable with the same spelling correctly shadows the absent constant.

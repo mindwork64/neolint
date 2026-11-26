@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::ast::{Ast, Block, IfStatement, Statement, StatementKind, TopLevel};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+use crate::target::TargetProfile;
 
 use super::semantic_error;
 
@@ -19,8 +20,9 @@ pub(crate) fn check(
     ast: &Ast,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    target: TargetProfile,
 ) -> Vec<Diagnostic> {
-    if !environment_reliable {
+    if !environment_reliable || !target.supports_mono_state_change_checks() {
         return Vec::new();
     }
 
@@ -217,6 +219,31 @@ mod tests {
     #[test]
     fn state_changes_in_event_handlers_are_not_reported() {
         assert!(codes("default { state_entry() { state running; } } state running { state_entry() { state default; } }").is_empty());
+    }
+
+    #[test]
+    fn mono_specific_state_change_findings_are_suppressed_for_other_targets() {
+        let source = "helper(integer condition) { if (condition) state running; state default; } default { state_entry() { } } state running { state_entry() { } }";
+        let (tokens, lexical) = lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = parse_ast_with_options(&tokens, AstParseOptions::lsl());
+        for selector in [
+            "second-life-lso",
+            "second-life-luau",
+            "opensim-xengine",
+            "opensim-yengine",
+        ] {
+            let target = TargetProfile::parse(selector).unwrap();
+            let diagnostics =
+                crate::ast_semantic::analyze_ast_with_target(&ast, &syntax, true, target);
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != "SEM034" && diagnostic.code != "SEM035"),
+                "target {} unexpectedly got Mono-specific findings: {diagnostics:?}",
+                target.as_str()
+            );
+        }
     }
 
     #[test]

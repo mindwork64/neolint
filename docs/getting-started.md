@@ -13,14 +13,14 @@ macOS, ARM, 32-bit Windows/Linux, and other targets are not included in this rel
 
 The v1.1.0 release uses the AST engine by default. To restore the historical v1.0.0 analysis pipeline, pass `--engine legacy` or set `engine = legacy` in the configuration file. `--engine compare` is intended for maintainers investigating differences between the engines.
 
-Stable v1.1.0 is published at <https://github.com/mindwork64/neolint/releases/tag/v1.1.0>. Download the archive for your platform and verify its `.sha256` file before use.
+Stable v1.2.0 is published at <https://github.com/mindwork64/neolint/releases/tag/v1.2.0>. Download the archive for your platform and verify its `.sha256` file before use.
 
 ## Install a release (Linux x86_64)
 
 Download the archive matching the current package version and target:
 
 ```sh
-tar -xzf neolint-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf neolint-v1.2.0-x86_64-unknown-linux-gnu.tar.gz
 chmod +x neolint
 ./neolint --version
 ```
@@ -43,7 +43,7 @@ neolint --version
 In PowerShell, from the directory containing the downloaded archive:
 
 ```powershell
-Expand-Archive .\neolint-v1.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\neolint-v1.2.0-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\neolint.exe --version
 ```
 
@@ -63,14 +63,14 @@ Download the matching `.sha256` file alongside the archive.
 Linux:
 
 ```sh
-sha256sum -c neolint-v1.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c neolint-v1.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 Windows PowerShell:
 
 ```powershell
-$expected = (Get-Content .\neolint-v1.1.0-x86_64-pc-windows-msvc.zip.sha256).Split()[0]
-(Get-FileHash .\neolint-v1.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower() -eq $expected
+$expected = (Get-Content .\neolint-v1.2.0-x86_64-pc-windows-msvc.zip.sha256).Split()[0]
+(Get-FileHash .\neolint-v1.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower() -eq $expected
 ```
 
 The checksum file is generated after the archive and refers to the exact uploaded archive.

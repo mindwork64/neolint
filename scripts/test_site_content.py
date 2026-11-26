@@ -27,6 +27,10 @@ class SiteContentTests(unittest.TestCase):
         codes = [rule["code"] for rule in self.rules]
         self.assertGreater(len(codes), 50)
         self.assertEqual(len(codes), len(set(codes)))
+        self.assertIn("SEM047", codes)
+        self.assertIn("SEM048", codes)
+        self.assertIn("SEM049", codes)
+        self.assertIn("SEM050", codes)
 
     def test_catalog_covers_every_diagnostic_source_code(self):
         import re

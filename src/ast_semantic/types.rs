@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinaryOperator, Component, Expression, ExpressionKind, TopLevel, UnaryOperator};
-use crate::builtins;
+use crate::builtins::{FunctionCatalog, Signature};
 use crate::diagnostic::Span;
+use crate::target::TargetProfile;
 
 use super::scopes::{type_name, ScopeId, ScopeTree};
 
@@ -73,7 +74,24 @@ pub(crate) fn infer_expression_type(
     scope: ScopeId,
     functions: &HashMap<String, UserFunctionSignature>,
 ) -> Option<String> {
-    infer_at(expression, scopes, scope, functions, 0)
+    infer_expression_type_with_builtins(
+        expression,
+        scopes,
+        scope,
+        functions,
+        scopes.builtin_functions(),
+    )
+}
+
+/// Infer an expression using a target-specific built-in function catalogue.
+pub(crate) fn infer_expression_type_with_builtins(
+    expression: &Expression,
+    scopes: &ScopeTree,
+    scope: ScopeId,
+    functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &FunctionCatalog,
+) -> Option<String> {
+    infer_at(expression, scopes, scope, functions, builtin_functions, 0)
 }
 
 fn infer_at(
@@ -81,6 +99,7 @@ fn infer_at(
     scopes: &ScopeTree,
     scope: ScopeId,
     functions: &HashMap<String, UserFunctionSignature>,
+    builtin_functions: &FunctionCatalog,
     depth: usize,
 ) -> Option<String> {
     if depth > MAX_TYPE_DEPTH {
@@ -91,17 +110,22 @@ fn infer_at(
             .lookup_value_at(scope, &identifier.name, identifier.span.start)
             .and_then(|symbol| symbol.type_name.clone())
             .or_else(|| {
-                builtins::definitions()
-                    .constants
+                scopes
+                    .builtin_constants()
                     .get(identifier.name.as_str())
                     .map(|constant| constant.type_name.clone())
             }),
         ExpressionKind::Integer(_) => Some("integer".to_owned()),
         ExpressionKind::Float(_) => Some("float".to_owned()),
         ExpressionKind::String(_) => Some("string".to_owned()),
-        ExpressionKind::Parenthesized(inner) => {
-            infer_at(inner, scopes, scope, functions, depth + 1)
-        }
+        ExpressionKind::Parenthesized(inner) => infer_at(
+            inner,
+            scopes,
+            scope,
+            functions,
+            builtin_functions,
+            depth + 1,
+        ),
         ExpressionKind::List(_) => Some("list".to_owned()),
         ExpressionKind::Vector(_) => Some("vector".to_owned()),
         ExpressionKind::Rotation(_) => Some("rotation".to_owned()),
@@ -115,10 +139,22 @@ fn infer_at(
             if let Some(signature) = functions.get(callee.name.as_str()) {
                 return Some(signature.return_type.clone());
             }
-            builtins::definitions()
-                .functions
-                .get(callee.name.as_str())
-                .map(|signature| signature.return_type.clone())
+            let signatures = builtin_functions.get(callee.name.as_str())?;
+            let argument_types: Vec<_> = call
+                .arguments
+                .iter()
+                .map(|argument| {
+                    infer_at(
+                        argument,
+                        scopes,
+                        scope,
+                        functions,
+                        builtin_functions,
+                        depth + 1,
+                    )
+                })
+                .collect();
+            infer_builtin_overload_return_type(signatures, &argument_types, scopes.target())
         }
         ExpressionKind::Component(component) => {
             let ExpressionKind::Identifier(base) = &component.base.kind else {
@@ -137,7 +173,14 @@ fn infer_at(
             }
         }
         ExpressionKind::Unary(unary) => {
-            let operand = infer_at(&unary.operand, scopes, scope, functions, depth + 1)?;
+            let operand = infer_at(
+                &unary.operand,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
             match unary.operator {
                 UnaryOperator::Plus => {
                     matches!(operand.as_str(), "integer" | "float").then_some(operand)
@@ -153,13 +196,34 @@ fn infer_at(
             }
         }
         ExpressionKind::Binary(binary) => {
-            let left = infer_at(&binary.left, scopes, scope, functions, depth + 1)?;
-            let right = infer_at(&binary.right, scopes, scope, functions, depth + 1)?;
+            let left = infer_at(
+                &binary.left,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
+            let right = infer_at(
+                &binary.right,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            )?;
             infer_binary_result_type(binary.operator, &left, &right).map(str::to_owned)
         }
         ExpressionKind::Cast(cast) => {
             let target = type_name(cast.ty.kind);
-            let source = infer_at(&cast.operand, scopes, scope, functions, depth + 1);
+            let source = infer_at(
+                &cast.operand,
+                scopes,
+                scope,
+                functions,
+                builtin_functions,
+                depth + 1,
+            );
             match source {
                 Some(source) => {
                     if explicit_cast_supported(&source, target) {
@@ -177,6 +241,92 @@ fn infer_at(
         | ExpressionKind::LazyIndex(_)
         | ExpressionKind::Error(_) => None,
     }
+}
+
+/// Select the highest-scoring function overload for the supplied argument types.
+///
+/// Unknown argument types do not reject a candidate. Known incompatible types
+/// reduce its score, allowing the call checker to select the closest signature
+/// and report SEM004 against that overload.
+pub(crate) fn best_builtin_overload<'a>(
+    signatures: &'a [Signature],
+    argument_types: &[Option<String>],
+    target: TargetProfile,
+) -> Option<&'a Signature> {
+    signatures
+        .iter()
+        .filter(|signature| signature.parameters.len() == argument_types.len())
+        .max_by_key(|signature| overload_score(signature, argument_types, target))
+}
+
+fn overload_score(
+    signature: &Signature,
+    argument_types: &[Option<String>],
+    target: TargetProfile,
+) -> i32 {
+    signature
+        .parameters
+        .iter()
+        .zip(argument_types)
+        .map(|(parameter, actual)| match actual.as_deref() {
+            None => 0,
+            Some(actual) if actual == parameter.type_name => 4,
+            Some(actual) if can_implicitly_convert(actual, &parameter.type_name) => 2,
+            Some(actual)
+                if target.is_opensim()
+                    && matches!(
+                        (actual, parameter.type_name.as_str()),
+                        ("key", "string") | ("string", "key")
+                    ) =>
+            {
+                2
+            }
+            Some(_) => -4,
+        })
+        .sum()
+}
+
+/// Infer the overload return type only when it is unambiguous and all known
+/// argument types are compatible with the selected signature.
+fn infer_builtin_overload_return_type(
+    signatures: &[Signature],
+    argument_types: &[Option<String>],
+    target: TargetProfile,
+) -> Option<String> {
+    let Some(selected) = best_builtin_overload(signatures, argument_types, target) else {
+        // Legacy infers a built-in's result type independently of call arity.
+        // Preserve that behavior only when every overload agrees on the type;
+        // otherwise an invalid-arity call remains unknown rather than guessed.
+        let first = signatures.first()?;
+        return signatures
+            .iter()
+            .all(|candidate| candidate.return_type == first.return_type)
+            .then(|| first.return_type.clone());
+    };
+    let selected_score = overload_score(selected, argument_types, target);
+    if signatures.iter().any(|candidate| {
+        candidate.parameters.len() == argument_types.len()
+            && overload_score(candidate, argument_types, target) == selected_score
+            && candidate.return_type != selected.return_type
+    }) {
+        return None;
+    }
+    let compatible = selected
+        .parameters
+        .iter()
+        .zip(argument_types)
+        .all(|(parameter, actual)| match actual.as_deref() {
+            None => true,
+            Some(actual) => {
+                can_implicitly_convert(actual, &parameter.type_name)
+                    || (target.is_opensim()
+                        && matches!(
+                            (actual, parameter.type_name.as_str()),
+                            ("key", "string") | ("string", "key")
+                        ))
+            }
+        });
+    compatible.then(|| selected.return_type.clone())
 }
 
 fn numeric_result_type(left: &str, right: &str) -> Option<&'static str> {
@@ -354,6 +504,132 @@ fn one_character_span(span: Span) -> Span {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overload_selection_uses_arity_and_argument_types() {
+        let target = TargetProfile::parse("opensim-yengine").unwrap();
+        let signatures = vec![
+            Signature {
+                name: "osApproxEquals".to_owned(),
+                return_type: "integer".to_owned(),
+                parameters: vec![
+                    crate::builtins::Parameter {
+                        type_name: "float".to_owned(),
+                        name: "a".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "float".to_owned(),
+                        name: "b".to_owned(),
+                    },
+                ],
+            },
+            Signature {
+                name: "osApproxEquals".to_owned(),
+                return_type: "integer".to_owned(),
+                parameters: vec![
+                    crate::builtins::Parameter {
+                        type_name: "vector".to_owned(),
+                        name: "a".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "vector".to_owned(),
+                        name: "b".to_owned(),
+                    },
+                ],
+            },
+        ];
+        let selected = best_builtin_overload(
+            &signatures,
+            &[Some("vector".to_owned()), Some("vector".to_owned())],
+            target,
+        )
+        .unwrap();
+        assert_eq!(selected.parameters[0].type_name, "vector");
+    }
+
+    #[test]
+    fn overload_return_type_uses_shared_type_when_arity_is_invalid() {
+        let target = TargetProfile::parse("opensim-yengine").unwrap();
+        let signatures = vec![
+            Signature {
+                name: "osExample".to_owned(),
+                return_type: "integer".to_owned(),
+                parameters: vec![crate::builtins::Parameter {
+                    type_name: "string".to_owned(),
+                    name: "value".to_owned(),
+                }],
+            },
+            Signature {
+                name: "osExample".to_owned(),
+                return_type: "integer".to_owned(),
+                parameters: vec![
+                    crate::builtins::Parameter {
+                        type_name: "string".to_owned(),
+                        name: "value".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "integer".to_owned(),
+                        name: "flags".to_owned(),
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            infer_builtin_overload_return_type(&signatures, &[], target),
+            Some("integer".to_owned())
+        );
+    }
+
+    #[test]
+    fn overload_return_type_is_unknown_when_best_matches_disagree() {
+        let target = TargetProfile::parse("opensim-yengine").unwrap();
+        let signatures = vec![
+            Signature {
+                name: "osSlerp".to_owned(),
+                return_type: "rotation".to_owned(),
+                parameters: vec![
+                    crate::builtins::Parameter {
+                        type_name: "rotation".to_owned(),
+                        name: "a".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "rotation".to_owned(),
+                        name: "b".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "float".to_owned(),
+                        name: "t".to_owned(),
+                    },
+                ],
+            },
+            Signature {
+                name: "osSlerp".to_owned(),
+                return_type: "vector".to_owned(),
+                parameters: vec![
+                    crate::builtins::Parameter {
+                        type_name: "vector".to_owned(),
+                        name: "a".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "vector".to_owned(),
+                        name: "b".to_owned(),
+                    },
+                    crate::builtins::Parameter {
+                        type_name: "float".to_owned(),
+                        name: "t".to_owned(),
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            infer_builtin_overload_return_type(
+                &signatures,
+                &[None, None, Some("float".to_owned())],
+                target,
+            ),
+            None
+        );
+    }
+
     use super::*;
     use crate::ast::{parse_ast, Statement, StatementKind, TopLevel};
     use crate::lex;

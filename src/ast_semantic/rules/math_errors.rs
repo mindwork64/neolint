@@ -1,17 +1,18 @@
-//! SEM043: statically provable division and imaginary math-domain hazards.
+//! SEM043: statically provable division and mathematical-domain hazards.
 
 use std::collections::HashMap;
 
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Expression, ExpressionKind, TypeKind, UnaryOperator,
 };
-use crate::builtins;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::expressions::ExpressionSite;
 use super::super::scopes::ScopeTree;
 use super::super::types::{
-    can_implicitly_convert, infer_binary_result_type, infer_expression_type, UserFunctionSignature,
+    can_implicitly_convert, infer_binary_result_type, infer_expression_type_with_builtins,
+    UserFunctionSignature,
 };
 
 const MAX_MATH_WORK: usize = 32_768;
@@ -69,12 +70,13 @@ enum Evaluation {
 
 /// Warn on statically provable division-by-zero and imaginary math hazards.
 /// Mutable variables and user-defined calls are deliberately not evaluated.
-pub(crate) fn check(
+pub(crate) fn check_with_builtins(
     sites: &[ExpressionSite<'_>],
     scopes: &ScopeTree,
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if !environment_reliable
         || syntax_diagnostics
@@ -99,14 +101,22 @@ pub(crate) fn check(
                     BinaryOperator::Divide | BinaryOperator::Remainder
                 ) =>
             {
-                let Some(left_type) =
-                    infer_expression_type(&binary.left, scopes, site.scope, functions)
-                else {
+                let Some(left_type) = infer_expression_type_with_builtins(
+                    &binary.left,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
-                let Some(right_type) =
-                    infer_expression_type(&binary.right, scopes, site.scope, functions)
-                else {
+                let Some(right_type) = infer_expression_type_with_builtins(
+                    &binary.right,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
                 if infer_binary_result_type(binary.operator, &left_type, &right_type).is_none() {
@@ -127,14 +137,22 @@ pub(crate) fn check(
                     AssignmentOperator::DivideAssign | AssignmentOperator::RemainderAssign
                 ) =>
             {
-                let Some(target_type) =
-                    infer_expression_type(&assignment.target, scopes, site.scope, functions)
-                else {
+                let Some(target_type) = infer_expression_type_with_builtins(
+                    &assignment.target,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
-                let Some(value_type) =
-                    infer_expression_type(&assignment.value, scopes, site.scope, functions)
-                else {
+                let Some(value_type) = infer_expression_type_with_builtins(
+                    &assignment.value,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                ) else {
                     continue;
                 };
                 let operator = match assignment.operator {
@@ -158,8 +176,10 @@ pub(crate) fn check(
                 let ExpressionKind::Identifier(callee) = &call.callee.kind else {
                     continue;
                 };
-                if !matches!(callee.name.as_str(), "llSqrt" | "llPow")
-                    || functions.contains_key(callee.name.as_str())
+                if !matches!(
+                    callee.name.as_str(),
+                    "llSqrt" | "llPow" | "llAcos" | "llAsin" | "llLog" | "llLog10"
+                ) || functions.contains_key(callee.name.as_str())
                     || !call.matched_close
                     || !call.arguments_complete
                     || call.declared_argument_count != call.arguments.len()
@@ -167,14 +187,17 @@ pub(crate) fn check(
                     continue;
                 }
 
-                let Some(signature) = builtins::definitions().functions.get(callee.name.as_str())
+                let Some(signatures) = builtin_functions.get(callee.name.as_str()) else {
+                    continue;
+                };
+                let expected_argument_count = if callee.name == "llPow" { 2 } else { 1 };
+                let Some(signature) = signatures
+                    .iter()
+                    .find(|signature| signature.parameters.len() == expected_argument_count)
                 else {
                     continue;
                 };
-                let expected_argument_count = if callee.name == "llSqrt" { 1 } else { 2 };
-                if signature.parameters.len() != expected_argument_count
-                    || call.arguments.len() != expected_argument_count
-                {
+                if call.arguments.len() != expected_argument_count {
                     continue;
                 }
                 if call.arguments.len() > work {
@@ -184,9 +207,14 @@ pub(crate) fn check(
 
                 let arguments_valid = call.arguments.iter().zip(&signature.parameters).all(
                     |(argument, parameter)| {
-                        infer_expression_type(argument, scopes, site.scope, functions).is_some_and(
-                            |actual| can_implicitly_convert(&actual, &parameter.type_name),
+                        infer_expression_type_with_builtins(
+                            argument,
+                            scopes,
+                            site.scope,
+                            functions,
+                            builtin_functions,
                         )
+                        .is_some_and(|actual| can_implicitly_convert(&actual, &parameter.type_name))
                     },
                 );
                 if !arguments_valid {
@@ -219,6 +247,26 @@ pub(crate) fn check(
                     {
                         Some(
                             "llPow has a statically negative base and non-integer exponent; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llAcos" if values.first().is_some_and(|value| !(-1.0..=1.0).contains(&value.as_float())) => {
+                        Some(
+                            "llAcos has a statically out-of-range argument outside [-1.0, 1.0]; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llAsin" if values.first().is_some_and(|value| !(-1.0..=1.0).contains(&value.as_float())) => {
+                        Some(
+                            "llAsin has a statically out-of-range argument outside [-1.0, 1.0]; this returns NaN in Mono and triggers a Math Error in LSO",
+                        )
+                    }
+                    "llLog" if values.first().is_some_and(|value| value.as_float() <= 0.0) => {
+                        Some(
+                            "llLog has a statically non-positive argument; LSL returns 0.0 instead of the natural logarithm",
+                        )
+                    }
+                    "llLog10" if values.first().is_some_and(|value| value.as_float() <= 0.0) => {
+                        Some(
+                            "llLog10 has a statically non-positive argument; LSL returns 0.0 instead of the base-10 logarithm",
                         )
                     }
                     _ => None,
@@ -292,7 +340,7 @@ fn evaluate_number(
             {
                 return Evaluation::Unknown;
             }
-            let Some(constant) = builtins::definitions().constants.get(&identifier.name) else {
+            let Some(constant) = scopes.builtin_constants().get(&identifier.name) else {
                 return Evaluation::Unknown;
             };
             match constant.type_name.as_str() {
@@ -445,6 +493,7 @@ fn parse_integer(text: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins;
 
     #[test]
     fn canonical_false_is_known_zero_but_canonical_true_is_not() {
