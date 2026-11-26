@@ -128,11 +128,14 @@ struct DocumentState {
     version: i32,
 }
 
+type RootDiagnostics = HashMap<Url, Vec<LspDiagnostic>>;
+
 struct ServerState {
     config: Option<LintConfig>,
     documents: HashMap<Url, DocumentState>,
-    /// URIs whose diagnostics were last published as part of each root file.
-    published_by_root: HashMap<Url, HashSet<Url>>,
+    /// Per-root diagnostic snapshots, keyed by the URI they belong to.
+    /// A single included URI may be present in several root snapshots.
+    published_by_root: HashMap<Url, RootDiagnostics>,
 }
 
 fn is_newer_version(current: i32, incoming: i32) -> bool {
@@ -554,22 +557,12 @@ fn publish_for_root(
     connection: &Connection,
     state: &mut ServerState,
     root_uri: &Url,
-    mut diagnostics: HashMap<Url, Vec<LspDiagnostic>>,
+    mut diagnostics: RootDiagnostics,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     diagnostics.entry(root_uri.clone()).or_default();
-    let current_uris: HashSet<_> = diagnostics.keys().cloned().collect();
-    let previous_uris = state
-        .published_by_root
-        .insert(root_uri.clone(), current_uris.clone())
-        .unwrap_or_default();
-
-    for uri in previous_uris.difference(&current_uris) {
-        publish_diagnostics(connection, state, uri, Vec::new())?;
-    }
-    for (uri, items) in diagnostics {
-        publish_diagnostics(connection, state, &uri, items)?;
-    }
-    Ok(())
+    let affected_uris =
+        replace_root_diagnostics(&mut state.published_by_root, root_uri.clone(), diagnostics);
+    publish_aggregated_diagnostics(connection, state, affected_uris)
 }
 
 fn clear_root_diagnostics(
@@ -577,12 +570,91 @@ fn clear_root_diagnostics(
     state: &mut ServerState,
     root_uri: &Url,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if let Some(uris) = state.published_by_root.remove(root_uri) {
-        for uri in uris {
-            publish_diagnostics(connection, state, &uri, Vec::new())?;
+    let mut affected_uris = remove_root_diagnostics(&mut state.published_by_root, root_uri);
+    if affected_uris.is_empty() {
+        affected_uris.insert(root_uri.clone());
+    }
+    let mut affected_uris: Vec<_> = affected_uris.into_iter().collect();
+    affected_uris.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
+    for uri in affected_uris {
+        // The document being closed must be cleared even if another open root
+        // still has a cached include diagnostic for it. Other shared include
+        // URIs are republished from the remaining roots below.
+        let diagnostics = if &uri == root_uri {
+            Vec::new()
+        } else {
+            aggregate_diagnostics(&uri, &state.published_by_root)
+        };
+        publish_diagnostics(connection, state, &uri, diagnostics)?;
+    }
+    Ok(())
+}
+
+/// Replace one root's diagnostic snapshot and return every URI whose aggregate
+/// may have changed. Other roots' snapshots remain untouched.
+fn replace_root_diagnostics(
+    published_by_root: &mut HashMap<Url, RootDiagnostics>,
+    root_uri: Url,
+    diagnostics: RootDiagnostics,
+) -> HashSet<Url> {
+    let previous = published_by_root
+        .insert(root_uri.clone(), diagnostics)
+        .unwrap_or_default();
+    let mut affected_uris: HashSet<_> = previous.into_keys().collect();
+    if let Some(current) = published_by_root.get(&root_uri) {
+        affected_uris.extend(current.keys().cloned());
+    }
+    affected_uris
+}
+
+/// Remove a root snapshot and return the URIs whose aggregate must be
+/// republished from any roots that still reference them.
+fn remove_root_diagnostics(
+    published_by_root: &mut HashMap<Url, RootDiagnostics>,
+    root_uri: &Url,
+) -> HashSet<Url> {
+    published_by_root
+        .remove(root_uri)
+        .map(|diagnostics| diagnostics.into_keys().collect())
+        .unwrap_or_default()
+}
+
+/// Merge the diagnostic snapshots from all roots for one source URI.
+/// Roots and affected URIs are sorted so publication order is deterministic.
+/// Exact duplicates are collapsed when the same included finding is produced
+/// by more than one root; distinct root-context findings are preserved.
+fn aggregate_diagnostics(
+    uri: &Url,
+    published_by_root: &HashMap<Url, RootDiagnostics>,
+) -> Vec<LspDiagnostic> {
+    let mut roots: Vec<_> = published_by_root.iter().collect();
+    roots.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+
+    let mut aggregate = Vec::new();
+    for (_, diagnostics_by_uri) in roots {
+        if let Some(diagnostics) = diagnostics_by_uri.get(uri) {
+            for diagnostic in diagnostics {
+                if !aggregate.contains(diagnostic) {
+                    aggregate.push(diagnostic.clone());
+                }
+            }
         }
-    } else {
-        publish_diagnostics(connection, state, root_uri, Vec::new())?;
+    }
+    aggregate
+}
+
+fn publish_aggregated_diagnostics(
+    connection: &Connection,
+    state: &ServerState,
+    affected_uris: HashSet<Url>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut affected_uris: Vec<_> = affected_uris.into_iter().collect();
+    affected_uris.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
+    for uri in affected_uris {
+        let diagnostics = aggregate_diagnostics(&uri, &state.published_by_root);
+        publish_diagnostics(connection, state, &uri, diagnostics)?;
     }
     Ok(())
 }
@@ -672,6 +744,87 @@ mod tests {
         assert_eq!(document.version, 8);
         assert!(is_newer_version(8, 9));
         assert!(!is_newer_version(9, 9));
+    }
+
+    fn test_diagnostic(message: &str) -> LspDiagnostic {
+        LspDiagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(lsp_types::NumberOrString::String("SEM999".to_owned())),
+            source: Some(SERVER_NAME.to_owned()),
+            message: message.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn removing_one_root_preserves_diagnostics_shared_by_another_root() {
+        let root_a = Url::parse("file:///workspace/a.lsl").unwrap();
+        let root_b = Url::parse("file:///workspace/b.lsl").unwrap();
+        let shared = Url::parse("file:///workspace/shared.inc").unwrap();
+        let diagnostic_a = test_diagnostic("finding from root A");
+        let diagnostic_b = test_diagnostic("finding from root B");
+        let mut published_by_root = HashMap::from([
+            (
+                root_a.clone(),
+                HashMap::from([(shared.clone(), vec![diagnostic_a.clone()])]),
+            ),
+            (
+                root_b.clone(),
+                HashMap::from([(shared.clone(), vec![diagnostic_b.clone()])]),
+            ),
+        ]);
+
+        // Root A is reanalyzed and no longer includes the shared source.
+        let affected =
+            replace_root_diagnostics(&mut published_by_root, root_a.clone(), HashMap::new());
+        assert!(affected.contains(&shared));
+        assert_eq!(
+            aggregate_diagnostics(&shared, &published_by_root),
+            vec![diagnostic_b.clone()]
+        );
+
+        // Restore root A's old snapshot and test closing it independently.
+        replace_root_diagnostics(
+            &mut published_by_root,
+            root_a.clone(),
+            HashMap::from([(shared.clone(), vec![diagnostic_a])]),
+        );
+        let affected = remove_root_diagnostics(&mut published_by_root, &root_a);
+        assert!(affected.contains(&shared));
+        assert_eq!(
+            aggregate_diagnostics(&shared, &published_by_root),
+            vec![diagnostic_b]
+        );
+
+        // Only the last root removing the include clears the URI's diagnostics.
+        let affected = remove_root_diagnostics(&mut published_by_root, &root_b);
+        assert!(affected.contains(&shared));
+        assert!(aggregate_diagnostics(&shared, &published_by_root).is_empty());
+    }
+
+    #[test]
+    fn aggregation_is_deterministic_and_deduplicates_identical_findings() {
+        let root_a = Url::parse("file:///workspace/a.lsl").unwrap();
+        let root_b = Url::parse("file:///workspace/b.lsl").unwrap();
+        let shared = Url::parse("file:///workspace/shared.inc").unwrap();
+        let duplicate = test_diagnostic("same finding");
+        let distinct = test_diagnostic("different context");
+        let published_by_root = HashMap::from([
+            (
+                root_b,
+                HashMap::from([(shared.clone(), vec![distinct.clone(), duplicate.clone()])]),
+            ),
+            (
+                root_a,
+                HashMap::from([(shared.clone(), vec![duplicate.clone()])]),
+            ),
+        ]);
+
+        assert_eq!(
+            aggregate_diagnostics(&shared, &published_by_root),
+            vec![duplicate, distinct]
+        );
     }
 
     #[test]
