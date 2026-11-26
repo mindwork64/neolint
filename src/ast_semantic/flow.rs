@@ -8,6 +8,7 @@ use crate::ast::{
 };
 use crate::builtins::ConstantDefinition;
 use crate::diagnostic::{Diagnostic, Span};
+use crate::target::{ScriptRuntime, TargetProfile};
 
 use super::rules::semantic_error;
 use super::scopes::{ScopeId, ScopeTree, SymbolKind};
@@ -130,7 +131,7 @@ pub(crate) fn check_returns(
 }
 
 /// SEM009/SEM010 for functions and canonical event handlers.
-pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
+pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree, target: TargetProfile) -> JumpReport {
     let mut report = JumpReport {
         diagnostics: Vec::new(),
         invalid_functions: HashSet::new(),
@@ -157,6 +158,7 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
                 );
             }
         }
+        let mut jump_counts: HashMap<&str, usize> = HashMap::new();
         for jump in facts.jumps {
             let Some((_, target_scope, target_recovery_path)) = labels.get(jump.name) else {
                 report.diagnostics.push(semantic_error(
@@ -184,6 +186,23 @@ pub(crate) fn check_jumps(ast: &Ast, scopes: &ScopeTree) -> JumpReport {
                     ),
                     jump.span,
                 ));
+                continue;
+            }
+            if target.runtime() == ScriptRuntime::Lso {
+                let count = jump_counts.entry(jump.name).or_default();
+                *count += 1;
+                if *count == 2 {
+                    report.diagnostics.push(Diagnostic {
+                        code: "SEM054",
+                        severity: crate::diagnostic::Severity::Warning,
+                        kind: crate::diagnostic::DiagnosticKind::Lint,
+                        message: format!(
+                            "multiple jump statements target label '{}'; only the last jump site executes on Second Life LSO",
+                            jump.name
+                        ),
+                        span: jump.span,
+                    });
+                }
             }
         }
         if report.diagnostics.len() != before {
@@ -2052,7 +2071,7 @@ fn invalidate_written_local_facts(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum ConstantNumber {
+pub(crate) enum ConstantNumber {
     Integer(i32),
     Float(f32),
 }
@@ -2284,6 +2303,46 @@ fn condition_possibilities(
     Some((truthy, !truthy))
 }
 
+/// Evaluate a side-effect-free numeric expression as a compile-time truth value.
+/// Mutable locals, parameters, globals, calls, and unsupported value types stay unknown.
+pub(crate) fn evaluate_static_condition(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+) -> Option<bool> {
+    let constants = ConstantEnvironment::new();
+    evaluate_expression_result(expression, scope, scopes, &constants).map(ConstantNumber::truthy)
+}
+
+/// Evaluate an integer expression while treating only the supplied, proven
+/// immutable global bindings as constants.
+pub(crate) fn evaluate_static_condition_with_integer_facts(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+    facts: &HashMap<usize, i32>,
+) -> Option<bool> {
+    let constants = facts
+        .iter()
+        .map(|(key, value)| (*key, ConstantNumber::Integer(*value)))
+        .collect::<ConstantEnvironment>();
+    evaluate_expression_result(expression, scope, scopes, &constants).map(ConstantNumber::truthy)
+}
+
+/// Evaluate a numeric initializer without assuming that mutable variables are
+/// constant. Used to seed facts for globals proven not to be written anywhere.
+pub(crate) fn evaluate_static_integer(
+    expression: &Expression,
+    scope: ScopeId,
+    scopes: &ScopeTree,
+) -> Option<i32> {
+    let constants = ConstantEnvironment::new();
+    match evaluate_expression_result(expression, scope, scopes, &constants)? {
+        ConstantNumber::Integer(value) => Some(value),
+        ConstantNumber::Float(_) => None,
+    }
+}
+
 fn evaluate_constant_number(
     expression: &Expression,
     scope: ScopeId,
@@ -2314,13 +2373,15 @@ fn evaluate_constant_number(
             if let Some(symbol) =
                 scopes.lookup_value_at(scope, &identifier.name, identifier.span.start)
             {
-                if symbol.kind == SymbolKind::Local
+                if matches!(symbol.kind, SymbolKind::Local | SymbolKind::GlobalVariable)
                     && matches!(symbol.type_name.as_deref(), Some("integer" | "float"))
                 {
+                    // Local facts are supplied by the CFG dataflow. Global
+                    // facts are supplied only by callers that proved the
+                    // binding is never written anywhere in the AST.
                     return constants.get(&symbol.span.start).copied();
                 }
-                // Parameters, globals and non-numeric locals are mutable and
-                // never become constants merely from their declaration.
+                // Parameters and non-numeric values remain unknown.
                 return None;
             }
             let constant = scopes.builtin_constants().get(identifier.name.as_str())?;
@@ -3617,5 +3678,21 @@ mod constant_condition_tests {
                 .all(|diagnostic: &Diagnostic| diagnostic.code != "SEM011"),
             "switch condition side effect was not propagated: {diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn lso_multiple_jump_sites_to_one_label_are_reported_only_for_lso() {
+        let source = "default { state_entry() { jump done; jump done; @done; } }";
+        let (tokens, lexical) = crate::lex(source);
+        assert!(lexical.is_empty(), "{lexical:?}");
+        let (ast, syntax) = crate::ast::parse_ast(&tokens);
+        let lso = crate::target::TargetProfile::parse("second-life-lso").unwrap();
+        let mono = crate::target::TargetProfile::parse("second-life-mono").unwrap();
+        let lso_diagnostics =
+            crate::ast_semantic::analyze_ast_with_target(&ast, &syntax, true, lso);
+        let mono_diagnostics =
+            crate::ast_semantic::analyze_ast_with_target(&ast, &syntax, true, mono);
+        assert!(lso_diagnostics.iter().any(|d| d.code == "SEM054"));
+        assert!(mono_diagnostics.iter().all(|d| d.code != "SEM054"));
     }
 }

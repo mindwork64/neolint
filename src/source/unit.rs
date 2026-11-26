@@ -109,6 +109,7 @@ impl AnalysisUnit {
                     false,
                     TargetProfile::default(),
                     &OsslAllowlist::default(),
+                    false,
                     &suppression,
                 )?
                 .into_diagnostics());
@@ -170,6 +171,27 @@ impl AnalysisUnit {
         ossl_allowlist: &OsslAllowlist,
         suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        self.analyze_with_target_options_suppressed_and_god_mode(
+            engine,
+            options,
+            target,
+            ossl_allowlist,
+            false,
+            suppression,
+        )
+    }
+
+    /// Run target-aware AST analysis with an explicit Second Life God Mode opt-in.
+    /// This additive entry point preserves the existing `EngineAnalysisOptions` contract.
+    pub fn analyze_with_target_options_suppressed_and_god_mode(
+        &self,
+        engine: AnalysisEngine,
+        options: &EngineAnalysisOptions,
+        target: TargetProfile,
+        ossl_allowlist: &OsslAllowlist,
+        allow_god_mode: bool,
+        suppression: &DisplaySuppression,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
         if let Some(prepared) = &self.prepared {
             return Ok(self.analyze_prepared(
                 prepared,
@@ -177,6 +199,7 @@ impl AnalysisUnit {
                 options.collect_tokens,
                 target,
                 ossl_allowlist,
+                allow_god_mode,
                 suppression,
             )?);
         }
@@ -246,6 +269,7 @@ impl AnalysisUnit {
     /// kept engine-local through the private `LegacySyntax`/`AstSyntax`
     /// wrappers. The AST semantic stream is never appended to a Compare display
     /// stream; display keeps the frozen Legacy stream.
+    #[allow(clippy::too_many_arguments)]
     fn analyze_prepared(
         &self,
         prepared: &PreparedSource,
@@ -253,6 +277,7 @@ impl AnalysisUnit {
         collect_tokens: bool,
         target: TargetProfile,
         ossl_allowlist: &OsslAllowlist,
+        allow_god_mode: bool,
         suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, SpanError> {
         let mut rendered = Vec::new();
@@ -297,6 +322,7 @@ impl AnalysisUnit {
                     environment_reliable,
                     target,
                     ossl_allowlist,
+                    allow_god_mode,
                 );
                 let mut display = lexical;
                 display.extend(ast_syntax.into_diagnostics());
@@ -313,6 +339,7 @@ impl AnalysisUnit {
                     environment_reliable,
                     target,
                     ossl_allowlist,
+                    allow_god_mode,
                 );
                 comparison = Some(compare_semantic_diagnostics(
                     &legacy_semantic,

@@ -47,8 +47,8 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
-`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, and `SEM048` are AST-only lint diagnostics.
-`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`–`SEM047`, `SEM049`, and `SEM050` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
+`SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, `SEM048`, and `SEM053`–`SEM057` are AST-only lint diagnostics.
+`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`–`SEM047`, `SEM049`, `SEM050`, and `SEM058` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
 user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
@@ -218,3 +218,5 @@ neolint --engine=compare --format json script.lsl
 ```
 
 See [configuration.md](configuration.md), [diagnostics.md](diagnostics.md), and [firestorm-preprocessor.md](firestorm-preprocessor.md).
+
+`--god-mode` is an explicit project opt-in for the three Second Life God Mode-only built-ins; it does not change simulator permissions.

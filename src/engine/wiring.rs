@@ -89,13 +89,15 @@ pub(crate) fn analyze_ast_with_target_options(
     environment_reliable: bool,
     target: TargetProfile,
     ossl_allowlist: &OsslAllowlist,
+    allow_god_mode: bool,
 ) -> Vec<Diagnostic> {
-    crate::ast_semantic::analyze_ast_with_target_options(
+    crate::ast_semantic::analyze_ast_with_target_options_and_god_mode(
         ast,
         &syntax.0,
         environment_reliable,
         target,
         ossl_allowlist,
+        allow_god_mode,
     )
 }
 

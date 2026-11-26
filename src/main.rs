@@ -29,7 +29,7 @@ use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{
     lex, parse, AnalysisEngine, AnalysisRun, Diagnostic, DiagnosticFingerprint,
     EngineAnalysisOptions, EngineComparisonReport, OpenSimApiVersion, PreprocessDialect,
-    PreprocessSettings, Severity, TargetProfile,
+    PreprocessSettings, Severity, TargetPlatform, TargetProfile,
 };
 use std::collections::HashSet;
 use std::env;
@@ -96,6 +96,7 @@ fn run() -> i32 {
     let mut target_version_override = None;
     let mut ossl_functions_cli = Vec::new();
     let mut strict_ossl_cli = false;
+    let mut god_mode_cli = false;
     let mut include_dirs_cli = Vec::new();
     let mut engine_override = None;
     let mut args = env::args().skip(1);
@@ -125,6 +126,9 @@ fn run() -> i32 {
                         return 2;
                     }
                 };
+            }
+            "--god-mode" => {
+                god_mode_cli = true;
             }
             "--strict-ossl" => {
                 strict_ossl_cli = true;
@@ -378,8 +382,16 @@ fn run() -> i32 {
             return 2;
         }
     }
+    if god_mode_cli && config.target().platform() != TargetPlatform::SecondLife {
+        eprintln!("neolint: --god-mode is only valid for Second Life targets");
+        return 2;
+    }
     if let Err(error) = config.validate_target_settings() {
         eprintln!("neolint: invalid target configuration: {error}");
+        return 2;
+    }
+    if god_mode_cli && config.engine() == AnalysisEngine::Legacy {
+        eprintln!("neolint: --god-mode requires the AST or Compare engine");
         return 2;
     }
     if config.target_explicit() && config.engine() == AnalysisEngine::Legacy {
@@ -424,6 +436,7 @@ fn run() -> i32 {
             &config,
             format,
             show_tokens,
+            god_mode_cli,
             UnitPreparation::Preprocessed,
         );
     }
@@ -437,6 +450,7 @@ fn run() -> i32 {
             &config,
             format,
             show_tokens,
+            god_mode_cli,
             UnitPreparation::Identity,
         );
     }
@@ -518,6 +532,7 @@ fn run_units(
     config: &LintConfig,
     format: OutputFormat,
     show_tokens: bool,
+    allow_god_mode: bool,
     preparation: UnitPreparation,
 ) -> i32 {
     let preprocess_options = PreprocessSettings::full()
@@ -610,11 +625,12 @@ fn run_units(
             input_failed = true;
             continue;
         };
-        let analysis = match unit.analyze_with_target_options_suppressed(
+        let analysis = match unit.analyze_with_target_options_suppressed_and_god_mode(
             engine,
             &options,
             config.target(),
             config.ossl_allowlist(),
+            allow_god_mode,
             &suppression,
         ) {
             Ok(analysis) => analysis,
@@ -1146,7 +1162,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm preprocessing; firestorm\n                           enables preprocessing\n    --target <PROFILE>     Select second-life-mono (default), second-life-lso,\n                           second-life-luau, opensim-xengine or opensim-yengine\n                           (independent of --dialect; AST/Compare only)\n    --target-version <VER> Select pinned OpenSim API version: 0.9.2.2, 0.9.3.0,\n                           0.9.3.1 or master-2026-11-25 (OpenSim only)\n    --strict-ossl          Check all known OSSL calls against an explicit allowlist\n                           (requires an OpenSim target)\n    --ossl-function <NAME> Add an OpenSim OSSL function to the project allowlist\n                           (repeatable; requires an OpenSim target)\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n    target = opensim-yengine\n    target_version = 0.9.3.1\n    ossl_allowlist = strict\n    ossl_function = osGetAgentIP\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm preprocessing; firestorm\n                           enables preprocessing\n    --target <PROFILE>     Select second-life-mono (default), second-life-lso,\n                           second-life-luau, opensim-xengine or opensim-yengine\n                           (independent of --dialect; AST/Compare only)\n    --target-version <VER> Select pinned OpenSim API version: 0.9.2.2, 0.9.3.0,\n                           0.9.3.1 or master-2026-11-25 (OpenSim only)\n    --god-mode             Allow Second Life God Mode-only built-ins in this project\n    --strict-ossl          Check all known OSSL calls against an explicit allowlist\n                           (requires an OpenSim target)\n    --ossl-function <NAME> Add an OpenSim OSSL function to the project allowlist\n                           (repeatable; requires an OpenSim target)\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n    target = opensim-yengine\n    target_version = 0.9.3.1\n    ossl_allowlist = strict\n    ossl_function = osGetAgentIP\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
         env!("CARGO_PKG_VERSION")
     );
 }
