@@ -549,7 +549,9 @@ pub struct AssignmentExpression {
 pub struct CastExpression {
     /// Full expression span.
     pub span: Span,
-    /// Target type.
+    /// Target type. Firestorm's `quaternion` lazy-list alias is represented as
+    /// `rotation` here because it lowers to `llList2Rot` and is not an LSL type;
+    /// the source spelling remains available through this type's span.
     pub ty: Type,
     /// Cast operand.
     pub operand: Box<Expression>,

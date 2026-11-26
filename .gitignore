@@ -23,3 +23,6 @@ site/src/content/docs/docs/
 site/src/assets/neolint-logo.png
 site/src/data/diagnostics.json
 site/src/env.d.ts
+
+# Local working context / handoff notes (machine-specific, never commit)
+PROJECT_CONTEXT.local.md

@@ -3113,15 +3113,32 @@ rewriting source:
 
 - single-index assignment: `identifier[index] = rhs`;
 - typed extraction: `(integer|float|string|key|vector|rotation)identifier[index]`;
-- list extraction: `(list)identifier[index]` and `(list)identifier[first,last]`;
-- the optional fully parenthesized typed-reference form.
+- list-range extraction: `(list)identifier[first,last]` (exactly two indices);
+- one optional parenthesis pair around the typed reference;
+- Firestorm's `(quaternion)identifier[index]` alias, lowered upstream to
+  `llList2Rot` and represented by NeoLint as a rotation cast; `Type.span`
+  retains the original `quaternion` spelling without adding a public AST field.
 
-Firestorm does not confirm bare reads, compound indexed assignment, deletion,
-more than two indices, or non-identifier bases; the parser diagnoses the
-unsupported structural forms it can prove locally. `quaternion` is not added as
-a type: the frozen lexer/type model has no quaternion token, and Phase 5 does not
-invent one. No source-to-source replacement with `lazy_list_set`/`llList2*` is
-performed.
+The alias is available only with the lazy-list gate and only when its operand is
+one indexed identifier. It is not added to `TypeKind`, the lexer keyword set, or
+ordinary declaration/cast grammar. This keeps the seven-value-type LSL model
+unchanged while retaining the Firestorm source spelling and type span.
+
+Firestorm does not transform bare reads, compound indexed assignment or
+non-identifier bases into supported lazy-list operations. The parser diagnoses
+those forms; it also rejects invalid index arities (for example, a scalar
+extraction with a range, `(list)identifier[index]`, or more than two indices)
+instead of pretending the resulting generated built-in call is valid. The
+single-index list form is textually rewritten upstream to a two-argument
+`llList2List` call even though the [canonical signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires three arguments; this upstream regex match is therefore not accepted
+as a valid compiler form. Nested calls/brackets in index expressions and nested
+calls, casts, strings and list literals in RHSs remain
+AST children. Comment/string contents are not interpreted as code. No
+source-to-source replacement with `lazy_list_set`/`llList2*` is performed.
+
+The upstream transformation is pinned to
+[Firestorm `fslslpreproc.cpp` at `7e44160d`](https://github.com/FirestormViewer/phoenix-firestorm/blob/7e44160d001b719d17ee93816425c570974b9a8b/indra/newview/fslslpreproc.cpp#L852-L936).
 
 **Spans and safety.** All extension nodes carry prepared `Span`s and pass the
 same worker-stack, AST001/AST002, recovery and SourceMap bridge contracts as

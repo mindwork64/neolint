@@ -168,6 +168,39 @@ runs the Legacy engine, which does not parse them. The gates are
 driven by `PreprocessSettings` and the active `USE_SWITCHES`/`USE_LAZY_LISTS`
 macros, with `//fspreprocessor off` taking priority.
 
+### Lazy-list forms confirmed by the pinned source
+
+At Firestorm commit `7e44160d001b719d17ee93816425c570974b9a8b`,
+`reformat_lazy_lists()` in `indra/newview/fslslpreproc.cpp` performs two
+separate transformations:
+
+- `identifier[index] = rhs` becomes `identifier = lazy_list_set(identifier,
+  index, [rhs])`. The matcher excludes `==`, balances nested brackets in the
+  index and nested parentheses in the RHS, skips comments and string literals,
+  and accepts a semicolon or closing parenthesis as the RHS boundary.
+- Typed reads map `integer`, `float`, `string`, `key`, `vector`, `rotation` and
+  `list` to their corresponding `llList2*` functions. `quaternion` is an
+  additional spelling for `llList2Rot`, not an LSL value type. One optional pair
+  of parentheses around the indexed reference is preserved.
+
+The source-level regex can rewrite malformed arities into calls that the LSL
+compiler subsequently rejects. NeoLint models valid forms, not every textual
+match of that regex: scalar extractions have one index; list extraction accepts
+a two-index range only; the one-index list spelling is rejected because the
+regex lowers it to `llList2List(src, index)`, while the
+[canonical function signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires `src, start, end`. More than two indices, bare reads, compound
+writes and non-identifier bases are diagnosed. This is intentionally stricter than merely
+matching the regex and avoids treating invalid generated calls as valid syntax.
+
+NeoLint keeps these constructs in the AST and does not emulate Firestorm's
+source rewriting or claim runtime equivalence. The regex patterns were also
+checked with a one-off C++ probe compiled against the locally pinned
+Boost.Regex 1.90 implementation. That probe is exploratory evidence, not a
+checked-in test or CI gate; the committed Rust tests verify NeoLint's parser,
+feature gates, recovery and source-map behavior. Actual Viewer/grid
+verification is reported separately and is not inferred from the probe.
+
 ## Not implemented
 
 Dynamic built-ins, GNU comma-swallowing, `__VA_OPT__`, source-to-source switch or

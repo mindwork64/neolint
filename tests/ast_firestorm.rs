@@ -389,23 +389,35 @@ fn malformed_switch_recovers_and_keeps_later_statements() {
 
 #[test]
 fn lazy_index_access_assignment_and_cast_types_are_typed() {
+    use neolint::ast::TypeKind;
+
     let source = switch_program(
-        "(integer)myList[2]; (string)myList[index]; (vector)myList[index]; (rotation)myList[index]; (float)myList[index]; (key)myList[index]; (list)myList[index]; (list)myList[first,last]; myList[2] = \"value\";",
+        "(integer)myList[2]; (string)myList[index]; (vector)myList[index]; (rotation)myList[index]; (float)myList[index]; (key)myList[index]; (list)myList[first,last]; myList[2] = \"value\";",
     );
     let (ast, diagnostics) = parse_lazy(&source);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let body = event_body(&ast);
-    assert_eq!(body.statements.len(), 9);
-    for statement in &body.statements[..8] {
+    assert_eq!(body.statements.len(), 8);
+    let expected_types = [
+        TypeKind::Integer,
+        TypeKind::String,
+        TypeKind::Vector,
+        TypeKind::Rotation,
+        TypeKind::Float,
+        TypeKind::Key,
+        TypeKind::List,
+    ];
+    for (statement, expected_type) in body.statements[..7].iter().zip(expected_types) {
         let StatementKind::Expression(statement) = &statement.kind else {
             panic!("expression")
         };
         let ExpressionKind::Cast(cast) = &statement.expression.kind else {
             panic!("cast")
         };
+        assert_eq!(cast.ty.kind, expected_type);
         assert!(matches!(cast.operand.kind, ExpressionKind::LazyIndex(_)));
     }
-    let StatementKind::Expression(assignment) = &body.statements[8].kind else {
+    let StatementKind::Expression(assignment) = &body.statements[7].kind else {
         panic!("assignment")
     };
     let ExpressionKind::Assignment(assignment) = &assignment.expression.kind else {
@@ -415,6 +427,22 @@ fn lazy_index_access_assignment_and_cast_types_are_typed() {
         assignment.target.kind,
         ExpressionKind::LazyIndex(_)
     ));
+}
+
+#[test]
+fn list_lazy_extraction_requires_the_full_start_end_range() {
+    let valid = switch_program("(list)items[first,last];");
+    let (_, diagnostics) = parse_lazy(&valid);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let invalid = switch_program("(list)items[index];");
+    let (_, diagnostics) = parse_lazy(&invalid);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code, "PAR007");
+    assert_eq!(
+        diagnostics[0].message,
+        "list lazy-list extraction requires both start and end indices"
+    );
 }
 
 #[test]
@@ -440,6 +468,120 @@ fn lazy_index_expressions_preserve_calls_nesting_and_rhs() {
 }
 
 #[test]
+fn use_lazy_lists_macro_enables_quaternion_extraction_in_the_prepared_unit() {
+    use neolint::ast::TypeKind;
+
+    let source = "#define USE_LAZY_LISTS\ndefault { state_entry() { (quaternion)myList[index]; } }";
+    let (ast, diagnostics, switches, lazy_lists) = analyze(source, PreprocessSettings::firestorm());
+    assert!(!switches);
+    assert!(lazy_lists);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let StatementKind::Expression(expression) = &event_body(&ast).statements[0].kind else {
+        panic!("expected expression")
+    };
+    let ExpressionKind::Cast(cast) = &expression.expression.kind else {
+        panic!("expected quaternion extraction")
+    };
+    assert_eq!(cast.ty.kind, TypeKind::Rotation);
+}
+
+#[test]
+fn quaternion_is_a_firestorm_only_alias_for_rotation_lazy_extraction() {
+    use neolint::ast::TypeKind;
+
+    for body in [
+        "(quaternion)myList[index];",
+        "(quaternion)(myList[index]);",
+        "((quaternion)myList[index]);",
+        "((quaternion)(myList[index]));",
+    ] {
+        let (ast, diagnostics) = parse_lazy(&switch_program(body));
+        assert!(diagnostics.is_empty(), "{body:?}: {diagnostics:?}");
+        let StatementKind::Expression(expression) = &event_body(&ast).statements[0].kind else {
+            panic!("expected expression for {body:?}");
+        };
+        let cast = match &expression.expression.kind {
+            ExpressionKind::Cast(cast) => cast,
+            ExpressionKind::Parenthesized(inner) => match &inner.kind {
+                ExpressionKind::Cast(cast) => cast,
+                other => panic!("expected cast, got {other:?} for {body:?}"),
+            },
+            other => panic!("expected cast, got {other:?} for {body:?}"),
+        };
+        assert_eq!(cast.ty.kind, TypeKind::Rotation, "{body:?}");
+        assert_eq!(
+            &switch_program(body)[cast.ty.span.start..cast.ty.span.end],
+            "quaternion",
+            "source spelling must remain available through the type span"
+        );
+    }
+
+    let (_, disabled) = parse_lsl(&switch_program("(quaternion)myList[index];"));
+    assert!(
+        !disabled.is_empty(),
+        "quaternion must not become a standard LSL type"
+    );
+
+    for body in ["(quaternion)value;", "(quaternion)myList[first,last];"] {
+        let (_, diagnostics) = parse_lazy(&switch_program(body));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PAR007"),
+            "unsupported quaternion form must be rejected: {body:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn lazy_list_syntax_inside_comments_and_strings_is_not_parsed() {
+    let source = switch_program(
+        r#"string note = "(integer)fake[0];"; /* (float)commented[1]; */ (integer)items[index];"#,
+    );
+    let (ast, diagnostics) = parse_lazy(&source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let body = event_body(&ast);
+    assert_eq!(body.statements.len(), 2);
+    let StatementKind::Local(local) = &body.statements[0].kind else {
+        panic!("expected the string declaration")
+    };
+    assert!(matches!(
+        local.declarators[0].initializer.as_ref().unwrap().kind,
+        ExpressionKind::String(_)
+    ));
+    let StatementKind::Expression(expression) = &body.statements[1].kind else {
+        panic!("expected the one real lazy-list expression")
+    };
+    let ExpressionKind::Cast(cast) = &expression.expression.kind else {
+        panic!("expected typed extraction")
+    };
+    assert!(matches!(cast.operand.kind, ExpressionKind::LazyIndex(_)));
+}
+
+#[test]
+fn lazy_list_write_and_read_shapes_match_firestorm_transform_boundaries() {
+    for body in [
+        "items[index] = make(1, nested(2, 3));",
+        "items[getIndex([1, 2])] = makeValue((integer)other[0]);",
+        "items[index] /* gap */ = value;",
+        "items[index] = \"text;]\";",
+        "if (items[index] = makeValue()) { integer later; }",
+        "items[index] = [1, 2, (integer)other[0]];",
+        "(integer)items[getIndex([1, 2])];",
+        "(integer)(items[getIndex(1 + 2)]);",
+        "(list)items[first, last];",
+        "(list)(items[first, last]);",
+        "(quaternion)items[index];",
+    ] {
+        let (_, diagnostics) = parse_lazy(&switch_program(body));
+        assert!(
+            diagnostics.is_empty(),
+            "Firestorm-compatible form was rejected: {body:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn malformed_lazy_constructs_diagnose_and_recover() {
     for source in [
         switch_program("myList[0]; integer later;"),
@@ -451,7 +593,9 @@ fn malformed_lazy_constructs_diagnose_and_recover() {
         switch_program("(1 + 2)[0]; integer later;"),
         switch_program("myList[1,2] = 3; integer later;"),
         switch_program("myList[1] += 3; integer later;"),
+        switch_program("myList[1] == other; integer later;"),
         switch_program("(string)myList[1,2]; integer later;"),
+        switch_program("(list)myList[1]; integer later;"),
     ] {
         let (ast, diagnostics) = parse_lazy(&source);
         assert!(!diagnostics.is_empty(), "{source}");
@@ -466,11 +610,19 @@ fn malformed_lazy_constructs_diagnose_and_recover() {
 }
 
 #[test]
+fn excessive_lazy_list_indices_produce_one_arity_diagnostic() {
+    let (_, diagnostics) = parse_lazy(&switch_program("(integer)items[a,b,c];"));
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code, "PAR007");
+}
+
+#[test]
 fn lazy_index_reads_require_a_firestorm_typed_cast() {
     for source in [
         switch_program("myList[0]; integer later;"),
         switch_program("consume(myList[index]); integer later;"),
         switch_program("myList[index] + 1; integer later;"),
+        switch_program("(list)myList[index]; integer later;"),
     ] {
         let (ast, diagnostics) = parse_lazy(&source);
         assert!(

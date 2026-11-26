@@ -367,17 +367,33 @@ forms:
 myList[index] = value;          // single-index assignment
 (integer)myList[index];         // typed extraction
 (string)myList[index];
-(list)myList[index];
 (list)myList[first,last];       // list range extraction
 ```
 
-Supported typed extractions are integer, float, string, key, vector, rotation,
-and list. The typed reference may be fully parenthesized. The parser preserves
-LHS/RHS/index structure and spans; it does not rewrite source to
-`lazy_list_set` or `llList2*`. Bare reads without a typed cast, compound indexed
-assignment, deletion, more than two indices, and non-identifier bases are not
-part of confirmed Firestorm behavior and are not promised here. `quaternion` is
-not added to the type system.
+Supported scalar typed extractions are integer, float, string, key, vector,
+and rotation, each with exactly one index. List extraction accepts a
+`first,last` range (exactly two indices). The
+typed reference may have one optional pair of parentheses, including
+`(integer)(myList[index])`.
+
+Firestorm also accepts `(quaternion)myList[index]` and its parenthesized
+reference form. This is a Firestorm-only spelling alias for `rotation`: the
+upstream preprocessor lowers it to `llList2Rot`. NeoLint represents the cast as
+`rotation`; the `Type.span` retains the source spelling `quaternion`.
+`quaternion` is not an LSL value type, declaration type, or general-purpose
+cast target; it is accepted only for a single-index rotation extraction while
+the Firestorm lazy-list gate is enabled. `(list)myList[index]` is rejected:
+Firestorm's textual rewrite emits `llList2List(myList, index)`, but the
+[canonical function signature](https://wiki.secondlife.com/wiki/LlList2List)
+requires both start and end indices.
+
+The parser preserves LHS/RHS/index structure and source spans; it does not
+rewrite source to `lazy_list_set` or `llList2*`. Bare indexed reads without a
+typed cast, compound indexed assignment, deletion, more than two indices, and
+non-identifier bases are rejected rather than guessed. Nested calls and bracket
+expressions in indices, and nested calls/casts/list literals in assignment RHSs,
+are retained as ordinary AST children. Comments and string contents do not
+create lazy-list nodes.
 
 ### Enabling gates
 

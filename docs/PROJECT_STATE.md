@@ -44,6 +44,16 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - Boost.Wave `#pragma once` behavior is source-audited and tested.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
+- Firestorm Lazy Lists are represented structurally in the AST when their independent
+  `lazy_lists` gate is enabled: single-index writes, typed extraction for
+  integer/float/string/key/vector/rotation, two-index list ranges, one optional
+  parenthesis pair, nested index/RHS expressions, and Firestorm's `quaternion`
+  alias for rotation extraction. The alias does not extend the seven LSL value
+  types; it is accepted only for the Firestorm lazy-list form. Bare reads,
+  compound indexed writes and invalid arities fail closed. Parser/semantic
+  regression tests are in `tests/ast_firestorm.rs` and
+  `tests/ast_semantic_rules.rs`; live Viewer/grid verification remains an
+  external manual gate.
 - Target profiles separate platform/runtime from preprocessing dialect. Selectors: second-life-mono (default), second-life-lso, second-life-luau, opensim-xengine, opensim-yengine. OpenSim additionally selects a pinned API version: 0.9.2.2/API20, 0.9.3.0/API22, 0.9.3.1/API23, or master-2026-11-25/API24. YEngine defaults to API24; XEngine is restricted to API20.
 - Pinned catalogues cover LSL function signatures/overloads, OSSL signatures, event handlers and constants. XEngine API20: 425 LL functions / 425 signatures, 231 OSSL names / 258 signatures, 35 events, 770 constants. YEngine API20/API22/API23/API24: 425/434/457/473 LL names, 425/434/458/474 signatures, 231/231/258/265 OSSL names, 258/258/289/296 OSSL signatures, 36/36/37/37 events, 770/780/815/888 constants.
 - XEngine events come from its own lexer/parser event productions; YEngine events come from the event-code enum intersected with handler declarations. SEM047 reports standard SL functions absent from OpenSim; SEM049 reports missing canonical SL events; SEM050 reports missing canonical SL constants.
