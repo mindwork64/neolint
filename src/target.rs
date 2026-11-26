@@ -13,6 +13,68 @@ pub enum TargetPlatform {
     OpenSim,
 }
 
+/// OpenSimulator API snapshot version used by the selected target.
+///
+/// These selectors are pinned to source revisions documented in
+/// data/opensim/README.md; they do not float with an upstream branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenSimApiVersion {
+    /// OpenSim 0.9.2.2Dev, API version 20.
+    V0_9_2_2,
+    /// OpenSim 0.9.3.0Dev, API version 22.
+    V0_9_3_0,
+    /// OpenSim 0.9.3.1Dev, API version 23.
+    V0_9_3_1,
+    /// OpenSim master snapshot from 2026-11-25, API version 24.
+    Master2026_11_25,
+}
+
+impl OpenSimApiVersion {
+    /// Parse the stable CLI/config selector.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "0.9.2.2" | "api20" => Some(Self::V0_9_2_2),
+            "0.9.3.0" | "api22" => Some(Self::V0_9_3_0),
+            "0.9.3.1" | "api23" => Some(Self::V0_9_3_1),
+            "master-2026-11-25" | "api24" => Some(Self::Master2026_11_25),
+            _ => None,
+        }
+    }
+
+    /// Display selector used in configuration files and diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V0_9_2_2 => "0.9.2.2",
+            Self::V0_9_3_0 => "0.9.3.0",
+            Self::V0_9_3_1 => "0.9.3.1",
+            Self::Master2026_11_25 => "master-2026-11-25",
+        }
+    }
+
+    /// OpenSimulator's public OS_APIVERSION constant for this snapshot.
+    pub const fn api_version(self) -> u32 {
+        match self {
+            Self::V0_9_2_2 => 20,
+            Self::V0_9_3_0 => 22,
+            Self::V0_9_3_1 => 23,
+            Self::Master2026_11_25 => 24,
+        }
+    }
+
+    /// Static catalogue identity.
+    pub const fn catalogue_id(self, runtime: ScriptRuntime) -> Option<&'static str> {
+        match (runtime, self) {
+            (ScriptRuntime::XEngine, Self::V0_9_2_2) => Some("xengine-api20"),
+            (ScriptRuntime::XEngine, _) => None,
+            (ScriptRuntime::YEngine, Self::V0_9_2_2) => Some("yengine-api20"),
+            (ScriptRuntime::YEngine, Self::V0_9_3_0) => Some("yengine-api22"),
+            (ScriptRuntime::YEngine, Self::V0_9_3_1) => Some("yengine-api23"),
+            (ScriptRuntime::YEngine, Self::Master2026_11_25) => Some("yengine-api24"),
+            _ => None,
+        }
+    }
+}
+
 /// Script runtime/compiler target exposed by a platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptRuntime {
@@ -46,6 +108,7 @@ impl ScriptRuntime {
 pub struct TargetProfile {
     platform: TargetPlatform,
     runtime: ScriptRuntime,
+    opensim_api_version: Option<OpenSimApiVersion>,
 }
 
 impl Default for TargetProfile {
@@ -53,6 +116,7 @@ impl Default for TargetProfile {
         Self {
             platform: TargetPlatform::SecondLife,
             runtime: ScriptRuntime::Mono,
+            opensim_api_version: None,
         }
     }
 }
@@ -69,10 +133,39 @@ impl TargetProfile {
                 | (TargetPlatform::OpenSim, ScriptRuntime::YEngine)
         );
         if compatible {
-            Some(Self { platform, runtime })
+            let opensim_api_version = match runtime {
+                ScriptRuntime::XEngine => Some(OpenSimApiVersion::V0_9_2_2),
+                ScriptRuntime::YEngine => Some(OpenSimApiVersion::Master2026_11_25),
+                ScriptRuntime::Mono | ScriptRuntime::Lso | ScriptRuntime::Luau => None,
+            };
+            Some(Self {
+                platform,
+                runtime,
+                opensim_api_version,
+            })
         } else {
             None
         }
+    }
+
+    /// Construct a profile with an explicit OpenSim API version.
+    ///
+    /// XEngine is available only with the API20 snapshot. YEngine accepts all
+    /// pinned snapshots. Second Life compiler targets cannot carry an OpenSim
+    /// API version.
+    pub const fn with_opensim_api_version(mut self, version: OpenSimApiVersion) -> Option<Self> {
+        if !matches!(self.platform, TargetPlatform::OpenSim)
+            || version.catalogue_id(self.runtime).is_none()
+        {
+            return None;
+        }
+        self.opensim_api_version = Some(version);
+        Some(self)
+    }
+
+    /// Selected OpenSim API snapshot, or None for Second Life targets.
+    pub const fn opensim_api_version(self) -> Option<OpenSimApiVersion> {
+        self.opensim_api_version
     }
 
     /// Parse a stable CLI/config selector.
@@ -212,6 +305,41 @@ mod tests {
         ] {
             assert_eq!(TargetProfile::parse(invalid), None, "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn opensim_api_versions_are_pinned_and_runtime_compatible() {
+        let xengine = TargetProfile::parse("opensim-xengine").unwrap();
+        assert_eq!(
+            xengine.opensim_api_version(),
+            Some(OpenSimApiVersion::V0_9_2_2)
+        );
+        assert_eq!(xengine.opensim_api_version().unwrap().api_version(), 20);
+        assert!(xengine
+            .with_opensim_api_version(OpenSimApiVersion::V0_9_3_0)
+            .is_none());
+
+        let yengine = TargetProfile::parse("opensim-yengine").unwrap();
+        assert_eq!(
+            yengine.opensim_api_version(),
+            Some(OpenSimApiVersion::Master2026_11_25)
+        );
+        for version in [
+            OpenSimApiVersion::V0_9_2_2,
+            OpenSimApiVersion::V0_9_3_0,
+            OpenSimApiVersion::V0_9_3_1,
+            OpenSimApiVersion::Master2026_11_25,
+        ] {
+            assert!(yengine.with_opensim_api_version(version).is_some());
+        }
+        assert!(TargetProfile::default()
+            .with_opensim_api_version(OpenSimApiVersion::V0_9_2_2)
+            .is_none());
+        assert_eq!(
+            OpenSimApiVersion::parse("master-2026-11-25"),
+            Some(OpenSimApiVersion::Master2026_11_25)
+        );
+        assert_eq!(OpenSimApiVersion::parse("master"), None);
     }
 
     #[test]

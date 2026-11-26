@@ -1,15 +1,17 @@
 //! SEM022: state-change targets that are not defined.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, StatementKind, TopLevel};
-use crate::builtins;
 use crate::diagnostic::Diagnostic;
 
 use super::super::statements::visit_statements;
 use super::semantic_error;
 
-pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
+pub(crate) fn check(
+    ast: &Ast,
+    events: &HashMap<String, crate::builtins::Signature>,
+) -> Vec<Diagnostic> {
     let mut known_states = HashSet::new();
     for item in &ast.items {
         let TopLevel::State(state) = item else {
@@ -21,7 +23,6 @@ pub(crate) fn check(ast: &Ast) -> Vec<Diagnostic> {
         known_states.insert(state.name.as_str());
     }
 
-    let events = &builtins::definitions().events;
     let mut diagnostics = Vec::new();
     for item in &ast.items {
         let TopLevel::State(state) = item else {

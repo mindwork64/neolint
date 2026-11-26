@@ -3186,10 +3186,12 @@ built-in/user call returns. Identifier resolution uses declaration spans so
 use-before-declaration and nested shadowing follow Legacy source-order rules.
 Function declarations are not treated as values.
 
-**Signatures.** User signatures come from the first AST function with a body;
-built-in function/event signatures and constants come from the existing vendored
-`builtins::definitions()` data. No duplicate catalogue was added. Untyped user
-functions have the Legacy `void` return type.
+**Signatures.** User signatures come from AST function declarations. Built-in
+function/event signatures and constants come from the immutable target
+catalogue selected for the active platform/runtime/API version. Canonical
+Second Life definitions remain the baseline; OpenSim snapshots preserve their
+own overloads, events and constants. Untyped user functions have the Legacy
+`void` return type.
 
 **Rules.** SEM002/SEM004 (built-in arity/type), SEM003 (canonical event parameter
 count/type), and SEM005/SEM006 (user arity/type) are implemented in focused rule

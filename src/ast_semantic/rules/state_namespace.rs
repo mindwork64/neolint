@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, TopLevel};
-use crate::builtins::Signature;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, Span};
 
 use super::super::scopes::{ScopeTree, SymbolKind};
@@ -18,7 +18,7 @@ const GOD_ONLY_BUILTIN_FUNCTIONS: &[&str] = &[
 pub(crate) fn check_with_builtins(
     ast: &Ast,
     scopes: &ScopeTree,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let root = scopes.scope(scopes.root());

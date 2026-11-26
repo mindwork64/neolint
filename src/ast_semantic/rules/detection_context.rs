@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::ast::ExpressionKind;
-use crate::builtins::{self, Signature};
+use crate::builtins::{FunctionCatalog, Signature};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::{CallOwner, CallSite, FunctionId};
@@ -32,7 +32,8 @@ pub(crate) fn check_with_builtins(
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
+    builtin_events: &HashMap<String, Signature>,
 ) -> Vec<Diagnostic> {
     if !environment_reliable
         || syntax_diagnostics
@@ -42,7 +43,8 @@ pub(crate) fn check_with_builtins(
         return Vec::new();
     }
 
-    let Some(contexts) = function_contexts(calls, functions, builtin_functions) else {
+    let Some(contexts) = function_contexts(calls, functions, builtin_functions, builtin_events)
+    else {
         return Vec::new();
     };
 
@@ -60,7 +62,10 @@ pub(crate) fn check_with_builtins(
 
         let actual = match site.owner {
             CallOwner::GlobalInitializer => CONTEXT_OTHER,
-            CallOwner::EventHandler => site.event_name.and_then(event_context).unwrap_or_default(),
+            CallOwner::EventHandler => site
+                .event_name
+                .and_then(|name| event_context(name, builtin_events))
+                .unwrap_or_default(),
             CallOwner::Function(owner) => contexts.get(&owner).copied().unwrap_or_default(),
         };
         if actual == 0 || actual & !allowed == 0 {
@@ -90,7 +95,8 @@ pub(crate) fn check_with_builtins(
 fn function_contexts(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
+    builtin_events: &HashMap<String, Signature>,
 ) -> Option<HashMap<FunctionId, u16>> {
     if functions.len() > MAX_CONTEXT_NODES {
         return None;
@@ -137,7 +143,10 @@ fn function_contexts(
                 add_context(target, CONTEXT_OTHER, &mut contexts, &mut pending)?;
             }
             CallOwner::EventHandler => {
-                let Some(context) = site.event_name.and_then(event_context) else {
+                let Some(context) = site
+                    .event_name
+                    .and_then(|name| event_context(name, builtin_events))
+                else {
                     continue;
                 };
                 add_context(target, context, &mut contexts, &mut pending)?;
@@ -185,22 +194,19 @@ fn spend_work(work: &mut usize, amount: usize) -> Option<()> {
 }
 
 /// Return a context only for canonical events whose behavior is known.
-fn event_context(name: &str) -> Option<u16> {
+fn event_context(name: &str, builtin_events: &HashMap<String, Signature>) -> Option<u16> {
     match name {
         "touch" | "touch_start" | "touch_end" => Some(CONTEXT_TOUCH),
         "collision" | "collision_start" | "collision_end" => Some(CONTEXT_COLLISION),
         "sensor" => Some(CONTEXT_SENSOR),
         "on_damage" => Some(CONTEXT_ON_DAMAGE),
         "final_damage" => Some(CONTEXT_FINAL_DAMAGE),
-        _ => builtins::definitions()
-            .events
-            .contains_key(name)
-            .then_some(CONTEXT_OTHER),
+        _ => builtin_events.contains_key(name).then_some(CONTEXT_OTHER),
     }
 }
 
 /// Event masks for canonical functions that require detection data.
-fn allowed_context(name: &str, builtin_functions: &HashMap<String, Signature>) -> Option<u16> {
+fn allowed_context(name: &str, builtin_functions: &FunctionCatalog) -> Option<u16> {
     if !builtin_functions.contains_key(name) {
         return None;
     }
@@ -224,7 +230,7 @@ mod tests {
 
     #[test]
     fn canonical_detection_functions_have_known_context_rules() {
-        let definitions = builtins::definitions();
+        let definitions = crate::builtins::definitions();
         let detected: Vec<&str> = definitions
             .functions
             .keys()
@@ -235,12 +241,19 @@ mod tests {
         assert!(!detected.is_empty());
         for name in detected {
             assert!(
-                allowed_context(name, &definitions.functions).is_some(),
+                allowed_context(
+                    name,
+                    crate::builtins::functions_for_target(crate::target::TargetProfile::default())
+                )
+                .is_some(),
                 "missing event-context policy for {name}"
             );
         }
         assert_eq!(
-            allowed_context("llAdjustDamage", &definitions.functions),
+            allowed_context(
+                "llAdjustDamage",
+                crate::builtins::functions_for_target(crate::target::TargetProfile::default())
+            ),
             Some(CONTEXT_ON_DAMAGE)
         );
         assert!(definitions.events.contains_key("on_damage"));

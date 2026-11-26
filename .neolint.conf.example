@@ -13,5 +13,6 @@ severity.SEM004 = warning
 # ossl_allowlist = strict
 # Add only APIs expected to be enabled on this region:
 # target = opensim-yengine
+# target_version = 0.9.3.1
 # ossl_function = osGetAgentIP
 # ossl_function = osTeleportAgent

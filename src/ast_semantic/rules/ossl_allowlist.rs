@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::ExpressionKind;
-use crate::builtins;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 use crate::target::{OsslAllowlist, TargetProfile};
 
@@ -19,6 +19,7 @@ pub(crate) fn check(
     user_functions: &HashMap<String, UserFunctionSignature>,
     target: TargetProfile,
     allowlist: &OsslAllowlist,
+    known_functions: &FunctionCatalog,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
 ) -> Vec<Diagnostic> {
@@ -29,10 +30,6 @@ pub(crate) fn check(
     {
         return Vec::new();
     }
-    let Some(known_functions) = builtins::ossl_functions_for_target(target) else {
-        return Vec::new();
-    };
-
     let mut diagnostics = Vec::new();
     for site in calls {
         if !site.call.matched_close {
@@ -42,7 +39,7 @@ pub(crate) fn check(
             continue;
         };
         if user_functions.contains_key(callee.name.as_str())
-            || !known_functions.contains(callee.name.as_str())
+            || !known_functions.contains_key(callee.name.as_str())
             || allowlist.allows(callee.name.as_str())
         {
             continue;

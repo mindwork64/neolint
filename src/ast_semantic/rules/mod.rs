@@ -24,6 +24,8 @@ pub(crate) mod state_namespace;
 pub(crate) mod state_targets;
 pub(crate) mod state_transitions;
 pub(crate) mod target_api;
+pub(crate) mod target_constants;
+pub(crate) mod target_events;
 pub(crate) mod unreachable_functions;
 pub(crate) mod unreachable_states;
 pub(crate) mod unresolved_variables;

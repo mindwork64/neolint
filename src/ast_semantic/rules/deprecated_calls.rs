@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::ExpressionKind;
-use crate::builtins::{self, Signature};
+use crate::builtins::{self, FunctionCatalog};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::CallSite;
@@ -12,7 +12,7 @@ use super::super::types::UserFunctionSignature;
 pub(crate) fn check_with_builtins(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     let deprecated = &builtins::definitions().deprecated_functions;
     let mut candidates = Vec::new();

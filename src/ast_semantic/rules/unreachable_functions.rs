@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::ast::Ast;
-use crate::builtins::Signature;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::calls::CallSite;
@@ -19,7 +19,7 @@ pub(crate) fn check_with_builtins(
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
     reliable: bool,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if !reliable {
         return Vec::new();

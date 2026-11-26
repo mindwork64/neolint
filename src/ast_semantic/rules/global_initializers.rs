@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expression, ExpressionKind, UnaryOperator};
-use crate::builtins::{self, ConstantDefinition};
+use crate::builtins::ConstantDefinition;
 use crate::diagnostic::Diagnostic;
 
 use super::super::expressions::InitializerSite;
@@ -28,7 +28,7 @@ pub(crate) fn check(
     if !environment_reliable {
         return Vec::new();
     }
-    let constants = &builtins::definitions().constants;
+    let constants = scopes.builtin_constants();
     let mut diagnostics = Vec::new();
 
     for site in initializers {

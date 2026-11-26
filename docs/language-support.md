@@ -72,32 +72,43 @@ second-life-luau means LSL compiled to Luau, not the separate SLua language.
 OpenSim XEngine is a historical target: OpenSimulator removed it in 0.9.3.0
 and uses YEngine in that release line.
 
-The AST analyzer has target-specific OpenSim function catalogs derived from
-the upstream ILSL_Api.cs interfaces pinned in data/README.md. The XEngine
-snapshot contains 425 unique ll* names and the YEngine snapshot contains 473.
-SEM047 reports calls to canonical Second Life functions missing from the
-selected OpenSim interface. The catalog reuses canonical LSL signatures where
-names overlap, records OpenSim key-to-string parameter aliases, and
-recognizes the YEngine three-argument llLinkPlaySound overload. It is an
-interface-level compatibility check, not proof that every function has been
-tested in a live simulator. Function behavior may still differ even when the
-name exists.
+The AST analyzer uses versioned OpenSim API snapshots generated from the
+upstream compiler/runtime sources and pinned in data/README.md. Each snapshot
+includes standard LSL function overloads, OSSL signatures, event handlers and
+constants. XEngine uses its own lexer/parser event productions; YEngine uses
+its event-code enum intersected with the handler interface.
 
-OpenSim OSSL names are catalogued separately from standard LSL: 231 names for
-XEngine and 265 for YEngine. OSSL calls are not assumed available by default.
-Set ossl_allowlist = strict or pass --strict-ossl to enable checking. A
-repeated ossl_function = osName setting or --ossl-function osName option
-records the project's expectation that a function is enabled on its target
-region. With an explicit allowlist, SEM048 warns when a known OSSL call is
-not listed. This does not inspect the live region's threat levels, security
-configuration or permissions. No OSSL allowlist means no availability claim.
+The snapshots currently cover:
+- XEngine API20 (OpenSim 0.9.2.2): 425 standard functions, 258 OSSL
+  signatures, 35 events and 770 constants.
+- YEngine API20/API22/API23/API24: 425/434/457/473 standard functions,
+  258/258/289/296 OSSL signatures, 36/36/37/37 events, and
+  770/780/815/888 constants.
 
-The selected OpenSim function catalogue is also used by expression return-type inference, so calls to functions absent from an OpenSim runtime are not assigned a Second Life return type. The current OpenSim snapshots cover function names and a narrow set of
-signature adaptations. Runtime-specific event and constant catalogs,
-comprehensive API signature differences, and in-world verification in both
-OpenSim engines remain outstanding. Second Life Mono, LSO and LSL-on-Luau use
-the canonical Linden Lab function catalog for now; this is not a claim of
-complete per-runtime semantic equivalence.
+Use target_version to select an OpenSim API version. YEngine defaults to the
+pinned API24 snapshot; XEngine is available only for API20. The data includes
+overloads and language-level type mappings. SEM047 reports canonical SL
+functions absent from the selected OpenSim API. SEM049 reports canonical
+SL event handlers absent from the selected compiler. SEM050 reports
+canonical SL constants absent from the selected constants table. Function
+overloads are resolved using arity and known argument types; ambiguous
+expression return types remain unknown.
+
+OSSL availability is not inferred from the interface. A function present in
+the simulator build may still be disabled on a particular region by security
+configuration, threat level, or permission. Enable an explicit project
+allowlist with ossl_allowlist = strict / --strict-ossl; repeated
+ossl_function = osName / --ossl-function osName entries describe the
+functions expected to be enabled. SEM048 warns when a known OSSL call is
+outside that list. The rule does not inspect live region permissions.
+
+The selected API catalogue also drives built-in call checks, return-type
+inference, event checks, constants, call-graph analysis, state namespace and
+reachability. Second Life Mono, LSO and LSL-on-Luau currently share the
+canonical Linden Lab API metadata; runtime-specific compiler behavior is
+only enabled where independently confirmed. Static catalogue tests pass, but
+no connected Second Life Viewer/OpenSim simulator was available for in-world
+execution verification.
 
 The rule skips malformed state-change statements, incomplete function bodies,
 unreliable lexical/preprocessor units, and inputs exceeding its bounded

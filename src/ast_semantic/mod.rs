@@ -89,15 +89,19 @@ pub fn analyze_ast_with_target_options(
     target: TargetProfile,
     ossl_allowlist: &OsslAllowlist,
 ) -> Vec<Diagnostic> {
-    let builtin_functions = builtins::functions_for_target(target);
-    let scopes = scopes::ScopeTree::build_with_builtins(ast, builtin_functions);
+    let api_catalog = builtins::catalog_for_target(target);
+    let standard_functions = &api_catalog.functions;
+    let ossl_functions = &api_catalog.ossl_functions;
+    let builtin_functions = &api_catalog.callable_functions;
+    let builtin_events = &api_catalog.events;
+    let scopes = scopes::ScopeTree::build_with_catalog(ast, api_catalog, target);
     let functions = types::collect_user_functions(ast);
     let expressions = expressions::collect_facts(ast, &scopes);
     let calls = calls::collect_calls(ast, &scopes);
     let mut diagnostics = Vec::new();
     diagnostics.extend(rules::duplicate_globals::check(ast));
     diagnostics.extend(rules::duplicate_locals::check(&scopes));
-    diagnostics.extend(rules::duplicate_events::check(ast));
+    diagnostics.extend(rules::duplicate_events::check(ast, builtin_events));
     diagnostics.extend(rules::state_namespace::check_with_builtins(
         ast,
         &scopes,
@@ -117,7 +121,7 @@ pub fn analyze_ast_with_target_options(
         &functions,
         syntax_diagnostics,
     ));
-    diagnostics.extend(rules::event_signatures::check(ast));
+    diagnostics.extend(rules::event_signatures::check(ast, builtin_events));
     diagnostics.extend(rules::explicit_casts::check(
         &expressions.expressions,
         &scopes,
@@ -175,7 +179,7 @@ pub fn analyze_ast_with_target_options(
         &functions,
         builtin_functions,
     ));
-    diagnostics.extend(rules::state_targets::check(ast));
+    diagnostics.extend(rules::state_targets::check(ast, builtin_events));
     diagnostics.extend(rules::state_transitions::check(
         ast,
         syntax_diagnostics,
@@ -208,6 +212,7 @@ pub fn analyze_ast_with_target_options(
         syntax_diagnostics,
         environment_reliable,
         builtin_functions,
+        builtin_events,
     ));
     diagnostics.extend(rules::math_errors::check_with_builtins(
         &expressions.expressions,
@@ -253,7 +258,7 @@ pub fn analyze_ast_with_target_options(
     diagnostics.extend(rules::target_api::check(
         &calls,
         &functions,
-        builtin_functions,
+        standard_functions,
         target,
         syntax_diagnostics,
         environment_reliable,
@@ -263,6 +268,24 @@ pub fn analyze_ast_with_target_options(
         &functions,
         target,
         ossl_allowlist,
+        ossl_functions,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::target_events::check(
+        ast,
+        &builtins::definitions().events,
+        builtin_events,
+        target,
+        syntax_diagnostics,
+        environment_reliable,
+    ));
+    diagnostics.extend(rules::target_constants::check(
+        &expressions.expressions,
+        &scopes,
+        &builtins::definitions().constants,
+        scopes.builtin_constants(),
+        target,
         syntax_diagnostics,
         environment_reliable,
     ));

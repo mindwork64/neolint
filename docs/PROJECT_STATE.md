@@ -44,12 +44,14 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   - Boost.Wave `#pragma once` behavior is source-audited and tested.
   - AST/Legacy numeric resource-limit policy parity is regression-tested.
   - CLI help documents implemented preprocessing options.
-- Target profiles separate platform/runtime from the preprocessing dialect. Supported selectors: second-life-mono (default), second-life-lso, second-life-luau, opensim-xengine (historical) and opensim-yengine. Firestorm remains a source/preprocessor dialect, never a runtime.
-- SEM034/SEM035 are enabled only for the verified Second Life Mono target; unverified runtimes fail closed. OpenSim ll* interface snapshots are pinned in data/ (425 XEngine names, 473 YEngine names); SEM047 reports canonical Second Life LSL function calls absent from the selected OpenSim interface. Function signatures reuse canonical metadata with explicit OpenSim key-to-string aliases and the YEngine three-argument llLinkPlaySound overload; the selected function catalogue flows through scope/type inference and built-in call classification.
-- OSSL is catalogued separately (231 XEngine names, 265 YEngine names). OsslAllowlist supports an explicitly empty strict mode (ossl_allowlist = strict / --strict-ossl) plus repeatable ossl_function / --ossl-function entries for project-side expected-enabled functions. SEM048 warns for known OSSL calls outside an explicit allowlist; it does not query actual region settings.
-- Target profiles are not yet full runtime compatibility claims: target-specific event/constant catalogs, exhaustive API signature/behavior differences and in-world runtime verification remain outstanding. SL Mono/LSO/Luau currently share the canonical SL function catalogue.
+- Target profiles separate platform/runtime from preprocessing dialect. Selectors: second-life-mono (default), second-life-lso, second-life-luau, opensim-xengine, opensim-yengine. OpenSim additionally selects a pinned API version: 0.9.2.2/API20, 0.9.3.0/API22, 0.9.3.1/API23, or master-2026-11-25/API24. YEngine defaults to API24; XEngine is restricted to API20.
+- Pinned catalogues cover LSL function signatures/overloads, OSSL signatures, event handlers and constants. XEngine API20: 425 LL functions / 425 signatures, 231 OSSL names / 258 signatures, 35 events, 770 constants. YEngine API20/API22/API23/API24: 425/434/457/473 LL names, 425/434/458/474 signatures, 231/231/258/265 OSSL names, 258/258/289/296 OSSL signatures, 36/36/37/37 events, 770/780/815/888 constants.
+- XEngine events come from its own lexer/parser event productions; YEngine events come from the event-code enum intersected with handler declarations. SEM047 reports standard SL functions absent from OpenSim; SEM049 reports missing canonical SL events; SEM050 reports missing canonical SL constants.
+- OSSL is separate and is not assumed enabled on a region. OsslAllowlist supports strict-empty mode (ossl_allowlist = strict / --strict-ossl) and repeatable expected-enabled functions; SEM048 warns outside that allowlist. Live permissions are not queried.
+- The selected catalogue flows through overload/arity/type checks, return-type inference, event/constant checking, call graph, namespace and reachability. Real Viewer/OpenSim in-world execution remains a manual external verification step; repository tests validate pinned snapshots and analyzer behavior, not a running grid.
+
 - Legacy and AST remain independent implementations. Compare fingerprints
-  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM048` are AST-only.
+  semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM050` are AST-only.
 
 ## Architecture
 

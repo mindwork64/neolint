@@ -58,4 +58,4 @@ pub use source::{
     SourceManager, SourceMap, SourceMapBuilder, SourceOrigin, SourceSpan, SpanError,
 };
 
-pub use target::{OsslAllowlist, ScriptRuntime, TargetPlatform, TargetProfile};
+pub use target::{OpenSimApiVersion, OsslAllowlist, ScriptRuntime, TargetPlatform, TargetProfile};

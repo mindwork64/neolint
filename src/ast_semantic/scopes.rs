@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use crate::ast::{
     Ast, Block, EventHandler, Statement, StatementKind, SwitchStatement, TopLevel, TypeKind,
 };
-use crate::builtins::{self, Signature};
+use crate::builtins::{self, ConstantDefinition, FunctionCatalog, TargetApiCatalog};
+use crate::target::TargetProfile;
 
 /// Stable index of one lexical scope in a [`ScopeTree`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -70,19 +71,43 @@ pub struct ScopeTree {
     /// use when a scope holds many declarations.
     name_index: Vec<HashMap<String, Vec<u32>>>,
     /// Built-in function signatures selected for this analysis target.
-    builtin_functions: &'static HashMap<String, Signature>,
+    builtin_functions: &'static FunctionCatalog,
+    builtin_events: &'static HashMap<String, crate::builtins::Signature>,
+    builtin_constants: &'static HashMap<String, ConstantDefinition>,
+    target: TargetProfile,
 }
 
 impl ScopeTree {
     /// Build scopes and bindings from a parsed AST using canonical Second Life LSL built-ins.
     pub fn build(ast: &Ast) -> Self {
-        Self::build_with_builtins(ast, &builtins::definitions().functions)
+        Self::build_with_catalog(
+            ast,
+            builtins::catalog_for_target(TargetProfile::default()),
+            TargetProfile::default(),
+        )
     }
 
-    /// Build scopes with the built-in function catalogue for the selected target.
-    pub(crate) fn build_with_builtins(
+    /// Build all lexical scopes and bindings with one immutable target catalogue.
+    pub(crate) fn build_with_catalog(
         ast: &Ast,
-        builtin_functions: &'static HashMap<String, Signature>,
+        catalog: &'static TargetApiCatalog,
+        target: TargetProfile,
+    ) -> Self {
+        Self::build_with_metadata(
+            ast,
+            &catalog.callable_functions,
+            &catalog.events,
+            &catalog.constants,
+            target,
+        )
+    }
+
+    fn build_with_metadata(
+        ast: &Ast,
+        builtin_functions: &'static FunctionCatalog,
+        builtin_events: &'static HashMap<String, crate::builtins::Signature>,
+        builtin_constants: &'static HashMap<String, ConstantDefinition>,
+        target: TargetProfile,
     ) -> Self {
         let mut tree = Self {
             scopes: vec![Scope {
@@ -94,6 +119,9 @@ impl ScopeTree {
             switch_scopes: HashMap::new(),
             name_index: vec![HashMap::new()],
             builtin_functions,
+            builtin_events,
+            builtin_constants,
+            target,
         };
         for item in &ast.items {
             match item {
@@ -169,8 +197,23 @@ impl ScopeTree {
     }
 
     /// Built-in function signatures selected for this tree's target.
-    pub(crate) fn builtin_functions(&self) -> &'static HashMap<String, Signature> {
+    pub(crate) fn builtin_functions(&self) -> &'static FunctionCatalog {
         self.builtin_functions
+    }
+
+    /// Built-in event signatures selected for this tree's target.
+    pub(crate) fn builtin_events(&self) -> &'static HashMap<String, crate::builtins::Signature> {
+        self.builtin_events
+    }
+
+    /// Built-in constants selected for this tree's target.
+    pub(crate) fn builtin_constants(&self) -> &'static HashMap<String, ConstantDefinition> {
+        self.builtin_constants
+    }
+
+    /// Platform/runtime profile associated with this tree.
+    pub(crate) const fn target(&self) -> TargetProfile {
+        self.target
     }
 
     /// Root/global scope.
@@ -303,12 +346,9 @@ impl ScopeTree {
         };
         let scope = self.new_scope(self.root);
         self.block_scopes.insert(block_key(body), scope);
-        // Legacy conservatively registers parameters only for canonical events;
-        // unknown extension event bodies are still scanned for local declarations.
-        if builtins::definitions()
-            .events
-            .contains_key(event.name.as_str())
-        {
+        // Only handlers known to the selected target contribute event parameters.
+        // Unknown extension event bodies are still scanned for local declarations.
+        if self.builtin_events.contains_key(event.name.as_str()) {
             for parameter in &event.parameters {
                 if !parameter.name.is_empty() {
                     self.register(

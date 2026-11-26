@@ -8,7 +8,7 @@
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::{AnalysisEngine, DisplaySuppression};
 use crate::preprocessor::PreprocessDialect;
-use crate::target::{OsslAllowlist, TargetProfile};
+use crate::target::{OpenSimApiVersion, OsslAllowlist, TargetProfile};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -48,6 +48,7 @@ impl LintConfig {
     /// codes, invalid severity names, or invalid engine selectors.
     pub fn parse(source: &str) -> Result<Self, String> {
         let mut config = Self::default();
+        let mut target_version_override: Option<(usize, OpenSimApiVersion)> = None;
 
         for (line_index, raw_line) in source.lines().enumerate() {
             let line_number = line_index + 1;
@@ -143,6 +144,16 @@ impl LintConfig {
                 continue;
             }
 
+            if key == "target_version" {
+                let version = OpenSimApiVersion::parse(value).ok_or_else(|| {
+                    format!(
+                        "line {line_number}: invalid target_version '{value}' (expected 0.9.2.2, 0.9.3.0, 0.9.3.1 or master-2026-11-25)"
+                    )
+                })?;
+                target_version_override = Some((line_number, version));
+                continue;
+            }
+
             if key == "ossl_allowlist" {
                 if value != "strict" {
                     return Err(format!(
@@ -161,6 +172,20 @@ impl LintConfig {
             }
 
             return Err(format!("line {line_number}: unknown setting '{key}'"));
+        }
+
+        if let Some((line_number, version)) = target_version_override {
+            config.target = config
+                .target
+                .with_opensim_api_version(version)
+                .ok_or_else(|| {
+                    format!(
+                        "line {line_number}: target_version {} is not compatible with target {}",
+                        version.as_str(),
+                        config.target.as_str()
+                    )
+                })?;
+            config.target_explicit = true;
         }
 
         Ok(config)
@@ -222,6 +247,22 @@ impl LintConfig {
         self.target_explicit = true;
     }
 
+    /// Override the OpenSim API snapshot version (CLI override).
+    pub fn set_target_version(&mut self, version: OpenSimApiVersion) -> Result<(), String> {
+        self.target = self
+            .target
+            .with_opensim_api_version(version)
+            .ok_or_else(|| {
+                format!(
+                    "target version {} is incompatible with target {}",
+                    version.as_str(),
+                    self.target.as_str()
+                )
+            })?;
+        self.target_explicit = true;
+        Ok(())
+    }
+
     /// OSSL functions that the project expects to be enabled in its OpenSim region.
     pub fn ossl_allowlist(&self) -> &OsslAllowlist {
         &self.ossl_allowlist
@@ -266,7 +307,7 @@ impl LintConfig {
         let mut functions: Vec<_> = self.ossl_allowlist.functions().iter().collect();
         functions.sort();
         for function in functions {
-            if !catalogue.contains(function) {
+            if !catalogue.contains_key(function) {
                 return Err(format!(
                     "OSSL function '{function}' is not present in the selected {} interface",
                     self.target.runtime().as_str()
@@ -578,6 +619,23 @@ mod target_config_tests {
     }
 
     #[test]
+    fn parses_target_version_independently_of_setting_order() {
+        let config =
+            LintConfig::parse("target_version = 0.9.3.1\ntarget = opensim-yengine").unwrap();
+        assert_eq!(
+            config.target().opensim_api_version(),
+            Some(OpenSimApiVersion::V0_9_3_1)
+        );
+    }
+
+    #[test]
+    fn rejects_target_versions_for_incompatible_profiles() {
+        assert!(LintConfig::parse("target = opensim-xengine\ntarget_version = 0.9.3.0").is_err());
+        assert!(LintConfig::parse("target = second-life-mono\ntarget_version = 0.9.2.2").is_err());
+        assert!(LintConfig::parse("target_version = latest").is_err());
+    }
+
+    #[test]
     fn rejects_unknown_target_names() {
         assert!(LintConfig::parse("target = mono").is_err());
         assert!(LintConfig::parse("target = firestorm").is_err());
@@ -628,5 +686,19 @@ mod ossl_config_tests {
         for value in ["", "llOwnerSay", "os-foo", "osFoo bar", "osé"] {
             assert!(LintConfig::parse(&format!("ossl_function = {value}")).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod target_diagnostic_config_tests {
+    use super::*;
+
+    #[test]
+    fn target_api_diagnostics_accept_standard_disable_and_severity_configuration() {
+        let config = LintConfig::parse(
+            "disable = SEM049,SEM050\nseverity.SEM049 = warning\nseverity.SEM050 = error\n",
+        )
+        .expect("target diagnostics are valid configurable rule codes");
+        let _ = config;
     }
 }

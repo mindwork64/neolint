@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use crate::ast::ExpressionKind;
-use crate::builtins::Signature;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::Diagnostic;
-use crate::target::{ScriptRuntime, TargetProfile};
+use crate::target::TargetProfile;
 
 use super::super::calls::CallSite;
 use super::super::scopes::ScopeTree;
 use super::super::types::{
-    can_implicitly_convert, expression_first_token_span, infer_expression_type_with_builtins,
-    UserFunctionSignature,
+    best_builtin_overload, can_implicitly_convert, expression_first_token_span,
+    infer_expression_type_with_builtins, UserFunctionSignature,
 };
 use super::semantic_error;
 
@@ -27,7 +27,7 @@ pub(crate) fn check(
         scopes,
         functions,
         syntax_diagnostics,
-        &crate::builtins::definitions().functions,
+        crate::builtins::functions_for_target(TargetProfile::default()),
         TargetProfile::default(),
     )
 }
@@ -37,7 +37,7 @@ pub(crate) fn check_with_builtins(
     scopes: &ScopeTree,
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
     target: TargetProfile,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -45,29 +45,29 @@ pub(crate) fn check_with_builtins(
         let ExpressionKind::Identifier(callee) = &site.call.callee.kind else {
             continue;
         };
-        let Some(signature) = builtin_functions.get(callee.name.as_str()) else {
+        let Some(signatures) = builtin_functions.get(callee.name.as_str()) else {
             continue;
         };
         if !site.call.matched_close || call_contains_syntax_error(site, syntax_diagnostics) {
             continue;
         }
-        let opensim_link_play_sound_overload = target.runtime() == ScriptRuntime::YEngine
-            && callee.name == "llLinkPlaySound"
-            && site.call.declared_argument_count == 3;
-        let expected_count = signature.parameters.len();
-        if site.call.declared_argument_count != expected_count && !opensim_link_play_sound_overload
-        {
-            let expected =
-                if target.runtime() == ScriptRuntime::YEngine && callee.name == "llLinkPlaySound" {
-                    "3 or 4".to_owned()
-                } else {
-                    expected_count.to_string()
-                };
+        let mut expected_counts: Vec<usize> = signatures
+            .iter()
+            .map(|signature| signature.parameters.len())
+            .collect();
+        expected_counts.sort_unstable();
+        expected_counts.dedup();
+        if !expected_counts.contains(&site.call.declared_argument_count) {
+            let expected = expected_counts
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(" or ");
             diagnostics.push(semantic_error(
                 "SEM002",
                 format!(
                     "{} expects {} argument(s), but received {}",
-                    signature.name, expected, site.call.declared_argument_count
+                    callee.name, expected, site.call.declared_argument_count
                 ),
                 callee.span,
             ));
@@ -76,6 +76,23 @@ pub(crate) fn check_with_builtins(
         if !site.call.arguments_complete {
             continue;
         }
+        let argument_types: Vec<_> = site
+            .call
+            .arguments
+            .iter()
+            .map(|argument| {
+                infer_expression_type_with_builtins(
+                    argument,
+                    scopes,
+                    site.scope,
+                    functions,
+                    builtin_functions,
+                )
+            })
+            .collect();
+        let Some(signature) = best_builtin_overload(signatures, &argument_types, target) else {
+            continue;
+        };
         for (argument_index, (argument, parameter)) in site
             .call
             .arguments
@@ -83,16 +100,13 @@ pub(crate) fn check_with_builtins(
             .zip(signature.parameters.iter())
             .enumerate()
         {
-            let Some(actual_type) = infer_expression_type_with_builtins(
-                argument,
-                scopes,
-                site.scope,
-                functions,
-                builtin_functions,
-            ) else {
+            let Some(actual_type) = argument_types
+                .get(argument_index)
+                .and_then(Option::as_deref)
+            else {
                 continue;
             };
-            if !can_convert_argument_for_target(&actual_type, &parameter.type_name, target) {
+            if !can_convert_argument_for_target(actual_type, &parameter.type_name, target) {
                 diagnostics.push(semantic_error(
                     "SEM004",
                     format!(
@@ -118,7 +132,11 @@ fn can_convert_argument_for_target(
     can_implicitly_convert(actual_type, expected_type)
         // OpenSim's LSL key wrapper exposes an implicit conversion to
         // System.String. This is a runtime compiler detail, not standard LSL.
-        || (target.is_opensim() && actual_type == "key" && expected_type == "string")
+        || (target.is_opensim()
+            && matches!(
+                (actual_type, expected_type),
+                ("key", "string") | ("string", "key")
+            ))
 }
 
 pub(crate) fn call_contains_syntax_error(

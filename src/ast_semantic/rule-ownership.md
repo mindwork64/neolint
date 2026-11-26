@@ -127,9 +127,11 @@ No SEM rule remains Legacy-only in the current matrix.
 - Identifier lookup uses `ScopeTree::lookup_value_at` and filters bindings whose
   declaration span is after the use, preserving Legacy source-order visibility
   and nested shadowing. Function declarations are not values.
-- User signatures come from the first AST function declaration with a body;
-  built-in signatures and constants come from the existing vendored
-  `builtins::definitions()` metadata. No second catalogue exists.
+- User signatures come from AST function declarations. Built-in signatures,
+  events and constants come from the immutable target catalogue selected for
+  the active platform/runtime/API version. Canonical Second Life definitions
+  remain the baseline; OpenSim snapshots preserve their own overloads, event
+  and constant surfaces.
 - `src/ast_semantic/calls.rs` visits every call exactly once across globals,
   declarations, control flow, switch conditions/case labels/arms, lazy indices,
   calls, lists and vector/rotation literals.
@@ -417,7 +419,7 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
   each rule.
 
 
-## Target-aware API compatibility rules (SEM047–SEM048)
+## Target-aware API compatibility rules (SEM047–SEM050)
 
 - SEM047 reports only calls whose names are present in the canonical Second
   Life LSL function catalogue but absent from the selected OpenSim interface.
@@ -431,3 +433,12 @@ no Legacy counterpart to migrate. Legacy remains frozen and emits none of them.
 - Both checks fail closed if parser diagnostics exist or the lexical/
   preprocessing environment is unreliable. They are AST-only and do not
   change the frozen SEM001–SEM023 Compare parity contract.
+
+
+- SEM049 compares canonical Second Life event handlers with the selected
+  OpenSim event catalogue. XEngine uses its own lexer/parser event
+  productions; YEngine uses its event-code enum intersected with handler
+  declarations.
+- SEM050 reports canonical Second Life constants absent from the selected
+  OpenSim version's constants table. Scope lookup happens first, so a user
+  variable with the same spelling correctly shadows the absent constant.

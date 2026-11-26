@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Expression, ExpressionKind, TypeKind, UnaryOperator,
 };
-use crate::builtins::{self, Signature};
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 use super::super::expressions::ExpressionSite;
@@ -76,7 +76,7 @@ pub(crate) fn check_with_builtins(
     functions: &HashMap<String, UserFunctionSignature>,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if !environment_reliable
         || syntax_diagnostics
@@ -187,13 +187,17 @@ pub(crate) fn check_with_builtins(
                     continue;
                 }
 
-                let Some(signature) = builtin_functions.get(callee.name.as_str()) else {
+                let Some(signatures) = builtin_functions.get(callee.name.as_str()) else {
                     continue;
                 };
                 let expected_argument_count = if callee.name == "llPow" { 2 } else { 1 };
-                if signature.parameters.len() != expected_argument_count
-                    || call.arguments.len() != expected_argument_count
-                {
+                let Some(signature) = signatures
+                    .iter()
+                    .find(|signature| signature.parameters.len() == expected_argument_count)
+                else {
+                    continue;
+                };
+                if call.arguments.len() != expected_argument_count {
                     continue;
                 }
                 if call.arguments.len() > work {
@@ -336,7 +340,7 @@ fn evaluate_number(
             {
                 return Evaluation::Unknown;
             }
-            let Some(constant) = builtins::definitions().constants.get(&identifier.name) else {
+            let Some(constant) = scopes.builtin_constants().get(&identifier.name) else {
                 return Evaluation::Unknown;
             };
             match constant.type_name.as_str() {
@@ -489,6 +493,7 @@ fn parse_integer(text: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins;
 
     #[test]
     fn canonical_false_is_known_zero_but_canonical_true_is_not() {

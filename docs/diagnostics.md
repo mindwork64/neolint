@@ -124,7 +124,13 @@ plain-Legacy path and never emits `PRE039`.
 
 ## Semantic and lint diagnostics
 
-All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044`, and `SEM048`, which are **lint**. `SEM012`, `SEM013`, `SEM023`, `SEM024`, `SEM025`, `SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, and `SEM040`–`SEM044` and `SEM048` default to **warning**; the rest, including AST-only `SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`, `SEM046`, and `SEM047`, default to **error**.
+All SEM diagnostics have kind semantic except SEM013, SEM023, SEM024,
+SEM025, SEM026, SEM030–SEM033, SEM035, SEM037, SEM040–SEM044, and SEM048,
+which are lint. SEM012, SEM013, SEM023, SEM024–SEM026, SEM030–SEM033,
+SEM035, SEM037, SEM040–SEM044, and SEM048 default to warning. SEM047,
+SEM049, and SEM050 are AST-only semantic errors. The frozen Legacy/Compare
+parity range remains SEM001–SEM023.
+
 
 | Code | Meaning | Default | Important boundary |
 | --- | --- | --- | --- |
@@ -176,6 +182,8 @@ All `SEM` diagnostics have kind **semantic** except `SEM013`, `SEM023`, `SEM024`
 | `SEM046` | A known binary arithmetic/comparison operator has incompatible operand types. | error / semantic | AST-only. Validates `+`, `-`, `*`, `/`, `%`, equality and relational operators against the shared LSL type-result matrix. Unknown operand types are skipped; parser errors, unreliable lexical/preprocessor environments and more than 65,536 expression sites suppress the rule. List equality remains covered by SEM040 when both operands are lists. |
 | `SEM047` | A canonical Second Life LSL function is absent from the selected OpenSim runtime interface. | error / semantic | AST-only target-aware check for opensim-xengine and opensim-yengine. Uses pinned ILSL_Api.cs function-name snapshots; does not infer that an unknown/OSSL call is invalid. User-defined functions shadowing a canonical name are not reported. This checks interface presence, not live region behavior or all API semantic differences. |
 | `SEM048` | A known OSSL call is not listed in the project's explicit OpenSim OSSL allowlist. | warning / lint | AST-only. Emitted only for an OpenSim target when ossl_allowlist = strict / --strict-ossl is selected or at least one ossl_function / --ossl-function entry is configured. The allowlist describes what the project expects to be enabled; it does not query region security settings. No list means no OSSL availability assumption. |
+| `SEM049` | A canonical Second Life LSL event handler is absent from the selected OpenSim compiler/runtime. | error / semantic | AST-only target-aware check. XEngine uses its own lexer/parser event productions; YEngine uses the event-code enum intersected with handler declarations. Only complete event handlers in reliable input are considered. |
+| `SEM050` | A canonical Second Life LSL constant is absent from the selected OpenSim API snapshot. | error / semantic | AST-only target-aware check. Uses the selected version's constants table; local/global variables shadowing the same name are respected. Parser errors and unreliable preprocessing suppress the rule. |
 
 ## Illustrative minimal examples
 

@@ -107,9 +107,9 @@ Neolint organizes findings into four diagnostic families:
 The AST engine is the default in v1.1.0. The previous Legacy engine remains available for compatibility; <code>compare</code> mode is provided for maintainers investigating differences between the two.
 
 **Also included:**
-- Standard LSL preprocessing and an opt-in Firestorm preprocessor profile, independent from target runtime profiles (`second-life-mono`, `second-life-lso`, `second-life-luau`, `opensim-xengine`, `opensim-yengine`). OpenSim profiles include runtime-specific LSL function catalogs and an explicit OSSL allowlist.
+- Standard LSL preprocessing and an opt-in Firestorm preprocessor profile, independent from target runtime profiles (`second-life-mono`, `second-life-lso`, `second-life-luau`, `opensim-xengine`, `opensim-yengine`). OpenSim profiles include version-pinned LSL/OSSL function overloads, event handlers and constants, plus an explicit OSSL allowlist.
 - Include directories, macro expansion, source locations, and related diagnostic locations.
-- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable math-domain hazards, and invalid operator operands (`SEM024`–`SEM046`), OpenSim LSL interface gaps (`SEM047`) and explicit OSSL allowlist checks (`SEM048`).
+- AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable math-domain hazards, and invalid operator operands (`SEM024`–`SEM046`), OpenSim API checks (`SEM047`, `SEM049`, `SEM050`) and explicit OSSL allowlist checks (`SEM048`).
 - Human-readable output and structured JSON diagnostics.
 - Configurable rule suppression and severity overrides.
 

@@ -6,7 +6,7 @@ use crate::ast::{
     Ast, BinaryOperator, Expression, ExpressionKind, Statement, StatementKind, SwitchLabel,
     SwitchStatement, TopLevel, UnaryOperator,
 };
-use crate::builtins::{self, ConstantDefinition};
+use crate::builtins::ConstantDefinition;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 
 use super::super::scopes::{ScopeId, ScopeTree};
@@ -138,7 +138,7 @@ pub(crate) fn check(
 
     let mut diagnostics = Vec::new();
     let mut work = switches.len();
-    let constants = &builtins::definitions().constants;
+    let constants = scopes.builtin_constants();
 
     for (switch, scope) in switches {
         if has_syntax_error_in_switch(switch, syntax_diagnostics)
@@ -447,7 +447,7 @@ pub(crate) fn evaluate_switch_constant_value(
         expression,
         scope,
         scopes,
-        &builtins::definitions().constants,
+        scopes.builtin_constants(),
         0,
         budget,
     )?;

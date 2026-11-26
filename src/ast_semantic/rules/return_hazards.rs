@@ -6,7 +6,6 @@ use super::super::flow::{self, FlowAnalysis};
 use super::super::scopes::{ScopeId, ScopeTree};
 
 use crate::ast::{Ast, Block, IfStatement, Statement, StatementKind, TopLevel};
-use crate::builtins;
 
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
@@ -153,8 +152,8 @@ pub(crate) fn check(
                         BodyKind::Event {
                             current_state,
                             known_states: &known_states,
-                            jump_scope_validated: builtins::definitions()
-                                .events
+                            jump_scope_validated: scopes
+                                .builtin_events()
                                 .contains_key(event.name.as_str()),
                         },
                         scopes,

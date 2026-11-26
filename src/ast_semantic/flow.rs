@@ -6,7 +6,7 @@ use crate::ast::{
     AssignmentOperator, Ast, BinaryOperator, Block, Expression, ExpressionKind, ForStatement,
     IfStatement, ReturnStatement, Statement, StatementKind, TopLevel, TypeKind, UnaryOperator,
 };
-use crate::builtins;
+use crate::builtins::ConstantDefinition;
 use crate::diagnostic::{Diagnostic, Span};
 
 use super::rules::semantic_error;
@@ -273,7 +273,7 @@ fn collect_code_scopes<'a>(ast: &'a Ast, scopes: &ScopeTree) -> Vec<CodeScope<'a
             is_function: true,
         });
     }
-    let events = &builtins::definitions().events;
+    let events = scopes.builtin_events();
     for item in &ast.items {
         let TopLevel::State(state) = item else {
             continue;
@@ -2323,11 +2323,9 @@ fn evaluate_constant_number(
                 // never become constants merely from their declaration.
                 return None;
             }
-            let constant = builtins::definitions()
-                .constants
-                .get(identifier.name.as_str())?;
+            let constant = scopes.builtin_constants().get(identifier.name.as_str())?;
             match constant.type_name.as_str() {
-                "integer" => canonical_integer(&identifier.name).map(ConstantNumber::Integer),
+                "integer" => canonical_integer(constant).map(ConstantNumber::Integer),
                 "float" => constant
                     .value
                     .parse::<f32>()
@@ -2502,8 +2500,7 @@ fn parse_integer_text(text: &str) -> Option<i32> {
     text.parse::<u64>().ok().map(|value| value as u32 as i32)
 }
 
-fn canonical_integer(name: &str) -> Option<i32> {
-    let constant = builtins::definitions().constants.get(name)?;
+fn canonical_integer(constant: &ConstantDefinition) -> Option<i32> {
     if constant.type_name != "integer" {
         return None;
     }

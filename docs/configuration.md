@@ -12,7 +12,8 @@ severity.SEM004 = warning
 # AST is the default in v1.1.0 and later.
 # Set this to legacy only when preserving the v1.0.0 engine is required.
 engine = ast
-target = second-life-mono
+target = opensim-yengine
+target_version = 0.9.3.1
 ```
 
 Blank lines and text after `#` are ignored. Leading and trailing whitespace is ignored.
@@ -27,6 +28,7 @@ Blank lines and text after `#` are ignored. Leading and trailing whitespace is i
 | `dialect = lsl\|firestorm` | Select the preprocessing dialect; `firestorm` enables preprocessing. |
 | `include_dir = PATH` | Add an include search directory (repeatable). |
 | `engine = legacy\|ast\|compare` | Select the analysis engine; `ast` is the default, and `legacy` restores the v1.0.0 analysis pipeline. |
+| `target_version = VERSION` | Select OpenSim API version 0.9.2.2, 0.9.3.0, 0.9.3.1, or master-2026-11-25. XEngine supports API20 only. |
 | `target = PROFILE` | Select a platform/runtime profile; defaults to `second-life-mono`. Independent of the preprocessing dialect. |
 | `ossl_allowlist = strict` | Enable OSSL checking even with an empty allowlist; all known OSSL calls warn unless added below. Requires an OpenSim target. |
 | `ossl_function = NAME` | Add an OSSL function to the project's expected-enabled allowlist (repeatable; requires an OpenSim target). |
@@ -82,39 +84,42 @@ with `--engine legacy` is rejected rather than silently ignored. AST is the
 default; Compare passes the target to its AST analyzer while retaining the
 existing Legacy comparison stream.
 
-The AST analyzer uses pinned, runtime-specific OpenSim LSL function-name
-snapshots. It recognizes 425 XEngine and 473 YEngine ll* API names; SEM047
-reports a call to a canonical Second Life LSL function absent from the selected
-OpenSim interface. Common signatures reuse canonical Second Life metadata,
-with OpenSim key/string parameter aliases and the YEngine llLinkPlaySound
-three-argument overload represented explicitly. OpenSim event and constant
-catalogues are not yet runtime-specific, and interface presence does not prove
-that every function has been verified in a running region.
+The AST analyzer uses pinned, version-specific OpenSim API snapshots. Each
+snapshot contains standard LSL function signatures (including overloads),
+OSSL signatures, event handlers and constants. XEngine API20 has 425 standard
+LSL functions, 258 OSSL signatures, 35 events and 770 constants. YEngine
+snapshots cover API20, API22, API23 and API24; the latest pinned API24 snapshot
+has 473 standard LSL functions / 474 signatures, 296 OSSL signatures, 37
+events and 888 constants.
 
-OSSL is separate from standard LSL. The pinned interfaces contain 231 XEngine
-and 265 YEngine OSSL function names, but this is not a promise that a region
-enables them. Region threat levels, security configuration and permissions
-control actual availability. By default NeoLint makes no OSSL availability
-assumption. Set ossl_allowlist = strict (or pass --strict-ossl) to enable
-checking. Repeated ossl_function = NAME entries (or --ossl-function NAME)
-form a project-side allowlist of functions expected to be enabled. When that
-list is explicit, SEM048 warns about known OSSL calls omitted from it. The
-allowlist does not query or prove the live region configuration.
+Select a version with target_version = VERSION or --target-version VERSION.
+opensim-yengine defaults to API24 (master-2026-11-25). opensim-xengine is
+pinned to API20 only; later OpenSim releases removed XEngine. The catalogues
+are generated from pinned upstream compiler/API sources, with source
+revisions recorded in data/README.md.
 
-Second Life Mono, LSO and LSL-on-Luau currently share the canonical Linden Lab
-function catalogue; full per-runtime event/API signature validation is not
-claimed. The selected target is an analysis target, not a live compiler or
-simulator connection.
+SEM047 reports standard Second Life LSL functions missing from the selected
+OpenSim API. SEM049 reports canonical Second Life event handlers absent from
+the selected event surface. SEM050 reports canonical SL constants absent from
+the selected constants table. Function overloads are selected using argument
+count and inferred types; ambiguous return types remain unknown.
 
-Second Life's `second-life-luau` selector means **LSL compiled for Luau**; it
-does not select the separate SLua language. The editor exposes the LSL-on-Luau
-compiler target only on regions that advertise Lua script support. OpenSim
-0.9.3.0 removed XEngine as part of its .NET 8 transition; `opensim-xengine`
-exists only to analyze legacy deployments.
+OSSL is a separate API surface. Its presence in a simulator build does not
+mean a region enables that function. Region security configuration, threat
+levels and permissions still control availability. By default NeoLint makes
+no assumption about OSSL availability. Set ossl_allowlist = strict (or pass
+--strict-ossl) to enable checking; repeated ossl_function = NAME entries
+(or --ossl-function NAME) describe the OSSL functions expected to be enabled
+on the target region. SEM048 warns when a known OSSL call is not listed. This
+is a project-side expectation, not a query of live region permissions.
 
-References: [Second Life compiler targets](https://lsl.dev/fundamentals/script-editor/),
-[OpenSimulator scripting documentation](https://opensimulator.dev/wiki/Scripting_Documentation),
-[Second Life State reference](https://wiki.secondlife.com/wiki/State).
+The selected catalogue flows through built-in call checks, overload
+resolution, return-type inference, event checking, constants, call-graph
+analysis, state namespace and reachability rules. A profile is an API
+snapshot, not a live compiler/simulator connection. No real Second Life
+Viewer or OpenSim process was available for in-world execution tests; those
+must be performed against the actual deployment before claiming runtime
+equivalence.
 
 ## Engine migration (v1.1.0)
 

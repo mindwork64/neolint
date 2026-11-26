@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast::ExpressionKind;
-use crate::builtins::{self, Signature};
+use crate::builtins::{self, FunctionCatalog};
 use crate::diagnostic::Diagnostic;
 use crate::target::{TargetPlatform, TargetProfile};
 
@@ -15,7 +15,7 @@ use super::semantic_error;
 pub(crate) fn check(
     calls: &[CallSite<'_>],
     user_functions: &HashMap<String, UserFunctionSignature>,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
     target: TargetProfile,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,

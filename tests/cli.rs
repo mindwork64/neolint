@@ -575,7 +575,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048",
+        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048", "SEM049", "SEM050",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -592,7 +592,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
     for code in [
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
-        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048",
+        "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048", "SEM049", "SEM050",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }
@@ -2954,6 +2954,66 @@ fn strict_ossl_option_enables_empty_allowlist_checks() {
         configured_stdout.contains("warning[SEM048]"),
         "{configured_stdout}"
     );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn opensim_target_version_is_selectable_from_cli_and_config() {
+    let directory = temporary_directory();
+    let source = directory.join("api_version.lsl");
+    fs::write(
+        &source,
+        "default { linkset_data(integer action, string name, string value) { } }\n",
+    )
+    .unwrap();
+    let source_arg = source.to_str().unwrap();
+
+    let api22 = run_args(&[
+        "--target",
+        "opensim-yengine",
+        "--target-version",
+        "0.9.3.0",
+        source_arg,
+    ]);
+    assert_eq!(api22.status.code(), Some(1));
+    let api22_stdout = String::from_utf8_lossy(&api22.stdout);
+    assert!(api22_stdout.contains("SEM049"), "{api22_stdout}");
+    assert!(api22_stdout.contains("0.9.3.0"), "{api22_stdout}");
+
+    let api23 = run_args(&[
+        "--target=opensim-yengine",
+        "--target-version=0.9.3.1",
+        source_arg,
+    ]);
+    assert_eq!(
+        api23.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&api23.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&api23.stdout).contains("SEM049"));
+
+    let incompatible = run_args(&[
+        "--target",
+        "opensim-xengine",
+        "--target-version",
+        "0.9.3.0",
+        source_arg,
+    ]);
+    assert_eq!(incompatible.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&incompatible.stderr).contains("incompatible"));
+
+    let config = directory.join(".neolint.conf");
+    fs::write(
+        &config,
+        "target_version = 0.9.3.0\ntarget = opensim-yengine\n",
+    )
+    .unwrap();
+    let configured = run_args(&["--config", config.to_str().unwrap(), source_arg]);
+    assert_eq!(configured.status.code(), Some(1));
+    let configured_stdout = String::from_utf8_lossy(&configured.stdout);
+    assert!(configured_stdout.contains("SEM049"), "{configured_stdout}");
 
     fs::remove_dir_all(directory).unwrap();
 }

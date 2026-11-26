@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::ast::{Ast, Block, Statement, StatementKind, SwitchLabel, TopLevel};
-use crate::builtins::Signature;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 const MAX_STATE_GRAPH_WORK: usize = 32_768;
@@ -26,7 +26,7 @@ pub(crate) fn check_with_builtins(
     ast: &Ast,
     syntax_diagnostics: &[Diagnostic],
     environment_reliable: bool,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Vec<Diagnostic> {
     if ast.items.len() > MAX_STATE_GRAPH_WORK
         || !environment_reliable

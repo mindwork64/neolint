@@ -28,8 +28,8 @@ use neolint::config::LintConfig;
 use neolint::semantic::analyze_with_syntax_diagnostics;
 use neolint::{
     lex, parse, AnalysisEngine, AnalysisRun, Diagnostic, DiagnosticFingerprint,
-    EngineAnalysisOptions, EngineComparisonReport, PreprocessDialect, PreprocessSettings, Severity,
-    TargetProfile,
+    EngineAnalysisOptions, EngineComparisonReport, OpenSimApiVersion, PreprocessDialect,
+    PreprocessSettings, Severity, TargetProfile,
 };
 use std::collections::HashSet;
 use std::env;
@@ -93,6 +93,7 @@ fn run() -> i32 {
     let mut preprocess_flag = false;
     let mut dialect_override = None;
     let mut target_override = None;
+    let mut target_version_override = None;
     let mut ossl_functions_cli = Vec::new();
     let mut strict_ossl_cli = false;
     let mut include_dirs_cli = Vec::new();
@@ -134,6 +135,19 @@ fn run() -> i32 {
                     return 2;
                 };
                 ossl_functions_cli.push(value);
+            }
+            "--target-version" => {
+                let Some(value) = args.next() else {
+                    eprintln!("neolint: --target-version requires an OpenSim API version");
+                    return 2;
+                };
+                target_version_override = match OpenSimApiVersion::parse(&value) {
+                    Some(version) => Some(version),
+                    None => {
+                        eprintln!("neolint: invalid target version '{value}' (expected 0.9.2.2, 0.9.3.0, 0.9.3.1 or master-2026-11-25)");
+                        return 2;
+                    }
+                };
             }
             "--target" => {
                 let Some(value) = args.next() else {
@@ -197,6 +211,16 @@ fn run() -> i32 {
                     return 2;
                 }
                 ossl_functions_cli.push(value.to_owned());
+            }
+            _ if arg.starts_with("--target-version=") => {
+                let value = &arg["--target-version=".len()..];
+                target_version_override = match OpenSimApiVersion::parse(value) {
+                    Some(version) => Some(version),
+                    None => {
+                        eprintln!("neolint: invalid target version '{value}' (expected 0.9.2.2, 0.9.3.0, 0.9.3.1 or master-2026-11-25)");
+                        return 2;
+                    }
+                };
             }
             _ if arg.starts_with("--target=") => {
                 let value = &arg["--target=".len()..];
@@ -338,6 +362,12 @@ fn run() -> i32 {
     }
     if let Some(target) = target_override {
         config.set_target(target);
+    }
+    if let Some(version) = target_version_override {
+        if let Err(error) = config.set_target_version(version) {
+            eprintln!("neolint: invalid target version: {error}");
+            return 2;
+        }
     }
     if strict_ossl_cli {
         config.enable_ossl_allowlist();
@@ -1116,7 +1146,7 @@ fn has_lsl_extension(path: &Path) -> bool {
 
 fn print_help() {
     println!(
-        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm preprocessing; firestorm\n                           enables preprocessing\n    --target <PROFILE>     Select second-life-mono (default), second-life-lso,\n                           second-life-luau, opensim-xengine or opensim-yengine\n                           (independent of --dialect; AST/Compare only)\n    --strict-ossl          Check all known OSSL calls against an explicit allowlist\n                           (requires an OpenSim target)\n    --ossl-function <NAME> Add an OpenSim OSSL function to the project allowlist\n                           (repeatable; requires an OpenSim target)\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n    target = second-life-mono\n    ossl_allowlist = strict\n    ossl_function = osGetAgentIP\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
+        "neolint {} — CLI-only LSL linter\n\nUSAGE:\n    neolint [OPTIONS] <FILE|DIRECTORY...|->\n\nOPTIONS:\n    --format <human|json>  Diagnostic output format (default: human)\n    --config <FILE>        Load rule settings from a config file\n    --disable <RULES>      Disable comma-separated rule codes\n    --severity <R=LEVEL>   Override a rule severity (error, warning, info)\n    --engine <ENGINE>      Analysis engine: ast (default), legacy, or compare\n    --preprocess           Enable standard LSL preprocessing\n    --dialect <DIALECT>    Select lsl or firestorm preprocessing; firestorm\n                           enables preprocessing\n    --target <PROFILE>     Select second-life-mono (default), second-life-lso,\n                           second-life-luau, opensim-xengine or opensim-yengine\n                           (independent of --dialect; AST/Compare only)\n    --target-version <VER> Select pinned OpenSim API version: 0.9.2.2, 0.9.3.0,\n                           0.9.3.1 or master-2026-11-25 (OpenSim only)\n    --strict-ossl          Check all known OSSL calls against an explicit allowlist\n                           (requires an OpenSim target)\n    --ossl-function <NAME> Add an OpenSim OSSL function to the project allowlist\n                           (repeatable; requires an OpenSim target)\n    -I <DIR>, --include-dir <DIR>\n                           Add an include search directory (repeatable)\n    -IDIR and --include-dir=DIR are accepted; --dialect=DIALECT is also accepted.\n    --tokens               Print lexer tokens (development aid)\n    -h, --help             Print help\n    -V, --version          Print version\n\nCONFIG FORMAT:\n    disable = SEM001, SEM003\n    severity.SEM004 = warning\n    engine = ast\n    target = opensim-yengine\n    target_version = 0.9.3.1\n    ossl_allowlist = strict\n    ossl_function = osGetAgentIP\n\nDIRECTORIES:\n    Directories are searched recursively for .lsl files (case-insensitive).\n\nEXIT CODES:\n    0  No error-severity diagnostics\n    1  At least one error-severity diagnostic\n    2  Input, configuration or command-line error\n    3  Compare mode: at least one unit's semantic comparison is unmatched",
         env!("CARGO_PKG_VERSION")
     );
 }

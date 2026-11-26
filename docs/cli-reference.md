@@ -20,12 +20,13 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
 | `--preprocess` | Enable the standard LSL preprocessor. |
 | `--dialect lsl\|firestorm` | Select the preprocessing dialect. `firestorm` enables preprocessing. |
+| `--target-version VERSION` | Select a pinned OpenSim API version: 0.9.2.2, 0.9.3.0, 0.9.3.1 or master-2026-11-25. Requires an OpenSim target. |
 | `--target PROFILE` | Select the target platform/runtime independently from the preprocessing dialect. Defaults to `second-life-mono`. |
 | `--strict-ossl` | Enable OSSL allowlist checking, including an explicitly empty allowlist; requires an OpenSim target. |
 | `--ossl-function NAME` | Add an OSSL function to the explicit project allowlist (repeatable; requires an OpenSim target). |
 | `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
 | `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
-| `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--ossl-function=NAME`, `--engine=ENGINE` | Equals forms of the corresponding options. |
+| `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--target-version=VERSION`, `--ossl-function=NAME`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
 Options may be repeated where meaningful. `--disable`, `--severity`, and `--ossl-function` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--target` overrides the target profile, CLI `--ossl-function` adds to the configured OSSL allowlist, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
 
@@ -47,7 +48,7 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 `SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, and `SEM048` are AST-only lint diagnostics.
-`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, and `SEM045`–`SEM047` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
+`SEM027`–`SEM029`, `SEM034`, `SEM036`, `SEM038`, `SEM039`, `SEM045`–`SEM047`, `SEM049`, and `SEM050` are AST-only semantic errors; `SEM048` is an AST-only OSSL allowlist warning.
 diagnostics `SEM028`–`SEM033` appear only when the switches feature gate is
 enabled. Mono state-change context checks `SEM034`/`SEM035` apply to top-level
 user-defined functions. Return/control-flow checks `SEM036`/`SEM037` apply
@@ -58,7 +59,7 @@ context-bound detection functions are reachable from incompatible events;
 `SEM043` warns on statically provable math-domain hazards; `SEM044` warns
 when a populated state has no transition path from `default`; `SEM045` rejects
 known-invalid operator operand types; `SEM046` rejects known-incompatible
-arithmetic and comparison operands; `SEM047` reports canonical SL functions missing from OpenSim API snapshots; `SEM048` warns about known OSSL calls outside an explicit allowlist. These codes appear in
+arithmetic and comparison operands; `SEM047` reports canonical SL functions missing from the selected OpenSim API; `SEM048` checks the explicit OSSL allowlist; `SEM049` and `SEM050` report unavailable canonical SL events and constants. These codes appear in
 default and explicit `--engine ast`
 output, are never emitted by explicit `--engine legacy`, and are not part of the
 Compare parity report, which continues to cover only `SEM001`–`SEM023`.

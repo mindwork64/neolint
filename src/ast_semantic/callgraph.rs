@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::ast::{Ast, ExpressionKind, FunctionDeclaration, TopLevel};
 #[cfg(test)]
 use crate::builtins;
-use crate::builtins::Signature;
+use crate::builtins::FunctionCatalog;
 use crate::diagnostic::Span;
 
 use super::calls::{CallOwner, CallSite, FunctionId};
@@ -77,7 +77,7 @@ pub(crate) fn unreachable_functions_with_builtins(
     ast: &Ast,
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
 ) -> Reachability {
     build(ast, calls, functions, builtin_functions, PRODUCTION_LIMITS)
 }
@@ -86,7 +86,7 @@ fn build(
     ast: &Ast,
     calls: &[CallSite<'_>],
     functions: &HashMap<String, UserFunctionSignature>,
-    builtin_functions: &HashMap<String, Signature>,
+    builtin_functions: &FunctionCatalog,
     limits: Limits,
 ) -> Reachability {
     let mut work = 0usize;
@@ -232,7 +232,7 @@ mod tests {
             &ast,
             &calls,
             &functions,
-            &builtins::definitions().functions,
+            builtins::functions_for_target(crate::target::TargetProfile::default()),
             limits,
         )
     }
@@ -371,7 +371,7 @@ mod tests {
             &ast,
             &calls,
             &functions,
-            &builtins::definitions().functions,
+            builtins::functions_for_target(crate::target::TargetProfile::default()),
             LIMITS,
         );
         assert!(!result.suppressed);
@@ -396,7 +396,7 @@ mod tests {
             &ast,
             &calls,
             &functions,
-            &builtins::definitions().functions,
+            builtins::functions_for_target(crate::target::TargetProfile::default()),
             LIMITS,
         );
         assert!(!result.suppressed);
