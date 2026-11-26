@@ -68,6 +68,7 @@ fn help_keeps_the_existing_core_options() {
     for option in [
         "--format",
         "--config",
+        "--project",
         "--disable",
         "--severity",
         "--engine",

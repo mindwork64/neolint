@@ -24,6 +24,7 @@ pub mod lexer;
 pub mod parser;
 pub mod pipeline;
 pub mod preprocessor;
+pub mod project;
 pub mod semantic;
 pub mod source;
 pub mod target;
@@ -51,6 +52,7 @@ pub use preprocessor::{
     PreparedSource, PreprocessConfig, PreprocessDiagnostic, PreprocessDialect, PreprocessMode,
     PreprocessOptions, PreprocessSettings, RelatedLocation,
 };
+pub use project::{ProjectManifest, ProjectScript};
 pub use semantic::analyze;
 pub use source::{
     AnalysisUnit, AnalysisUnitId, LineIndex, MapSegment, OriginId, OriginKind, PreparedSpan,

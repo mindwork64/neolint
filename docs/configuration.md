@@ -39,6 +39,17 @@ Multiple `severity.*` lines, multiple `disable` lines, and multiple `include_dir
 
 ## Precedence
 
+In multi-script project mode, configuration is layered per script:
+NeoLint defaults → project config → matching script_config → invocation-wide
+--config overlay → CLI options. Disabled rules and OSSL allowlist entries are
+additive; later severity values replace earlier values; explicit scalar
+settings override inherited values. A later include_dir list replaces the
+previous list when it contains at least one include_dir entry. Relative
+include_dir paths in project-owned config files are resolved from the
+directory containing that config file. See [project-model.md](project-model.md)
+for the complete manifest format and configuration rules.
+
+
 1. Default diagnostic severity and the default `engine = ast`.
 2. Configuration-file `disable`, `severity.*`, `preprocess`, `dialect`, `include_dir`, `engine`, and `target`.
 3. Command-line `--disable`, `--severity`, `--dialect`, `--target`, `--preprocess`, `--engine`, and `-I`/`--include-dir`, applied afterward.
@@ -160,7 +171,9 @@ signatures are unchanged.
 - The default no-preprocess AST run is unit-based and capped at 10,000 rendered
   diagnostics per unit plus the invocation-wide limit; overflow appends a
   terminal `PRE039` and exits 1. Explicit Legacy without preprocessing remains
-  uncapped.
+  uncapped for ordinary positional inputs; project-manifest mode uses the unit
+  runner for every script and therefore applies the unit/invocation caps to
+  plain Legacy entries as well.
 - Unit-based runs of every engine, including `--engine legacy --preprocess`,
   apply display suppression before the rendered-diagnostic cap, so disabling a
   rule can avoid a terminal `PRE039`.
@@ -190,6 +203,7 @@ neolint --severity SEM012=error hello.lsl
 neolint --preprocess -I ./includes hello.lsl
 neolint --dialect firestorm hello.lsl
 neolint --engine ast hello.lsl
+neolint --project neolint.project
 ```
 
 Invalid configuration:

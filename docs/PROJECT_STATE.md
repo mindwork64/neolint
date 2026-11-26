@@ -96,6 +96,17 @@ share the same prepared source and source map.
   Ryzen 5 2600X. This is a fresh-process CLI measurement, not an incremental
   language-server benchmark.
 
+## Multi-script project model
+
+The optional manifest-driven CLI project mode is implemented on the current
+feature branch. Every listed root script receives its own AnalysisUnit,
+preprocessor, parser, symbol table, semantic state and diagnostic stream.
+Project defaults, per-script config overlays, invocation-wide config overlays
+and CLI options are merged deterministically. Includes remain scoped to their
+own root script; no project-wide symbol table or cross-script name resolution
+is created. Script and diagnostic order follows the manifest. See
+project-model.md. The feature is still subject to PR review and merge.
+
 ## Release policy and known limitations
 
 - `main` is the stable release branch; feature development continues through
