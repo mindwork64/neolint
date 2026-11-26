@@ -7,6 +7,7 @@ checksums are published on the [GitHub Releases page](https://github.com/mindwor
 
 ### Added
 
+- Optional multi-script project manifests (--project) with deterministic script ordering, project defaults, per-script config overlays, and isolated preprocessing/analysis units.
 - LSLint-inspired AST diagnostics for:
   - constant conditions, including literal assignment results, unchanged local
     empty-string comparisons, and immutable global integer initializers;

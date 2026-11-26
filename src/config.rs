@@ -19,12 +19,17 @@ pub struct LintConfig {
     disabled_rules: HashSet<String>,
     severity_overrides: HashMap<String, Severity>,
     preprocess: bool,
+    preprocess_explicit: bool,
     dialect: PreprocessDialect,
+    dialect_explicit: bool,
     include_dirs: Vec<PathBuf>,
+    include_dirs_explicit: bool,
     engine: AnalysisEngine,
+    engine_explicit: bool,
     target: TargetProfile,
     target_explicit: bool,
     ossl_allowlist: OsslAllowlist,
+    ossl_allowlist_reset_explicit: bool,
 }
 
 impl LintConfig {
@@ -89,6 +94,7 @@ impl LintConfig {
             }
 
             if key == "preprocess" {
+                config.preprocess_explicit = true;
                 config.preprocess = match value {
                     "true" => true,
                     "false" => false,
@@ -102,10 +108,12 @@ impl LintConfig {
             }
 
             if key == "dialect" {
+                config.dialect_explicit = true;
                 config.dialect = match value {
                     "lsl" => PreprocessDialect::Lsl,
                     "firestorm" => {
                         config.preprocess = true;
+                        config.preprocess_explicit = true;
                         PreprocessDialect::Firestorm
                     }
                     _ => {
@@ -121,11 +129,13 @@ impl LintConfig {
                 if value.is_empty() {
                     return Err(format!("line {line_number}: include_dir requires a path"));
                 }
+                config.include_dirs_explicit = true;
                 config.include_dirs.push(PathBuf::from(value));
                 continue;
             }
 
             if key == "engine" {
+                config.engine_explicit = true;
                 config.engine = AnalysisEngine::parse(value).ok_or_else(|| {
                     format!(
                         "line {line_number}: invalid engine value '{value}' (expected legacy, ast or compare)"
@@ -161,6 +171,7 @@ impl LintConfig {
                     ));
                 }
                 config.enable_ossl_allowlist();
+                config.ossl_allowlist_reset_explicit = true;
                 continue;
             }
 
@@ -189,6 +200,60 @@ impl LintConfig {
         }
 
         Ok(config)
+    }
+
+    /// Apply explicitly configured values from another config on top of this one.
+    ///
+    /// Disabled rules are additive, severity overrides replace matching entries,
+    /// and scalar settings replace the base only when the overlay explicitly
+    /// contains that setting. OSSL function entries extend the inherited
+    /// allowlist unless the overlay explicitly sets `ossl_allowlist = strict`,
+    /// which resets inherited entries before applying functions from that file.
+    /// This is used for project defaults, per-script overrides, and invocation-wide
+    /// CLI config overlays.
+    pub fn apply_overrides_from(&mut self, overrides: &Self) {
+        self.disabled_rules
+            .extend(overrides.disabled_rules.iter().cloned());
+        self.severity_overrides.extend(
+            overrides
+                .severity_overrides
+                .iter()
+                .map(|(rule, severity)| (rule.clone(), *severity)),
+        );
+        if overrides.preprocess_explicit {
+            self.preprocess = overrides.preprocess;
+            self.preprocess_explicit = true;
+        }
+        if overrides.dialect_explicit {
+            self.dialect = overrides.dialect;
+            self.dialect_explicit = true;
+        }
+        if overrides.include_dirs_explicit {
+            self.include_dirs = overrides.include_dirs.clone();
+            self.include_dirs_explicit = true;
+        }
+        if overrides.engine_explicit {
+            self.engine = overrides.engine;
+            self.engine_explicit = true;
+        }
+        if overrides.target_explicit {
+            self.target = overrides.target;
+            self.target_explicit = true;
+        }
+        if overrides.ossl_allowlist_reset_explicit {
+            // `ossl_allowlist = strict` resets inherited entries. Functions
+            // declared in the same overlay remain present regardless of their
+            // order relative to the strict setting.
+            self.ossl_allowlist = overrides.ossl_allowlist.clone();
+            self.ossl_allowlist_reset_explicit = true;
+        } else if overrides.ossl_allowlist.is_explicit() {
+            // `ossl_function` entries without a strict reset extend the
+            // inherited allowlist.
+            self.ossl_allowlist.enable();
+            for function in overrides.ossl_allowlist.functions() {
+                self.ossl_allowlist.add(function.clone());
+            }
+        }
     }
 
     /// Disable each supplied rule code.
@@ -329,24 +394,29 @@ impl LintConfig {
     /// Enable or disable preprocessing (CLI override).
     pub fn set_preprocess(&mut self, enabled: bool) {
         self.preprocess = enabled;
+        self.preprocess_explicit = true;
     }
 
     /// Override the dialect (CLI override).
     pub fn set_dialect(&mut self, dialect: PreprocessDialect) {
         self.dialect = dialect;
+        self.dialect_explicit = true;
         if dialect == PreprocessDialect::Firestorm {
             self.preprocess = true;
+            self.preprocess_explicit = true;
         }
     }
 
     /// Replace the include-directory list (CLI override).
     pub fn set_include_dirs(&mut self, dirs: Vec<PathBuf>) {
         self.include_dirs = dirs;
+        self.include_dirs_explicit = true;
     }
 
     /// Override the analysis engine (CLI override).
     pub fn set_engine(&mut self, engine: AnalysisEngine) {
         self.engine = engine;
+        self.engine_explicit = true;
     }
 
     /// Apply disabled-rule filtering and severity overrides to one diagnostic.
@@ -424,6 +494,67 @@ mod tests {
                 end_column: 2,
             },
         }
+    }
+
+    #[test]
+    fn explicit_config_overlay_replaces_scalars_and_adds_rule_overrides() {
+        let mut base = LintConfig::parse(
+            "disable = SEM001\nseverity.SEM004 = info\nengine = legacy\npreprocess = true\ndialect = firestorm\ninclude_dir = base-inc\n",
+        )
+        .unwrap();
+        let overlay = LintConfig::parse(
+            "disable = SEM002\nseverity.SEM004 = warning\nengine = ast\npreprocess = false\ninclude_dir = script-inc\n",
+        )
+        .unwrap();
+
+        base.apply_overrides_from(&overlay);
+
+        assert_eq!(base.engine(), AnalysisEngine::Ast);
+        assert!(!base.preprocess_enabled());
+        assert_eq!(base.dialect(), PreprocessDialect::Firestorm);
+        assert_eq!(base.include_dirs(), &[PathBuf::from("script-inc")]);
+        let mut first = diagnostic("SEM001");
+        let mut second = diagnostic("SEM002");
+        let mut severity = diagnostic("SEM004");
+        assert!(!base.apply_to_diagnostic(&mut first));
+        assert!(!base.apply_to_diagnostic(&mut second));
+        assert!(base.apply_to_diagnostic(&mut severity));
+        assert_eq!(severity.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn firestorm_dialect_overlay_also_enables_preprocessing() {
+        let mut base = LintConfig::parse("preprocess = false\n").unwrap();
+        let overlay = LintConfig::parse("dialect = firestorm\n").unwrap();
+        base.apply_overrides_from(&overlay);
+        assert!(base.preprocess_enabled());
+        assert_eq!(base.dialect(), PreprocessDialect::Firestorm);
+    }
+
+    #[test]
+    fn config_overlay_inherits_unspecified_values() {
+        let mut base = LintConfig::parse(
+            "engine = legacy\ntarget = opensim-yengine\nossl_allowlist = strict\nossl_function = osGetAgentIP\n",
+        )
+        .unwrap();
+        let overlay = LintConfig::parse("disable = SEM001\n").unwrap();
+        base.apply_overrides_from(&overlay);
+
+        assert_eq!(base.engine(), AnalysisEngine::Legacy);
+        assert_eq!(base.target().as_str(), "opensim-yengine");
+        assert!(base.ossl_allowlist().is_explicit());
+        assert!(base.ossl_allowlist().allows("osGetAgentIP"));
+
+        let additive = LintConfig::parse("ossl_function = osTeleportAgent\n").unwrap();
+        base.apply_overrides_from(&additive);
+        assert!(base.ossl_allowlist().allows("osGetAgentIP"));
+        assert!(base.ossl_allowlist().allows("osTeleportAgent"));
+
+        let reset = LintConfig::parse("ossl_allowlist = strict\n").unwrap();
+        base.apply_overrides_from(&reset);
+        assert!(base.ossl_allowlist().is_explicit());
+        assert!(!base.ossl_allowlist().allows("osGetAgentIP"));
+        assert!(!base.ossl_allowlist().allows("osTeleportAgent"));
     }
 
     #[test]

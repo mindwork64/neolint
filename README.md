@@ -68,6 +68,9 @@ neolint script.lsl
 # Recursively check a directory
 neolint ./scripts/
 
+# Analyze a declared multi-script project
+neolint --project neolint.project
+
 # Emit machine-readable diagnostics
 neolint --format json script.lsl
 
@@ -124,6 +127,7 @@ Use this as the map to the project docs. The README stays deliberately concise; 
 | Install neolint and run your first check | **[Getting started](docs/getting-started.md)** |
 | Look up command-line flags, JSON output, or exit codes | **[CLI reference](docs/cli-reference.md)** |
 | Configure rules, severities, and analysis engine | **[Configuration](docs/configuration.md)** |
+| Analyze multiple independent LSL scripts with shared defaults | **[Project model](docs/project-model.md)** |
 | Understand a diagnostic or decide how to fix it | **[Diagnostic reference](docs/diagnostics.md)** |
 | Check which LSL constructs are supported | **[Language support](docs/language-support.md)** |
 | Use Firestorm preprocessing and syntax extensions | **[Firestorm preprocessor](docs/firestorm-preprocessor.md)** |

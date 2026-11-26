@@ -2,9 +2,12 @@
 
 ```text
 neolint [OPTIONS] <FILE|DIRECTORY...|->
+neolint [OPTIONS] --project <MANIFEST>
 ```
 
-At least one input is required. With no input, neolint prints help and exits with code 2.
+At least one positional input or a project manifest is required. With neither,
+neolint prints help and exits with code 2. Project mode cannot be combined with
+positional inputs.
 
 ## Options
 
@@ -15,6 +18,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--format human` | Human-readable diagnostics; the default. |
 | `--format json` | Emit a JSON array of diagnostic objects. |
 | `--config FILE` | Load rule settings from a configuration file. |
+| `--project FILE` | Analyze scripts listed in a project manifest; mutually exclusive with positional inputs. |
 | `--disable RULES` | Disable comma-separated rule codes. |
 | `--severity RULE=LEVEL` | Override severity for a rule; `LEVEL` is `error`, `warning`, or `info`. |
 | `--tokens` | Print lexer tokens before human diagnostics. Cannot be combined with `--format json`. In preprocessed mode these are tokens of the prepared root buffer. |
@@ -26,11 +30,11 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--ossl-function NAME` | Add an OSSL function to the explicit project allowlist (repeatable; requires an OpenSim target). |
 | `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
 | `-I DIR`, `-IDIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
-| `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--target-version=VERSION`, `--ossl-function=NAME`, `--engine=ENGINE` | Equals forms of the corresponding options. |
+| `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--target-version=VERSION`, `--ossl-function=NAME`, `--engine=ENGINE`, `--project=FILE` | Equals forms of the corresponding options. |
 
 Options may be repeated where meaningful. `--disable`, `--severity`, and `--ossl-function` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--target` overrides the target profile, CLI `--ossl-function` adds to the configured OSSL allowlist, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.
 
-Without preprocessing flags, the default AST path uses identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map, but macros and includes are not expanded and Firestorm extension gates stay off. Only explicit `--engine legacy` without preprocessing keeps the historical direct Legacy path, whose diagnostics are unchanged from previous releases. Unit-based runs of every engine, including `--engine legacy --preprocess`, apply display suppression before the rendered-diagnostic cap, so disabling a rule can avoid a terminal `PRE039`. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
+Without preprocessing flags, the default AST path uses identity preparation: the source bytes are copied unchanged into a prepared buffer so the engine API has a source map, but macros and includes are not expanded and Firestorm extension gates stay off. For ordinary positional file/directory invocations, explicit `--engine legacy` without preprocessing keeps the historical direct Legacy path, whose diagnostics are unchanged from previous releases. Project-manifest invocations use the shared unit runner for every script, including plain Legacy scripts; those project entries therefore use the unit-based diagnostic caps. Unit-based runs of every engine, including `--engine legacy --preprocess`, apply display suppression before the rendered-diagnostic cap, so disabling a rule can avoid a terminal `PRE039`. Include directories require `--preprocess` or `--dialect firestorm`; otherwise the CLI exits with code 2. `--tokens` in prepared mode shows tokens from the prepared root buffer, not the included files separately.
 
 `--tokens` cannot be combined with `--format json`; that combination exits with code 2.
 
@@ -44,7 +48,7 @@ analysis pipeline add `engine = legacy` to the configuration file or pass
 | Engine | Behavior |
 | --- | --- |
 | `ast` | Default engine. The independent typed-AST parser and AST semantic analyzer. Without preprocessing, input is identity-prepared and the unit-based caps can append a terminal `PRE039`. |
-| `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Direct plain-Legacy output (no preprocessing) is unchanged from v1.0.0. Preprocessed Legacy uses the shared unit path, including suppression before the rendered cap. Without preprocessing it uses the uncapped direct plain-Legacy path. |
+| `legacy` | Compatibility engine for the historical v1.0.0 behavior. The frozen Legacy lexer/parser/semantic pipeline. Ordinary positional inputs without preprocessing use the uncapped direct plain-Legacy path. Project-manifest invocations use the shared unit path for every script, including plain Legacy entries, and therefore apply unit/invocation diagnostic caps. Preprocessed Legacy also uses the shared unit path. |
 | `compare` | Explicit only. Runs both analyzers, displays the Legacy stream, and writes a semantic comparison report to stderr. |
 
 `SEM024`–`SEM026`, `SEM030`–`SEM033`, `SEM035`, `SEM037`, `SEM040`–`SEM044`, `SEM048`, and `SEM053`–`SEM057` are AST-only lint diagnostics.
@@ -73,7 +77,7 @@ Engine-visible differences on the same input:
   run including `--engine legacy --preprocess`) render `<stdin>`. Only the
   direct plain-Legacy path (explicit Legacy with preprocessing off) renders `-`.
 - Firestorm `switch` statements are parsed by AST when the switches gate is enabled; explicit Legacy rejects them as unsupported syntax.
-- The default no-preprocess AST run is unit-based and capped at 10,000 rendered diagnostics; overflow ends with a terminal `PRE039`. Explicit no-preprocess Legacy is uncapped.
+- The default no-preprocess AST run is unit-based and capped at 10,000 rendered diagnostics; overflow ends with a terminal `PRE039`. Explicit no-preprocess Legacy is uncapped for ordinary positional inputs, but project-manifest runs use the unit-based cap for every script.
 - An event or declaration identifier that collides with a builtin name is a Legacy-only `SEM002` error; for example `default { llSay() { } }` is an error under Legacy and clean under AST.
 - Without preprocessing, a raw `#define` reports `LEX000` under both engines; Legacy also emits `SEM012` for `define` and the macro name, while AST does not.
 - Diagnostic order follows each engine's own pass order. AST order can differ from Legacy order; neither stream is globally sorted.
@@ -107,6 +111,22 @@ ossl_function = osTeleportAgent
 - `ossl_function` may appear repeatedly and describes the OSSL functions expected to be enabled in the selected OpenSim region. It is a project allowlist, not a live region permission query.
 
 Quoted includes search the including file's directory first, then the include directories in order; angle includes search only the include directories. URL, `http(s)`, `ftp`, and UNC/network paths are rejected. `#pragma once` is a documented neolint convenience, not a guaranteed Firestorm capability. `//fspreprocessor off` is a Firestorm-only script-wide kill switch and emits an informational `PRE037`; it does not affect the exit code.
+
+## Multi-script projects
+
+Use --project FILE to analyze the script list in a project manifest. Project
+mode is mutually exclusive with positional file/directory paths and stdin.
+Each script has an independent parser, symbol table, preprocessor and effective
+configuration; project membership does not merge script globals or functions.
+Project defaults, optional per-script config files, an invocation-wide --config
+overlay and CLI options are applied in that order. Manifest syntax, path rules,
+include isolation and config precedence are documented in the
+[project model guide](project-model.md).
+
+~~~sh
+neolint --project neolint.project
+neolint --project neolint.project --format json
+~~~
 
 ## Inputs
 
@@ -186,7 +206,7 @@ neolint --format json corpus/invalid/duplicate_event.lsl
 
 `start`/`end` are byte offsets, not display columns. Columns are one-based character positions as reported by the lexer.
 
-The default no-preprocess AST path is unit-based and capped: it applies the per-unit 10,000 rendered-diagnostic cap and then the invocation-wide 10,000 cap, and it can therefore append a terminal `PRE039`. The same unit-based caps apply to explicit `--engine ast`/`--engine compare` without preprocessing and to every engine with `--preprocess` or `--dialect firestorm`. Only explicit `--engine legacy` without preprocessing uses the uncapped direct plain-Legacy path: it does not apply the 10,000-diagnostic invocation limit and never appends `PRE039`. On invocation overflow the CLI removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity; exit code 1 unless an input error already requires 2, or an unmatched Compare report returns 3).
+The default no-preprocess AST path is unit-based and capped: it applies the per-unit 10,000 rendered-diagnostic cap and then the invocation-wide 10,000 cap, and it can therefore append a terminal `PRE039`. The same unit-based caps apply to explicit `--engine ast`/`--engine compare` without preprocessing and to every engine with `--preprocess` or `--dialect firestorm`. Only explicit `--engine legacy` without preprocessing on ordinary positional file/directory inputs uses the uncapped direct plain-Legacy path: it does not apply the 10,000-diagnostic invocation limit and never appends `PRE039`. Project-manifest mode uses the unit runner for every script, so even plain Legacy project entries are capped. On invocation overflow the CLI removes any per-unit terminal `PRE039`, truncates later results, and appends exactly one terminal `PRE039` (error severity; exit code 1 unless an input error already requires 2, or an unmatched Compare report returns 3).
 
 ## Exit codes
 
@@ -215,6 +235,7 @@ neolint --preprocess -I ./includes script.lsl
 neolint --dialect firestorm script.lsl
 neolint --engine ast script.lsl
 neolint --engine=compare --format json script.lsl
+neolint --project neolint.project
 ```
 
 See [configuration.md](configuration.md), [diagnostics.md](diagnostics.md), and [firestorm-preprocessor.md](firestorm-preprocessor.md).
