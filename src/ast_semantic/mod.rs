@@ -18,6 +18,7 @@ pub(crate) mod usage;
 
 use crate::ast::Ast;
 use crate::builtins;
+use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::Diagnostic;
 use crate::target::{OsslAllowlist, TargetProfile};
 
@@ -108,15 +109,71 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
     ossl_allowlist: &OsslAllowlist,
     god_mode_enabled: bool,
 ) -> Vec<Diagnostic> {
+    analyze_ast_with_target_options_and_god_mode_controlled(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+        target,
+        ossl_allowlist,
+        god_mode_enabled,
+        None,
+    )
+    .expect("analysis without a cancellation token cannot be cancelled")
+}
+
+/// Cancellation-aware form used by the LSP worker. Checkpoints sit between
+/// independent semantic passes, so a cancelled run never returns partial diagnostics.
+pub(crate) fn analyze_ast_with_target_options_and_god_mode_cancellable(
+    ast: &Ast,
+    syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+    god_mode_enabled: bool,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Vec<Diagnostic>> {
+    analyze_ast_with_target_options_and_god_mode_controlled(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+        target,
+        ossl_allowlist,
+        god_mode_enabled,
+        Some(cancellation),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_ast_with_target_options_and_god_mode_controlled(
+    ast: &Ast,
+    syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+    god_mode_enabled: bool,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<Vec<Diagnostic>> {
+    macro_rules! checkpoint {
+        () => {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return None;
+            }
+        };
+    }
+    checkpoint!();
     let api_catalog = builtins::catalog_for_target(target);
     let standard_functions = &api_catalog.functions;
     let ossl_functions = &api_catalog.ossl_functions;
     let builtin_functions = &api_catalog.callable_functions;
     let builtin_events = &api_catalog.events;
     let scopes = scopes::ScopeTree::build_with_catalog(ast, api_catalog, target);
+    checkpoint!();
     let functions = types::collect_user_functions(ast);
+    checkpoint!();
     let expressions = expressions::collect_facts(ast, &scopes);
+    checkpoint!();
     let calls = calls::collect_calls(ast, &scopes);
+    checkpoint!();
     let mut diagnostics = Vec::new();
     diagnostics.extend(rules::duplicate_globals::check(ast));
     diagnostics.extend(rules::duplicate_locals::check(&scopes));
@@ -126,6 +183,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         &scopes,
         builtin_functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::builtin_calls::check_with_builtins(
         &calls,
         &scopes,
@@ -134,33 +192,39 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         builtin_functions,
         target,
     ));
+    checkpoint!();
     diagnostics.extend(rules::user_calls::check(
         &calls,
         &scopes,
         &functions,
         syntax_diagnostics,
     ));
+    checkpoint!();
     diagnostics.extend(rules::event_signatures::check(ast, builtin_events));
     diagnostics.extend(rules::explicit_casts::check(
         &expressions.expressions,
         &scopes,
         &functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::variable_initializers::check(
         &expressions.initializers,
         &scopes,
         &functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::global_initializers::check(
         &expressions.initializers,
         &scopes,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::list_semantics::check_empty_states(
         ast,
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::list_semantics::check(
         &expressions.expressions,
         &scopes,
@@ -168,6 +232,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::firestorm_switches::check(
         ast,
         &scopes,
@@ -175,16 +240,19 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::assignments::check(
         &expressions.expressions,
         &scopes,
         &functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::components::check(
         &expressions.expressions,
         &scopes,
         &functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::unresolved_variables::check_with_builtins(
         ast,
         &expressions.expressions,
@@ -193,11 +261,13 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         &functions,
         builtin_functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::deprecated_calls::check_with_builtins(
         &calls,
         &functions,
         builtin_functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::state_targets::check(ast, builtin_events));
     diagnostics.extend(rules::legacy_compat::check(
         ast,
@@ -208,18 +278,21 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         target,
         god_mode_enabled,
     ));
+    checkpoint!();
     diagnostics.extend(rules::state_transitions::check(
         ast,
         syntax_diagnostics,
         environment_reliable,
         target,
     ));
+    checkpoint!();
     diagnostics.extend(rules::unreachable_states::check_with_builtins(
         ast,
         syntax_diagnostics,
         environment_reliable,
         builtin_functions,
     ));
+    checkpoint!();
     let jumps = flow::check_jumps(ast, &scopes, target);
     diagnostics.extend(rules::return_hazards::check(
         ast,
@@ -228,12 +301,14 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         environment_reliable,
         &jumps.invalid_code_scopes,
     ));
+    checkpoint!();
     diagnostics.extend(rules::discarded_comparisons::check(ast, syntax_diagnostics));
     diagnostics.extend(rules::condition_assignments::check(
         ast,
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::detection_context::check_with_builtins(
         &calls,
         &functions,
@@ -242,6 +317,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         builtin_functions,
         builtin_events,
     ));
+    checkpoint!();
     diagnostics.extend(rules::math_errors::check_with_builtins(
         &expressions.expressions,
         &scopes,
@@ -250,6 +326,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         environment_reliable,
         builtin_functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::operator_types::check(
         &expressions.expressions,
         &scopes,
@@ -257,6 +334,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::binary_operator_types::check(
         &expressions.expressions,
         &scopes,
@@ -264,6 +342,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(flow::check_returns(ast, &scopes, &functions));
     diagnostics.extend(jumps.diagnostics);
     diagnostics.extend(flow::check_missing_returns(
@@ -271,6 +350,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         &scopes,
         &jumps.invalid_functions,
     ));
+    checkpoint!();
     let used = usage::used_symbols(&expressions.uses, &scopes);
     let reliable =
         usage::unit_is_reliable(ast, syntax_diagnostics, environment_reliable, &expressions);
@@ -283,6 +363,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         reliable,
         builtin_functions,
     ));
+    checkpoint!();
     diagnostics.extend(rules::target_api::check(
         &calls,
         &functions,
@@ -291,6 +372,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::ossl_allowlist::check(
         &calls,
         &functions,
@@ -300,6 +382,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::target_events::check(
         ast,
         &builtins::definitions().events,
@@ -308,6 +391,7 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
+    checkpoint!();
     diagnostics.extend(rules::target_constants::check(
         &expressions.expressions,
         &scopes,
@@ -317,5 +401,6 @@ pub(crate) fn analyze_ast_with_target_options_and_god_mode(
         syntax_diagnostics,
         environment_reliable,
     ));
-    diagnostics
+    checkpoint!();
+    Some(diagnostics)
 }

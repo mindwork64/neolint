@@ -3,6 +3,7 @@
 //! Diagnostics intentionally mirror the legacy parser's `PARxxx` contract.
 //! Recovery is delimiter-aware and every loop is guaranteed to make progress.
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, Span};
 use crate::lexer::{Token, TokenKind};
 
@@ -30,6 +31,7 @@ struct ParsedArguments {
 
 struct Parser<'a> {
     tokens: &'a [Token],
+    cancellation: Option<&'a AnalysisCancellationToken>,
     current: usize,
     diagnostics: Vec<Diagnostic>,
     states_started: bool,
@@ -45,9 +47,14 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token], options: AstParseOptions) -> Self {
+    fn new(
+        tokens: &'a [Token],
+        options: AstParseOptions,
+        cancellation: Option<&'a AnalysisCancellationToken>,
+    ) -> Self {
         Self {
             tokens,
+            cancellation,
             current: 0,
             diagnostics: Vec::new(),
             states_started: false,
@@ -379,7 +386,7 @@ impl<'a> Parser<'a> {
                             });
                         } else if let Some(close) = self.event_parameter_close_before_body() {
                             let parameters = self.recover_parameters(parameter_open, close);
-                            while self.current <= close {
+                            while self.current <= close && !self.is_cancelled() {
                                 self.advance();
                             }
                             // Keep a recoverable event shape for the AST semantic
@@ -1627,7 +1634,7 @@ impl<'a> Parser<'a> {
             });
         }
         if let Some(close) = self.matching_call_close(open) {
-            while self.current <= close {
+            while self.current <= close && !self.is_cancelled() {
                 self.advance();
             }
             let declared_count = self.count_call_arguments(open, close);
@@ -1846,7 +1853,11 @@ impl<'a> Parser<'a> {
     }
 
     fn check(&self, kind: TokenKind) -> bool {
-        self.peek_kind() == kind
+        !self.is_cancelled() && self.peek_kind() == kind
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_some_and(|token| token.is_cancelled())
     }
 
     fn peek_kind(&self) -> TokenKind {
@@ -1861,7 +1872,7 @@ impl<'a> Parser<'a> {
     }
 
     fn at_end(&self) -> bool {
-        self.check(TokenKind::Eof)
+        self.is_cancelled() || self.check(TokenKind::Eof)
     }
 
     fn advance(&mut self) -> &Token {
@@ -2064,7 +2075,7 @@ impl<'a> Parser<'a> {
     fn recover_parameters(&self, open: usize, close: usize) -> Vec<Parameter> {
         let mut parameters = Vec::new();
         let mut index = open.saturating_add(1);
-        while index < close {
+        while index < close && !self.is_cancelled() {
             let Some(ty_kind) = type_kind(self.tokens[index].kind) else {
                 index += 1;
                 continue;
@@ -2165,6 +2176,9 @@ impl<'a> Parser<'a> {
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
         while let Some(token) = self.tokens.get(index) {
+            if self.is_cancelled() {
+                break;
+            }
             if paren_depth == 0 && bracket_depth == 0 {
                 if token.kind == TokenKind::RParen {
                     return self
@@ -2325,7 +2339,7 @@ impl<'a> Parser<'a> {
     fn recover_parameter_references(&self, open: usize, close: usize) -> Vec<Expression> {
         let mut expressions = Vec::new();
         let mut index = open + 1;
-        while index < close {
+        while index < close && !self.is_cancelled() {
             if self.tokens[index].kind != TokenKind::Identifier {
                 index += 1;
                 continue;
@@ -2359,7 +2373,7 @@ impl<'a> Parser<'a> {
     fn recover_argument_identifiers(&self, start: usize, end: usize) -> Vec<Expression> {
         let mut expressions = Vec::new();
         let mut index = start;
-        while index < end {
+        while index < end && !self.is_cancelled() {
             if self.tokens[index].kind != TokenKind::Identifier {
                 index += 1;
                 continue;
@@ -2399,7 +2413,7 @@ impl<'a> Parser<'a> {
         let mut jumps = Vec::new();
         let mut scope_path = Vec::new();
         let mut index = start;
-        while index <= semicolon {
+        while index <= semicolon && !self.is_cancelled() {
             match self.tokens[index].kind {
                 TokenKind::LBrace => {
                     scope_path.push(self.token_span(index));
@@ -2734,7 +2748,7 @@ pub fn parse_ast_with_options(
         let worker = std::thread::Builder::new()
             .name("neolint-ast-parser".to_owned())
             .stack_size(PARSER_STACK_BYTES)
-            .spawn_scoped(scope, || Parser::new(tokens, options).run());
+            .spawn_scoped(scope, || Parser::new(tokens, options, None).run());
         match worker {
             Ok(handle) => match handle.join() {
                 Ok(result) => result,
@@ -2745,6 +2759,36 @@ pub fn parse_ast_with_options(
             Err(_) => worker_failure_result(tokens, "AST parser worker stack could not be created"),
         }
     })
+}
+
+/// Parse on the dedicated parser stack, returning `None` when cancelled.
+pub(crate) fn parse_ast_with_options_cancellable(
+    tokens: &[Token],
+    options: AstParseOptions,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<(Ast, Vec<Diagnostic>)> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    const PARSER_STACK_BYTES: usize = 16 * 1024 * 1024;
+    let result = std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("neolint-ast-parser".to_owned())
+            .stack_size(PARSER_STACK_BYTES)
+            .spawn_scoped(scope, || {
+                Parser::new(tokens, options, Some(cancellation)).run()
+            });
+        match worker {
+            Ok(handle) => match handle.join() {
+                Ok(result) => result,
+                Err(_) => {
+                    worker_failure_result(tokens, "AST parser worker terminated unexpectedly")
+                }
+            },
+            Err(_) => worker_failure_result(tokens, "AST parser worker stack could not be created"),
+        }
+    });
+    (!cancellation.is_cancelled()).then_some(result)
 }
 
 fn worker_failure_result(tokens: &[Token], reason: &str) -> (Ast, Vec<Diagnostic>) {
@@ -2782,6 +2826,19 @@ fn worker_failure_result(tokens: &[Token], reason: &str) -> (Ast, Vec<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellable_parser_discards_a_cancelled_parse() {
+        let (tokens, _) = crate::lex("default { state_entry() {} }");
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        assert!(parse_ast_with_options_cancellable(
+            &tokens,
+            AstParseOptions::default(),
+            &cancellation,
+        )
+        .is_none());
+    }
 
     #[test]
     fn worker_failure_returns_empty_ast_and_one_safe_diagnostic() {

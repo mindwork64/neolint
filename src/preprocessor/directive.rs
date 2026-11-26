@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::{DiagnosticKind, Severity};
 use crate::preprocessor::config::{PreprocessDialect, PreprocessSettings};
 use crate::preprocessor::diagnostics::{
@@ -94,6 +95,7 @@ pub(crate) struct Preprocessor<'a> {
     lazy_lists_requested: bool,
     switches_latched: bool,
     lazy_lists_latched: bool,
+    cancellation: Option<&'a AnalysisCancellationToken>,
 }
 
 impl<'a> Preprocessor<'a> {
@@ -101,6 +103,25 @@ impl<'a> Preprocessor<'a> {
         manager: &'a mut SourceManager,
         root: SourceId,
         options: &PreprocessSettings,
+    ) -> Result<Self, SpanError> {
+        Self::new_controlled(manager, root, options, None)
+    }
+
+    #[allow(dead_code)] // Consumed by the optional LSP worker feature.
+    pub(crate) fn new_cancellable(
+        manager: &'a mut SourceManager,
+        root: SourceId,
+        options: &PreprocessSettings,
+        cancellation: &'a AnalysisCancellationToken,
+    ) -> Result<Self, SpanError> {
+        Self::new_controlled(manager, root, options, Some(cancellation))
+    }
+
+    fn new_controlled(
+        manager: &'a mut SourceManager,
+        root: SourceId,
+        options: &PreprocessSettings,
+        cancellation: Option<&'a AnalysisCancellationToken>,
     ) -> Result<Self, SpanError> {
         let unit = manager.unit();
         if root.unit() != unit {
@@ -152,13 +173,37 @@ impl<'a> Preprocessor<'a> {
             lazy_lists_requested: options.lazy_lists_enabled(),
             switches_latched: false,
             lazy_lists_latched: false,
+            cancellation,
         })
     }
 
-    pub(crate) fn run(mut self) -> Result<PreparedSource, SpanError> {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_some_and(|token| token.is_cancelled())
+    }
+
+    pub(crate) fn run(self) -> Result<PreparedSource, SpanError> {
+        self.run_controlled()
+            .expect("non-cancellable preprocessing cannot be cancelled")
+    }
+
+    #[allow(dead_code)] // Consumed by the optional LSP worker feature.
+    pub(crate) fn run_cancellable(self) -> Option<Result<PreparedSource, SpanError>> {
+        self.run_controlled()
+    }
+
+    fn run_controlled(mut self) -> Option<Result<PreparedSource, SpanError>> {
+        if self.is_cancelled() {
+            return None;
+        }
         self.process_current_source();
+        if self.is_cancelled() {
+            return None;
+        }
         let eof = RawSpan::point(self.source, self.text.len());
         while let Some(frame) = self.conditions.pop() {
+            if self.is_cancelled() {
+                return None;
+            }
             self.diags.push_with_related(
                 PRE_UNTERMINATED_CONDITIONAL,
                 "unterminated conditional directive",
@@ -169,17 +214,21 @@ impl<'a> Preprocessor<'a> {
                 }],
             );
         }
-        self.finalize()
+        if self.cancellation.is_some() {
+            self.finalize_cancellable()
+        } else {
+            Some(self.finalize())
+        }
     }
 
     fn process_current_source(&mut self) {
         let mut position = 0usize;
         let mut in_block_comment = false;
-        while position < self.text.len() {
+        while position < self.text.len() && !self.is_cancelled() {
             let line_start = position;
             let continued = continued_line(&self.text, position);
             if !in_block_comment && !continued {
-                if let Some(hash) = directive_hash(&self.text, position) {
+                if let Some(hash) = directive_hash(&self.text, position, self.cancellation) {
                     self.flush_pending();
                     let (mapped, end) = MappedText::logical_line(&self.text, self.source, hash + 1);
                     let directive_span = directive_span(self.source, &self.text, hash, end);
@@ -190,7 +239,9 @@ impl<'a> Preprocessor<'a> {
                     continue;
                 }
             } else if !continued {
-                if let Some((hash, comment_end)) = closing_comment_directive(&self.text, position) {
+                if let Some((hash, comment_end)) =
+                    closing_comment_directive(&self.text, position, self.cancellation)
+                {
                     if self.is_active() {
                         self.push_pending(position, comment_end);
                     }
@@ -205,7 +256,8 @@ impl<'a> Preprocessor<'a> {
                     continue;
                 }
             }
-            let (end, new_block) = scan_line(&self.text, position, in_block_comment);
+            let (end, new_block) =
+                scan_line(&self.text, position, in_block_comment, self.cancellation);
             if self.is_active() {
                 self.push_pending(position, end);
             } else {
@@ -215,7 +267,9 @@ impl<'a> Preprocessor<'a> {
             position = end;
             in_block_comment = new_block;
         }
-        self.flush_pending();
+        if !self.is_cancelled() {
+            self.flush_pending();
+        }
     }
 
     fn is_active(&self) -> bool {
@@ -244,7 +298,7 @@ impl<'a> Preprocessor<'a> {
             return;
         };
         let end = self.pending_end;
-        if self.stopped || end <= start {
+        if self.stopped || self.is_cancelled() || end <= start {
             return;
         }
         let mapped = MappedText::spliced_range(&self.text, self.source, start, end);
@@ -257,6 +311,9 @@ impl<'a> Preprocessor<'a> {
             return;
         }
         for mut item in items {
+            if self.is_cancelled() {
+                return;
+            }
             if item.text.is_empty() {
                 continue;
             }
@@ -305,15 +362,28 @@ impl<'a> Preprocessor<'a> {
         }
         let items: Vec<WorkItem> = pieces.into_iter().map(WorkItem::from_piece).collect();
         let expanded = {
-            let mut expander = Expander::new(
-                &self.macros,
-                &mut self.prov,
-                &mut self.diags,
-                &mut self.limits,
-                self.source,
-                self.include_context,
-                &self.source_files,
-            );
+            let mut expander = if let Some(cancellation) = self.cancellation {
+                Expander::new_cancellable(
+                    &self.macros,
+                    &mut self.prov,
+                    &mut self.diags,
+                    &mut self.limits,
+                    self.source,
+                    self.include_context,
+                    &self.source_files,
+                    cancellation,
+                )
+            } else {
+                Expander::new(
+                    &self.macros,
+                    &mut self.prov,
+                    &mut self.diags,
+                    &mut self.limits,
+                    self.source,
+                    self.include_context,
+                    &self.source_files,
+                )
+            };
             expander.expand_top(items)
         };
         self.append(expanded);
@@ -321,7 +391,7 @@ impl<'a> Preprocessor<'a> {
 
     fn emit_newlines(&mut self, start: usize, end: usize) {
         let mut index = start;
-        while index < end {
+        while index < end && !self.is_cancelled() {
             let bytes = self.text.as_bytes();
             let len = if bytes[index] == b'\r' {
                 if index + 1 < end && bytes[index + 1] == b'\n' {
@@ -367,6 +437,9 @@ impl<'a> Preprocessor<'a> {
         mapped: &MappedText,
         directive_span: RawSpan,
     ) {
+        if self.is_cancelled() {
+            return;
+        }
         let text = mapped.text();
         let mut position = 0usize;
         skip_directive_space(text, &mut position);
@@ -396,7 +469,7 @@ impl<'a> Preprocessor<'a> {
         }
         let name_start = position;
         position += text[position..].chars().next().map_or(1, char::len_utf8);
-        while position < text.len() {
+        while position < text.len() && !self.is_cancelled() {
             let ch = text[position..].chars().next().unwrap_or('\0');
             if !is_identifier_continue(ch) {
                 break;
@@ -431,7 +504,7 @@ impl<'a> Preprocessor<'a> {
     }
 
     fn include_directive(&mut self, rest: &MappedText, directive_span: RawSpan) {
-        if !self.is_active() {
+        if self.is_cancelled() || !self.is_active() {
             return;
         }
         let Some(parsed) = parse_include(rest, &mut self.diags) else {
@@ -547,6 +620,9 @@ impl<'a> Preprocessor<'a> {
                 return;
             }
         };
+        if self.is_cancelled() {
+            return;
+        }
         let file_arc = match self.manager.files().get(source.file() as usize) {
             Some(file) => Arc::clone(file),
             None => return,
@@ -588,7 +664,9 @@ impl<'a> Preprocessor<'a> {
         self.text = text;
         self.include_context = Some(context);
         self.process_current_source();
-        self.flush_pending();
+        if !self.is_cancelled() {
+            self.flush_pending();
+        }
         let eof = RawSpan::point(source, self.text.len());
         while self.conditions.len() > condition_depth {
             if let Some(frame) = self.conditions.pop() {
@@ -973,16 +1051,33 @@ impl<'a> Preprocessor<'a> {
         let (_, expression_span) = rest.trimmed();
         let before = self.diags.len();
         let pieces = tokenize_mapped(rest);
-        let items = expand_condition(
-            pieces,
-            &self.macros,
-            &mut self.prov,
-            &mut self.diags,
-            &mut self.limits,
-            self.source,
-            self.include_context,
-            &self.source_files,
-        );
+        let items = if let Some(cancellation) = self.cancellation {
+            let Some(items) = crate::preprocessor::expand::expand_condition_cancellable(
+                pieces,
+                &self.macros,
+                &mut self.prov,
+                &mut self.diags,
+                &mut self.limits,
+                self.source,
+                self.include_context,
+                &self.source_files,
+                cancellation,
+            ) else {
+                return false;
+            };
+            items
+        } else {
+            expand_condition(
+                pieces,
+                &self.macros,
+                &mut self.prov,
+                &mut self.diags,
+                &mut self.limits,
+                self.source,
+                self.include_context,
+                &self.source_files,
+            )
+        };
         let tokens = expr::tokenize(&items, &mut self.diags);
         let result = expr::evaluate(&tokens, expression_span, &mut self.diags);
         let after = self.diags.len();
@@ -994,8 +1089,24 @@ impl<'a> Preprocessor<'a> {
     }
 
     fn finalize(mut self) -> Result<PreparedSource, SpanError> {
+        self.finalize_inner()
+    }
+
+    fn finalize_cancellable(mut self) -> Option<Result<PreparedSource, SpanError>> {
+        if self.is_cancelled() {
+            return None;
+        }
+        let result = self.finalize_inner();
+        (!self.is_cancelled()).then_some(result)
+    }
+
+    fn finalize_inner(&mut self) -> Result<PreparedSource, SpanError> {
         let mut items: Vec<WorkItem> = Vec::new();
+        let cancellation = self.cancellation;
         for item in self.output.drain(..) {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                break;
+            }
             if item.text.is_empty() {
                 continue;
             }
@@ -1058,6 +1169,9 @@ impl<'a> Preprocessor<'a> {
         let mut final_tokens = 0usize;
         let mut cut = None;
         for (index, item) in items.iter().enumerate() {
+            if self.is_cancelled() {
+                break;
+            }
             final_bytes = final_bytes.saturating_add(item.text.len());
             final_tokens += 1;
             if final_bytes > MAX_EXPANDED_BYTES {
@@ -1089,6 +1203,9 @@ impl<'a> Preprocessor<'a> {
 
         let mut text = String::new();
         for item in &items {
+            if self.is_cancelled() {
+                break;
+            }
             text.push_str(&item.text);
         }
         let text: Arc<str> = Arc::from(text);
@@ -1097,6 +1214,9 @@ impl<'a> Preprocessor<'a> {
         let mut origin_ids: Vec<crate::source::OriginId> =
             Vec::with_capacity(self.prov.nodes.len());
         for node in &self.prov.nodes {
+            if self.is_cancelled() {
+                break;
+            }
             let span = builder.source_span(node.span.source, node.span.start, node.span.end)?;
             let invocation = match node.invocation {
                 Some(value) => Some(builder.source_span(value.source, value.start, value.end)?),
@@ -1117,6 +1237,9 @@ impl<'a> Preprocessor<'a> {
 
         let mut offset = 0usize;
         for item in &items {
+            if self.is_cancelled() {
+                break;
+            }
             let end = offset + item.text.len();
             let origin = match item.origin {
                 WorkOrigin::Node(id) => *origin_ids.get(id.0).ok_or(SpanError::MapInvariant)?,
@@ -1163,20 +1286,22 @@ impl<'a> Preprocessor<'a> {
         &self,
         builder: &mut SourceMapBuilder,
     ) -> Result<IncludeGraph, SpanError> {
-        let nodes = self
-            .manager
-            .files()
-            .iter()
-            .map(|file| {
-                IncludeNode::new(
-                    file.id(),
-                    file.display_name().to_owned(),
-                    file.canonical_path().cloned(),
-                )
-            })
-            .collect();
+        let mut nodes = Vec::with_capacity(self.manager.files().len());
+        for file in self.manager.files() {
+            if self.is_cancelled() {
+                break;
+            }
+            nodes.push(IncludeNode::new(
+                file.id(),
+                file.display_name().to_owned(),
+                file.canonical_path().cloned(),
+            ));
+        }
         let mut edges = Vec::with_capacity(self.graph_edges.len());
         for edge in &self.graph_edges {
+            if self.is_cancelled() {
+                break;
+            }
             let path = builder.source_span(edge.path.source, edge.path.start, edge.path.end)?;
             let directive = builder.source_span(
                 edge.directive.source,
@@ -1203,9 +1328,15 @@ impl<'a> Preprocessor<'a> {
             related,
         } in self.diags.items()
         {
+            if self.is_cancelled() {
+                break;
+            }
             let primary = builder.source_span(primary.source, primary.start, primary.end)?;
             let mut rendered_related = Vec::with_capacity(related.len());
             for related in related {
+                if self.is_cancelled() {
+                    break;
+                }
                 let span = builder.source_span(
                     related.span.source,
                     related.span.start,
@@ -1270,16 +1401,65 @@ pub(crate) fn preprocess_full(
     Preprocessor::new(manager, root, options)?.run()
 }
 
+#[allow(dead_code)] // Consumed by the optional LSP worker feature.
+pub(crate) fn preprocess_full_cancellable(
+    manager: &mut SourceManager,
+    root: SourceId,
+    options: &PreprocessSettings,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Result<PreparedSource, SpanError>> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    if options.dialect() == PreprocessDialect::Firestorm {
+        const MARKER: &str = "//fspreprocessor off";
+        let file = match manager.file(root) {
+            Some(file) => file,
+            None => return Some(Err(SpanError::UnknownSourceId)),
+        };
+        if let Some(offset) = file.text().find(MARKER) {
+            let result = (|| {
+                let prepared = identity::preprocess_identity(manager, root)?;
+                let primary = prepared
+                    .map()
+                    .source_span(root, offset, offset + MARKER.len())?;
+                let diagnostic = PreprocessDiagnostic {
+                    code: crate::preprocessor::diagnostics::PRE_FIRESTORM_DISABLED,
+                    severity: Severity::Info,
+                    kind: DiagnosticKind::Syntax,
+                    message: "preprocessing disabled by //fspreprocessor off".to_owned(),
+                    primary,
+                    related: Vec::new(),
+                };
+                Ok(prepared.with_preprocess_diagnostics(vec![diagnostic]))
+            })();
+            return (!cancellation.is_cancelled()).then_some(result);
+        }
+    }
+    let processor = match Preprocessor::new_cancellable(manager, root, options, cancellation) {
+        Ok(processor) => processor,
+        Err(error) => return Some(Err(error)),
+    };
+    processor.run_cancellable()
+}
+
 /// Recognize `#` after a block comment that began on an earlier physical line
 /// and closes on this one. Returns `(hash, comment_end)`.
-fn closing_comment_directive(text: &str, start: usize) -> Option<(usize, usize)> {
+fn closing_comment_directive(
+    text: &str,
+    start: usize,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<(usize, usize)> {
+    if cancellation.is_some_and(|token| token.is_cancelled()) {
+        return None;
+    }
     let close = text[start..].find("*/")?;
     let comment_end = start + close + 2;
     if text[start..comment_end].contains('\n') || text[start..comment_end].contains('\r') {
         return None;
     }
     let mut index = comment_end;
-    while index < text.len() {
+    while index < text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
         let ch = text[index..].chars().next().unwrap_or('\0');
         if ch == ' ' || ch == '\t' || ch == '\u{0c}' {
             index += ch.len_utf8();
@@ -1341,10 +1521,17 @@ fn directive_span(source: SourceId, text: &str, start: usize, end: usize) -> Raw
     RawSpan::new(source, start, content_end.max(start))
 }
 
-fn directive_hash(text: &str, start: usize) -> Option<usize> {
+fn directive_hash(
+    text: &str,
+    start: usize,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<usize> {
     let mut index = start;
     loop {
-        while index < text.len() {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return None;
+        }
+        while index < text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
             let ch = text[index..].chars().next().unwrap_or('\0');
             if ch == ' ' || ch == '\t' || ch == '\u{0c}' {
                 index += ch.len_utf8();
@@ -1360,6 +1547,9 @@ fn directive_hash(text: &str, start: usize) -> Option<usize> {
         }
         if text[index..].starts_with("/*") {
             let close = text[index + 2..].find("*/")?;
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return None;
+            }
             let segment = &text[index..index + 2 + close + 2];
             if segment.contains('\n') || segment.contains('\r') {
                 return None;
@@ -1376,10 +1566,15 @@ fn directive_hash(text: &str, start: usize) -> Option<usize> {
     }
 }
 
-fn scan_line(text: &str, start: usize, in_block_comment: bool) -> (usize, bool) {
+fn scan_line(
+    text: &str,
+    start: usize,
+    in_block_comment: bool,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> (usize, bool) {
     let mut index = start;
     let mut in_block = in_block_comment;
-    while index < text.len() {
+    while index < text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
         if in_block {
             if text[index..].starts_with("*/") {
                 in_block = false;
@@ -1394,7 +1589,7 @@ fn scan_line(text: &str, start: usize, in_block_comment: bool) -> (usize, bool) 
             continue;
         }
         if text[index..].starts_with("//") {
-            while index < text.len() {
+            while index < text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let ch = text[index..].chars().next().unwrap_or('\0');
                 if ch == '\n' || ch == '\r' {
                     if is_spliced_newline(text, index) {
@@ -1417,7 +1612,7 @@ fn scan_line(text: &str, start: usize, in_block_comment: bool) -> (usize, bool) 
         let ch = text[index..].chars().next().unwrap_or('\0');
         if ch == '"' {
             index += 1;
-            while index < text.len() {
+            while index < text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if next == '\\' {
                     index += 1;

@@ -9,6 +9,7 @@
 //!
 //! Identifiers are intentionally ASCII-only. Unicode is accepted inside strings
 //! and comments, but an identifier such as `café` produces a lexical diagnostic.
+use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::{Diagnostic, Span};
 
 /// Every token category recognized by the LSL lexer.
@@ -158,6 +159,7 @@ pub struct Token {
 /// Single-pass scanner state over borrowed UTF-8 source.
 struct Lexer<'a> {
     source: &'a str,
+    cancellation: Option<&'a AnalysisCancellationToken>,
     offset: usize,
     line: usize,
     column: usize,
@@ -167,8 +169,16 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(source: &'a str) -> Self {
+        Self::with_cancellation(source, None)
+    }
+
+    fn with_cancellation(
+        source: &'a str,
+        cancellation: Option<&'a AnalysisCancellationToken>,
+    ) -> Self {
         Self {
             source,
+            cancellation,
             offset: 0,
             line: 1,
             column: 1,
@@ -220,15 +230,28 @@ impl<'a> Lexer<'a> {
         (self.tokens, self.diagnostics)
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_some_and(|token| token.is_cancelled())
+    }
+
     fn peek(&self) -> Option<char> {
+        if self.is_cancelled() {
+            return None;
+        }
         self.source.get(self.offset..)?.chars().next()
     }
 
     fn peek_next(&self) -> Option<char> {
+        if self.is_cancelled() {
+            return None;
+        }
         self.source.get(self.offset..)?.chars().nth(1)
     }
 
     fn peek_nth(&self, index: usize) -> Option<char> {
+        if self.is_cancelled() {
+            return None;
+        }
         self.source.get(self.offset..)?.chars().nth(index)
     }
 
@@ -590,12 +613,31 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     Lexer::new(source).run()
 }
 
+/// Internal cancellation-aware lexer used by background analysis.
+pub(crate) fn lex_cancellable(
+    source: &str,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<(Vec<Token>, Vec<Diagnostic>)> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    let result = Lexer::with_cancellation(source, Some(cancellation)).run();
+    (!cancellation.is_cancelled()).then_some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn kinds(source: &str) -> Vec<TokenKind> {
         lex(source).0.into_iter().map(|token| token.kind).collect()
+    }
+
+    #[test]
+    fn cancellable_lexer_discards_a_cancelled_scan() {
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        assert!(lex_cancellable("default { state_entry() {} }", &cancellation).is_none());
     }
 
     #[test]

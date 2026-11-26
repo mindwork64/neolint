@@ -16,3 +16,5 @@ pub use parser::{
 pub use types::{
     AssignmentOperator, BinaryOperator, IncrementOperator, Type, TypeKind, UnaryOperator,
 };
+
+pub(crate) use parser::parse_ast_with_options_cancellable;

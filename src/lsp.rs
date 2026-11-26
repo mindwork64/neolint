@@ -5,11 +5,13 @@
 //! [`crate::source::AnalysisUnit::analyze_with_config`], the same configured entry point used
 //! by library consumers.
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::config::LintConfig;
 use crate::diagnostic::{Severity, Span};
 use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
-use crate::pipeline::AnalysisRun;
+use crate::pipeline::{AnalysisRun, CancellableSetupError};
 use crate::preprocessor::PreprocessSettings;
+use crate::source::unit::CancellableAnalysisError;
 use crate::source::{SourceFile, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
@@ -119,9 +121,8 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
 
-    // Pending work is discarded on shutdown. A running analysis cannot yet be
-    // interrupted inside the analysis engine; the worker is detached and exits
-    // after that invocation returns.
+    // Pending work is discarded and the active analysis receives a cancellation
+    // signal. The worker is detached so shutdown never waits on disk preprocessing.
     worker.stop();
     drop(state);
     drop(connection);
@@ -183,10 +184,16 @@ struct AnalysisResult {
     diagnostics: Result<RootDiagnostics, String>,
 }
 
+struct RunningAnalysis {
+    root_uri: Url,
+    cancellation: AnalysisCancellationToken,
+}
+
 #[derive(Default)]
 struct PendingAnalyses {
     tasks: HashMap<Url, AnalysisTask>,
     order: VecDeque<Url>,
+    running: Option<RunningAnalysis>,
     stopped: bool,
 }
 
@@ -226,27 +233,48 @@ impl AnalysisWorker {
         documents: Arc<HashMap<Url, DocumentState>>,
         config: LintConfig,
     ) {
-        let Some(root) = documents.get(&root_uri) else {
+        let Some(task) =
+            make_analysis_task(root_uri.clone(), Arc::clone(&documents), config.clone())
+        else {
             return;
-        };
-        let task = AnalysisTask {
-            root_uri: root_uri.clone(),
-            root_version: root.version,
-            documents,
-            config,
         };
         let (lock, ready) = &*self.pending;
         let mut pending = lock.lock().expect("analysis queue mutex poisoned");
-        if enqueue_pending(&mut pending, task) {
+        if schedule_pending_task(&mut pending, task, &documents, &config) {
             ready.notify_one();
         }
     }
 
-    fn cancel_pending(&self, root_uri: &Url) {
-        let (lock, _) = &*self.pending;
+    fn cancel_pending(
+        &self,
+        root_uri: &Url,
+        documents: &Arc<HashMap<Url, DocumentState>>,
+        config: Option<&LintConfig>,
+    ) {
+        let (lock, ready) = &*self.pending;
         let mut pending = lock.lock().expect("analysis queue mutex poisoned");
         pending.tasks.remove(root_uri);
         pending.order.retain(|uri| uri != root_uri);
+        if let Some(running) = &pending.running {
+            // Closing any document invalidates every in-flight snapshot because
+            // tasks capture the complete open-document set.
+            running.cancellation.cancel();
+            if &running.root_uri != root_uri {
+                if let Some(config) = config {
+                    if let Some(retry) = make_analysis_task(
+                        running.root_uri.clone(),
+                        Arc::clone(documents),
+                        config.clone(),
+                    ) {
+                        enqueue_pending(&mut pending, retry);
+                    }
+                }
+            }
+        }
+        if let Some(config) = config {
+            refresh_pending_tasks(&mut pending, documents, config);
+        }
+        ready.notify_one();
     }
 
     fn stop(&mut self) {
@@ -255,6 +283,9 @@ impl AnalysisWorker {
         pending.stopped = true;
         pending.tasks.clear();
         pending.order.clear();
+        if let Some(running) = &pending.running {
+            running.cancellation.cancel();
+        }
         ready.notify_one();
         drop(pending);
         // Dropping JoinHandle detaches a currently running analysis. The
@@ -267,6 +298,63 @@ impl Drop for AnalysisWorker {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn make_analysis_task(
+    root_uri: Url,
+    documents: Arc<HashMap<Url, DocumentState>>,
+    config: LintConfig,
+) -> Option<AnalysisTask> {
+    let root = documents.get(&root_uri)?;
+    Some(AnalysisTask {
+        root_uri,
+        root_version: root.version,
+        documents,
+        config,
+    })
+}
+
+fn schedule_pending_task(
+    pending: &mut PendingAnalyses,
+    task: AnalysisTask,
+    documents: &Arc<HashMap<Url, DocumentState>>,
+    config: &LintConfig,
+) -> bool {
+    if let Some(running) = &pending.running {
+        // Every task captures the complete open-document set. Any edit makes
+        // the active snapshot stale, even when a different root was edited.
+        running.cancellation.cancel();
+        if running.root_uri != task.root_uri {
+            // Preserve the interrupted root in FIFO order using the newest
+            // document snapshot, rather than losing its pending diagnostics.
+            if let Some(retry) = make_analysis_task(
+                running.root_uri.clone(),
+                Arc::clone(documents),
+                config.clone(),
+            ) {
+                enqueue_pending(pending, retry);
+            }
+        }
+    }
+    refresh_pending_tasks(pending, documents, config);
+    enqueue_pending(pending, task)
+}
+
+fn refresh_pending_tasks(
+    pending: &mut PendingAnalyses,
+    documents: &Arc<HashMap<Url, DocumentState>>,
+    config: &LintConfig,
+) {
+    let mut refreshed_tasks = HashMap::with_capacity(pending.tasks.len());
+    let mut refreshed_order = VecDeque::with_capacity(pending.order.len());
+    for uri in pending.order.drain(..) {
+        if let Some(task) = make_analysis_task(uri.clone(), Arc::clone(documents), config.clone()) {
+            refreshed_order.push_back(uri.clone());
+            refreshed_tasks.insert(uri, task);
+        }
+    }
+    pending.tasks = refreshed_tasks;
+    pending.order = refreshed_order;
 }
 
 fn enqueue_pending(pending: &mut PendingAnalyses, task: AnalysisTask) -> bool {
@@ -299,7 +387,7 @@ fn analysis_worker_loop(
     result_sender: Sender<AnalysisResult>,
 ) {
     loop {
-        let task = {
+        let (task, cancellation) = {
             let (lock, ready) = &*pending;
             let mut queue = lock.lock().expect("analysis queue mutex poisoned");
             loop {
@@ -308,7 +396,12 @@ fn analysis_worker_loop(
                 }
                 if let Some(uri) = queue.order.pop_front() {
                     if let Some(task) = queue.tasks.remove(&uri) {
-                        break task;
+                        let cancellation = AnalysisCancellationToken::new();
+                        queue.running = Some(RunningAnalysis {
+                            root_uri: task.root_uri.clone(),
+                            cancellation: cancellation.clone(),
+                        });
+                        break (task, cancellation);
                     }
                 } else {
                     queue = ready.wait(queue).expect("analysis queue mutex poisoned");
@@ -328,13 +421,30 @@ fn analysis_worker_loop(
                 .expect("analysis task root document"),
             &task.config,
             task.documents.as_ref(),
+            &cancellation,
         );
+        let was_cancelled =
+            cancellation.is_cancelled() || matches!(result, Err(AnalyzeDocumentError::Cancelled));
+        {
+            let (lock, _) = &*pending;
+            let mut queue = lock.lock().expect("analysis queue mutex poisoned");
+            queue.running = None;
+        }
+        let was_cancelled = was_cancelled || cancellation.is_cancelled();
+        if was_cancelled {
+            continue;
+        }
+        let diagnostics = match result {
+            Ok(diagnostics) => Ok(diagnostics),
+            Err(AnalyzeDocumentError::Failure(error)) => Err(error),
+            Err(AnalyzeDocumentError::Cancelled) => continue,
+        };
         if result_sender
             .send(AnalysisResult {
                 root_uri: task.root_uri,
                 root_version: task.root_version,
                 snapshot_revisions,
-                diagnostics: result,
+                diagnostics,
             })
             .is_err()
         {
@@ -545,8 +655,12 @@ fn handle_notification(
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params)?;
-            worker.cancel_pending(&params.text_document.uri);
             Arc::make_mut(&mut state.documents).remove(&params.text_document.uri);
+            worker.cancel_pending(
+                &params.text_document.uri,
+                &state.documents,
+                state.config.as_ref(),
+            );
             clear_root_diagnostics(connection, state, &params.text_document.uri)?;
         }
         _ => {}
@@ -608,39 +722,75 @@ fn handle_analysis_result(
     Ok(())
 }
 
+#[derive(Debug)]
+enum AnalyzeDocumentError {
+    Cancelled,
+    Failure(String),
+}
+
+impl From<String> for AnalyzeDocumentError {
+    fn from(error: String) -> Self {
+        Self::Failure(error)
+    }
+}
+
 fn analyze_document(
     root_uri: &Url,
     document: &DocumentState,
     config: &LintConfig,
     open_documents: &HashMap<Url, DocumentState>,
-) -> Result<HashMap<Url, Vec<LspDiagnostic>>, String> {
-    let root_path = root_uri
-        .to_file_path()
-        .map_err(|_| format!("unsupported document URI: {root_uri}"))?;
+    cancellation: &AnalysisCancellationToken,
+) -> Result<HashMap<Url, Vec<LspDiagnostic>>, AnalyzeDocumentError> {
+    if cancellation.is_cancelled() {
+        return Err(AnalyzeDocumentError::Cancelled);
+    }
+    let root_path = root_uri.to_file_path().map_err(|_| {
+        AnalyzeDocumentError::Failure(format!("unsupported document URI: {root_uri}"))
+    })?;
     let display_name = root_path.to_string_lossy().into_owned();
 
-    let mut run = AnalysisRun::new().map_err(|error| error.to_string())?;
+    let mut run =
+        AnalysisRun::new().map_err(|error| AnalyzeDocumentError::Failure(error.to_string()))?;
     let unit_index = if config.preprocess_enabled() {
         let settings = PreprocessSettings::full()
             .with_dialect(config.dialect())
             .with_include_dirs(config.include_dirs().to_vec());
-        run.add_preprocessed_text(&display_name, &document.text, settings)
+        run.add_preprocessed_text_cancellable(&display_name, &document.text, settings, cancellation)
+            .map_err(|error| match error {
+                CancellableSetupError::Cancelled => AnalyzeDocumentError::Cancelled,
+                CancellableSetupError::Setup(error) => {
+                    AnalyzeDocumentError::Failure(error.to_string())
+                }
+            })?
     } else if config.engine() == AnalysisEngine::Legacy {
         run.add_legacy_text(&display_name, &document.text)
+            .map_err(|error| AnalyzeDocumentError::Failure(error.to_string()))?
     } else {
         run.add_prepared_text(&display_name, &document.text)
+            .map_err(|error| AnalyzeDocumentError::Failure(error.to_string()))?
+    };
+
+    if cancellation.is_cancelled() {
+        return Err(AnalyzeDocumentError::Cancelled);
     }
-    .map_err(|error| error.to_string())?;
 
     let unit = run
         .unit(unit_index)
         .ok_or_else(|| "analysis unit disappeared after construction".to_owned())?;
     let analysis = unit
-        .analyze_with_config(config, &EngineAnalysisOptions::default())
-        .map_err(|error| error.to_string())?;
+        .analyze_with_config_cancellable(config, &EngineAnalysisOptions::default(), cancellation)
+        .map_err(|error| match error {
+            CancellableAnalysisError::Cancelled => AnalyzeDocumentError::Cancelled,
+            CancellableAnalysisError::Analysis(error) => {
+                AnalyzeDocumentError::Failure(error.to_string())
+            }
+        })?;
 
     let mut open_paths = HashMap::<PathBuf, Url>::new();
     for uri in open_documents.keys() {
+        if cancellation.is_cancelled() {
+            return Err(AnalyzeDocumentError::Cancelled);
+        }
         if let Ok(path) = uri.to_file_path() {
             open_paths.insert(normalize_path(&path), uri.clone());
         }
@@ -651,6 +801,9 @@ fn analyze_document(
     let root_source = unit.root();
 
     for rendered in analysis.diagnostics() {
+        if cancellation.is_cancelled() {
+            return Err(AnalyzeDocumentError::Cancelled);
+        }
         let source_id = rendered.source();
         let Some(source_file) = unit.manager().file(source_id) else {
             continue;
@@ -720,6 +873,9 @@ fn analyze_document(
             ..Default::default()
         };
         output.entry(source_uri).or_default().push(diagnostic);
+    }
+    if cancellation.is_cancelled() {
+        return Err(AnalyzeDocumentError::Cancelled);
     }
     Ok(output)
 }
@@ -1077,6 +1233,59 @@ mod tests {
     }
 
     #[test]
+    fn new_snapshot_cancels_active_analysis_and_requeues_it_before_the_new_root() {
+        let uri_a = Url::parse("file:///tmp/running.lsl").unwrap();
+        let uri_b = Url::parse("file:///tmp/edited.lsl").unwrap();
+        let documents: Arc<HashMap<Url, DocumentState>> = Arc::new(HashMap::from([
+            (
+                uri_a.clone(),
+                DocumentState {
+                    text: Arc::from("root A v2"),
+                    version: 2,
+                    revision: 2,
+                },
+            ),
+            (
+                uri_b.clone(),
+                DocumentState {
+                    text: Arc::from("root B v3"),
+                    version: 3,
+                    revision: 3,
+                },
+            ),
+        ]));
+        let cancellation = AnalysisCancellationToken::new();
+        let mut pending = PendingAnalyses {
+            running: Some(RunningAnalysis {
+                root_uri: uri_a.clone(),
+                cancellation: cancellation.clone(),
+            }),
+            ..PendingAnalyses::default()
+        };
+        let task_b =
+            make_analysis_task(uri_b.clone(), Arc::clone(&documents), LintConfig::default())
+                .unwrap();
+
+        assert!(schedule_pending_task(
+            &mut pending,
+            task_b,
+            &documents,
+            &LintConfig::default(),
+        ));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            pending.order,
+            VecDeque::from([uri_a.clone(), uri_b.clone()])
+        );
+        assert_eq!(pending.tasks.get(&uri_a).unwrap().root_version, 2);
+        assert_eq!(pending.tasks.get(&uri_b).unwrap().root_version, 3);
+        assert!(Arc::ptr_eq(
+            &pending.tasks.get(&uri_a).unwrap().documents,
+            &documents
+        ));
+    }
+
+    #[test]
     fn analysis_result_is_rejected_when_any_open_document_snapshot_changes() {
         let root_uri = Url::parse("file:///tmp/root.lsl").unwrap();
         let include_uri = Url::parse("file:///tmp/shared.lsl").unwrap();
@@ -1252,8 +1461,14 @@ mod tests {
             },
         )]);
 
-        let actual =
-            analyze_document(&uri, &document, &LintConfig::default(), &open_documents).unwrap();
+        let actual = analyze_document(
+            &uri,
+            &document,
+            &LintConfig::default(),
+            &open_documents,
+            &AnalysisCancellationToken::new(),
+        )
+        .unwrap();
         let actual_diagnostics = actual.get(&uri).unwrap();
         assert!(!actual_diagnostics.is_empty());
         assert!(actual_diagnostics

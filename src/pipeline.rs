@@ -10,13 +10,14 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::resolve::RenderedDiagnostic;
 use crate::engine::{
     AnalysisEngine, EngineAnalysisError, EngineAnalysisOptions, RunEngineAnalysis, UnitComparison,
 };
 use crate::preprocessor::config::PreprocessSettings;
 use crate::preprocessor::identity::preprocess_identity;
-use crate::preprocessor::preprocess_with_includes;
+use crate::preprocessor::{preprocess_with_includes, preprocess_with_includes_cancellable};
 use crate::source::file::{AnalysisUnitId, RunId};
 use crate::source::manager::{SourceLoadError, SourceManager, MAX_ANALYSIS_UNITS_PER_INVOCATION};
 use crate::source::map::SpanError;
@@ -127,6 +128,20 @@ impl From<SourceLoadError> for SetupError {
 impl From<SpanError> for SetupError {
     fn from(error: SpanError) -> Self {
         Self::Map(error)
+    }
+}
+
+/// Internal outcome when setting up cancellable background preprocessing.
+#[allow(dead_code)] // Consumed by the optional LSP worker feature.
+#[derive(Debug)]
+pub(crate) enum CancellableSetupError {
+    Cancelled,
+    Setup(SetupError),
+}
+
+impl From<SetupError> for CancellableSetupError {
+    fn from(error: SetupError) -> Self {
+        Self::Setup(error)
     }
 }
 
@@ -251,6 +266,34 @@ impl AnalysisRun {
         let (index, unit_id, mut manager) = self.begin_unit()?;
         let root = manager.load_root_text(display_name, text)?;
         let prepared = preprocess_with_includes(&mut manager, root, options)?;
+        self.units
+            .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
+        Ok(index)
+    }
+
+    /// Add a fully preprocessed text unit with cooperative cancellation.
+    #[allow(dead_code)] // Consumed by the optional LSP worker feature.
+    pub(crate) fn add_preprocessed_text_cancellable(
+        &mut self,
+        display_name: &str,
+        text: &str,
+        options: PreprocessSettings,
+        cancellation: &AnalysisCancellationToken,
+    ) -> Result<usize, CancellableSetupError> {
+        if cancellation.is_cancelled() {
+            return Err(CancellableSetupError::Cancelled);
+        }
+        let (index, unit_id, mut manager) = self.begin_unit()?;
+        let root = manager
+            .load_root_text(display_name, text)
+            .map_err(SetupError::from)?;
+        let prepared =
+            preprocess_with_includes_cancellable(&mut manager, root, &options, cancellation)
+                .ok_or(CancellableSetupError::Cancelled)?
+                .map_err(SetupError::from)?;
+        if cancellation.is_cancelled() {
+            return Err(CancellableSetupError::Cancelled);
+        }
         self.units
             .push(AnalysisUnit::new_prepared(unit_id, manager, prepared));
         Ok(index)
