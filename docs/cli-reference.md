@@ -25,7 +25,7 @@ At least one input is required. With no input, neolint prints help and exits wit
 | `--strict-ossl` | Enable OSSL allowlist checking, including an explicitly empty allowlist; requires an OpenSim target. |
 | `--ossl-function NAME` | Add an OSSL function to the explicit project allowlist (repeatable; requires an OpenSim target). |
 | `--engine ENGINE` | Select the analysis engine: `ast` (default), `legacy`, or `compare`. |
-| `-I DIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
+| `-I DIR`, `-IDIR`, `--include-dir DIR` | Add an include search directory (repeatable, order preserved). |
 | `--include-dir=DIR`, `--dialect=DIALECT`, `--target=PROFILE`, `--target-version=VERSION`, `--ossl-function=NAME`, `--engine=ENGINE` | Equals forms of the corresponding options. |
 
 Options may be repeated where meaningful. `--disable`, `--severity`, and `--ossl-function` values accumulate. Configuration-file settings are applied first; command-line `--disable` and `--severity` are applied afterward and therefore take precedence for the same rule. CLI `--dialect` overrides the configured dialect, CLI `--target` overrides the target profile, CLI `--ossl-function` adds to the configured OSSL allowlist, CLI `--preprocess` enables preprocessing, CLI `--engine` overrides the configured engine, and a non-empty CLI include-directory list replaces the configured list.

@@ -3815,7 +3815,7 @@ over exit-status parity for a suppressed diagnostic.
 - [x] Phase 6H — AST default on the experimental integration branch; Legacy retained and stable `main` left unchanged.
 - [x] v1.1.0 release promotion — AST default is now on stable `main`; Legacy retained; Compare opt-in.
 - [x] **Phase 7 (this Issue)** — implementation record complete on the experimental branch: SEM024–SEM026 are implemented, documented, and regression-tested.
-- [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md); gaps are tracked as Issues #108–#111. Phase 8 is not permission to remove Legacy or change stable `main`.
+- [x] **After Phase 7 / Phase 8** — AST-first stabilization evidence, reproducible benchmark facility, resource-limit reconciliation and two profile-guided fixes are recorded in [`ast-stabilization.md`](ast-stabilization.md). Follow-ups #108–#111 were subsequently completed and closed; their resolutions are summarized there. Phase 8 is not permission to remove Legacy or change stable `main`.
 - [x] Stable-main promotion — AST is the default in v1.1.0; Legacy remains available and Compare remains opt-in.
 
 ---
@@ -3895,101 +3895,88 @@ Evidence: [Second Life Wiki — State](https://wiki.secondlife.com/wiki/State);
 
 ---
 
-## 16. Module structure (proposed, not created in Phase 0)
+## 16. Module layout (implemented)
 
 ```
 src/
   main.rs                 CLI; option parsing; output; exit codes
-  lib.rs                  public API surface (legacy re-exports stay stable)
-  diagnostic.rs           Diagnostic/Span/Severity/DiagnosticKind (shared, frozen)
+  lib.rs                  public Rust library API and re-exports
+  config.rs               line-oriented lint configuration
+  builtins.rs             vendored canonical LSL metadata
+  target.rs               runtime target and API profile definitions
+  diagnostic.rs           Diagnostic/Span/Severity/DiagnosticKind
   diagnostic/
-    resolve.rs            Span bridge use, LegacyDiagnostic tag/root checks,
-                          UnifiedDiagnosticInput -> RenderedDiagnostic
-  lexer.rs                tokenizer only; no directive knowledge
-  parser.rs               legacy token parser: parse_legacy + frozen parse alias
-  semantic.rs             legacy semantic analyzer (frozen behavior)
-  builtins.rs             vendored LSL metadata (unchanged)
-  config.rs               lint configuration (extended additively later)
-
-  source/
-    mod.rs                re-exports
-    file.rs               SourceId { unit, file }, SourceFile, kinds, text
-    line_index.rs         byte offset -> line/column (lexer-compatible)
-    map.rs                unit-bound SourceMap, PreparedSpan, SourceSpan,
-                          private SourceOrigin, OriginId, SpanError, segments,
-                          validated origin arena, EOF anchor, checked resolve_*
-                          with foreign-identity rejection
-    manager.rs            per-unit loading, path policy, cycles, limits
-    unit.rs               RunId/AnalysisUnitId assignment, opaque AnalysisUnit
-                          handle with legacy_root(), source namespace, optional
-                          PreparedSource/SourceMap pair, diagnostics
-
-  preprocessor/
-    mod.rs                preprocess(), PreprocessConfig/Options, PreparedSource with
-                          unit id, prepared_span (only bridge), eof_span
-    identity.rs           Phase 1 identity pass-through
-    directive.rs          Phase 2 raw-text directive scanner
-    macros.rs             macro table, definitions, expansion
-    expr.rs               #if expression evaluator
-    include.rs            include graph, path parsing/resolution
-    builtins.rs           confirmed __FILE__/__LINE__ predefined macros
-    diagnostics.rs        PreprocessDiagnostic constructors, PRE codes
-
-  ast/
-    mod.rs                AST root and re-exports
-    node.rs               node types with spans
-    parser.rs             AST parser and recovery: independent parse_ast
-    ext.rs                Firestorm-only AST nodes/options
-
-  ast_semantic/
-    mod.rs                Phase 6 analyzer entry point
-    scopes.rs
-    types.rs
-    flow.rs
-    rules/                per-rule modules, ownership matrix
-
+    resolve.rs            source-map resolution and rendered diagnostics
+  lexer.rs                tokenizer; no directive knowledge
+  parser.rs               Legacy token parser
+  semantic.rs             Legacy semantic analyzer
+  engine/
+    mod.rs                Legacy/AST/Compare selection and dispatch
+    wiring.rs             parser/semantic diagnostic ownership
+    compare.rs            bounded SEM001–SEM023 comparison
   pipeline.rs             per-unit orchestration shared by CLI/tests
+  source/
+    mod.rs                source model re-exports
+    file.rs               SourceId, SourceFile, kinds and text
+    line_index.rs         byte offset to line/column
+    map.rs                unit-bound SourceMap, spans, origins and resolution
+    manager.rs             per-unit file loading, path policy, cycles and limits
+    unit.rs                AnalysisUnit, unit/run identity and diagnostics
+  preprocessor/
+    mod.rs                preprocessing API and orchestration
+    config.rs             dialect and preprocessing settings
+    token.rs              prepared preprocessing tokens
+    identity.rs           no-expansion identity preparation
+    directive.rs          raw directive scanner and pragma handling
+    macros.rs             macro definitions and expansion support
+    expand.rs              macro expansion engine
+    expr.rs                #if expression evaluator
+    include.rs             include graph, path parsing and resolution
+    builtins.rs            predefined __FILE__/__LINE__ macros
+    diagnostics.rs         preprocessor diagnostic types and PRE codes
+  ast/
+    mod.rs                AST root and parser entry points
+    node.rs               typed AST nodes and spans
+    types.rs               AST expression/type helpers
+    parser.rs              independent AST parser and recovery
+    ext.rs                 Firestorm-only AST nodes and parse options
+  ast_semantic/
+    mod.rs                AST semantic-analysis entry point
+    scopes.rs              lexical scope model
+    types.rs               conservative expression type inference
+    calls.rs               call collection and validation facts
+    expressions.rs         shared expression traversal
+    statements.rs          iterative statement traversal
+    flow.rs                return, jump and control-flow analysis
+    callgraph.rs           bounded user-function reachability graph
+    usage.rs               declaration read/use analysis
+    rules/                 per-rule semantic/lint implementations
 ```
 
 Rules for the structure:
 
 - **Lexer** keeps tokenization, literals, operators, comments, `Span`
   construction, and `Eof`. It must never learn directives, macro tables, or
-  include logic. `#` handling stays as today unless the preprocessor has already
-  removed the text.
-- **Preprocessor** owns everything between raw bytes and prepared bytes:
+  include logic.
+- **Preprocessor** owns the transformation from raw bytes to prepared bytes:
   directive detection, conditional evaluation, macro expansion, include
-  resolution, stringification, pasting, profile built-ins, and the map.
-- **Source Map** lives in `src/source/map.rs` and is owned by an
-  **AnalysisUnit**, not by the CLI invocation, the preprocessor, or the lexer.
-  The preprocessor is its only writer during construction; consumers get an
-  immutable `Arc`. Only the map builder inserts origins, after unit validation;
-  `SourceId`/`OriginId` values never cross unit or run boundaries.
+  resolution, predefined macros and source-map construction.
+- **Source Map** belongs to an **AnalysisUnit**, not the CLI invocation. The
+  preprocessor is its only writer during construction; consumers get immutable
+  source-map data. Unit/run ownership is checked before coordinate geometry.
 - **AST types** live in `src/ast/`; AST semantic rules live in
   `src/ast_semantic/`. The AST must not import preprocessor internals; it only
   sees tokens and spans.
-- **Both parser and semantic engine pairs** are reachable through one pipeline
-  entry point that selects `Legacy`, `Ast`, or `Compare`; they share
-  `Vec<Token>` and the unit's `SourceMap`. `parse_legacy` and `parse_ast` are
-  separate public functions; no engine calls the other for its full result.
-- **Diagnostics** stay in `src/diagnostic.rs` (frozen). The additive
-  `diagnostic/resolve.rs` module owns the `UnifiedDiagnosticInput` conversion:
-  direct location for `Preprocess`, explicit bridge + `SourceMap` for
-  `Prepared`, and tag/root check + pass-through for `Legacy`. It is the only
-  place that builds `RenderedDiagnostic`; no other module may mint a
-  `LegacyDiagnostic` or attach a `SourceId` to one.
-- **`Span` bridge** lives with `PreparedSource` (it needs the prepared text for
-  UTF-8 validation) and returns a unit-stamped `PreparedSpan`; no other module
-  may convert `Span` to prepared coordinates.
-- **Unit identity** is created in `src/source/unit.rs` and embedded in every
-  `SourceId`/`PreparedSpan`/`SourceSpan`/`OriginId`. `RunId` and unit index are
-  generated only there. `SourceMap` checks ownership before geometry; no other
-  module may mint ids, spans, origins, or the opaque `AnalysisUnit` handle.
-
-Modules are created only when their phase starts. Phase 0 does not create empty
-placeholder modules.
-
----
+- **Legacy, AST and Compare** are selected through the engine layer. The parser
+  and semantic implementations remain independent; Compare is bounded and
+  fingerprints only SEM001–SEM023.
+- **Target profiles** in `src/target.rs` select runtime/API metadata separately
+  from the preprocessing dialect. OSSL allowlists remain explicit project
+  configuration, not inferred live permissions.
+- **Diagnostics** pass through the checked source-map resolution path for
+  prepared input; plain-LSL Legacy keeps its direct compatibility path.
+- **Unit identity** is created in `src/source/unit.rs`; source and prepared
+  coordinates cannot be transferred between units or runs.
 
 ## 17. Risks and open questions
 
@@ -4009,20 +3996,22 @@ Risks tracked from the baseline analysis:
    equivalent policy or documented deltas.
 6. Adding a public field to `Diagnostic` or `Token` is a breaking change; prefer
    additive resolution types and keep the core types frozen.
-7. CI runs stable Rust; MSRV 1.75 is not enforced today. New code must avoid
-   post-1.75 std APIs, and an MSRV check should be added when the experimental
-   workflow is extended.
-   **Resolved (Phase 6H):** `.github/workflows/experimental-ci.yml` installs
-   Rust 1.75.0 and runs `cargo test --all-targets --all-features` on it; Phase 8
-   re-verified the same command in its required matrix. New code still avoids
-   post-1.75 std APIs.
-8. The documentation test only scans three source files; new diagnostic families
-   must extend it, or codes can ship undocumented.
-   **Resolved (Phase 6H):** `scripts/test_documentation.py` scans `src/lexer.rs`,
-   `src/parser.rs`, `src/semantic.rs` and every `*.rs` under `src/preprocessor`,
-   `src/ast` and `src/ast_semantic` recursively, so a new `SEM`/`PRE`/`AST`/`LEX`
-   code fails the gate until it is documented. Phase 8 added a documentation test
-   for the AST-only rule family.
+7. CI runs stable Rust; MSRV 1.75 must remain enforced as the compatibility
+   floor, and new code must avoid post-1.75 standard-library APIs.
+   **Resolved:** both `.github/workflows/ci.yml` (stable `main`) and
+   `.github/workflows/experimental-ci.yml` install Rust 1.75.0 and run
+   `cargo +1.75.0 test --all-targets --all-features`. The stable release gate
+   includes this check, not just the experimental workflow.
+8. Every diagnostic code emitted by production code must appear in the
+   diagnostic reference; test-only sentinel codes must not be mistaken for public
+   diagnostics.
+   **Resolved:** `scripts/test_documentation.py` scans `src/main.rs` and
+   `src/source/unit.rs` (including the CLI/unit `PRE039` producers), the Legacy
+   lexer/parser/semantic sources, and every `*.rs` under `src/preprocessor`,
+   `src/ast` and `src/ast_semantic` recursively. A newly emitted
+   `SEM`/`PRE`/`AST`/`LEX` code in those production paths fails the gate until
+   documented. The test suite also checks that the AST-only rule family is
+   represented in the language-support guide.
 9. Preprocessor scope can grow without bound; the phase plan and limits are the
    guardrails.
 10. Firestorm behavior must be documented, not guessed; unknown built-ins stay
@@ -4039,21 +4028,19 @@ Risks tracked from the baseline analysis:
 14. `//fspreprocessor off` is a raw substring match, so it can trigger inside a
     string or comment. This is intentional Firestorm-compatible behavior and
     must not be "fixed" into comment-aware matching.
-15. `#pragma once` is supported by the pinned Boost.Wave but not proven
-    end-to-end through Firestorm's inventory include layer; keep it in the
-    separate compatibility bucket until evidence exists.
-    **Partially resolved (follow-up to Phase 8):** the upstream path is
-    reconstructed from pinned sources (Boost.Wave `boost-1.90.0` commit
-    `d7aa5a3…`, `util/cpp_iterator.hpp:415`/`:1598`,
-    `util/cpp_include_paths.hpp:339`/`:375`, `util/filesystem_compatibility.hpp:69-76`;
-    Firestorm commit `7e44160…`, `indra/newview/fslslpreproc.cpp:57-90`, `:559-754`,
-    `:1312`), and a standalone Boost.Wave 1.90.0 probe with a stubbed
-    inventory/cache hook confirms the library behaviour, including that dot
-    segments are normalised and symlink aliases are not. neolint's
-    Firestorm-profile behaviour has dedicated regression coverage. Real viewer
-    integration and the inventory/asset services remain unverified; see
+15. `#pragma once` is supported by the pinned Boost.Wave, but Firestorm's
+    live Viewer/inventory integration must not be claimed without running that
+    environment.
+    **Scoped evidence completed (Issue #109, PR #113; issue closed):** the
+    upstream path is reconstructed from pinned sources (Boost.Wave
+    `boost-1.90.0` commit `d7aa5a3…`; Firestorm commit `7e44160…`), and a
+    standalone Boost.Wave 1.90.0 probe with a stubbed inventory/cache hook
+    confirms the library behavior. NeoLint's Firestorm-profile behavior has
+    dedicated regression coverage. Live Viewer inventory/asset integration for
+    `#pragma once` remains unverified; see
     `docs/firestorm-preprocessor.md` §"`#pragma once` through the Firestorm
-    include layer".
+    include layer". The separate Lazy List compile/runtime smoke test does not
+    cover this inventory/cache path.
 16. `Span` has no namespace tag. In the preprocessed path every engine `Span`
     is prepared; in plain-LSL mode it is original. Any code that treats an
     engine span as original after preprocessing is a silent mislocation bug.
@@ -4099,13 +4086,16 @@ Decisions and remaining open questions:
   `docs/cli-reference.md`; breaking changes require a separately selected
   JSON v2.
 - **CLI option spelling — resolved by Issue #111 / PR #114.** The implemented
-  preprocessing, dialect, and include-directory options are listed in
-  `neolint --help` and covered by a real-binary regression test.
+  preprocessing, dialect, and include-directory options, including `-IDIR`,
+  are listed in `neolint --help` and covered by a real-binary regression test.
+- **AST/Legacy analysis-budget parity — resolved by Issue #110 / PR #115.**
+  The implementations remain independent, and a regression test guards the
+  corresponding numeric policy values against accidental drift.
 - Whether the prepared buffer is one concatenated string per AnalysisUnit
   (current plan) or one per file (rejected for now: a single buffer keeps token
   spans unambiguous). It is always per unit, never per CLI invocation.
-- MSRV 1.75 is verified by the experimental CI workflow; it is an additional
-  gate beyond the frozen stable quality workflow.
+- MSRV 1.75 is verified by both the stable and experimental CI workflows; the
+  stable `main` release gate runs `cargo +1.75.0 test --all-targets --all-features`.
 
 ---
 

@@ -33,7 +33,7 @@
 
 ## At a glance
 
-Current version: `1.1.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0)
+Current version: `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)
 
 | | |
 |:--|:--|
@@ -42,7 +42,7 @@ Current version: `1.1.0` · [stable release](https://github.com/mindwork64/neoli
 | **Analysis engine** | AST by default · Legacy compatibility mode |
 | **Execution** | Local CLI · deterministic · offline during normal lint runs |
 | **Release binaries** | Linux x86_64 · Windows x86_64 |
-| **Current version** | `1.1.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0) |
+| **Current version** | `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0) |
 
 Neolint is a linter, **not an LSL compiler**. A clean report means only that the checks implemented by neolint found no issue; it does not guarantee acceptance or correct behavior in Second Life or another simulator. The official compiler and target runtime remain authoritative.
 
@@ -50,12 +50,12 @@ Neolint is a linter, **not an LSL compiler**. A clean report means only that the
 
 ### 1. Download
 
-Choose the archive for your platform from the **[v1.1.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.1.0)**:
+Choose the archive for your platform from the **[v1.2.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)**:
 
 | Platform | Archive |
 |:--|:--|
-| Linux x86_64 | <code>neolint-v1.1.0-x86_64-unknown-linux-gnu.tar.gz</code> |
-| Windows x86_64 | <code>neolint-v1.1.0-x86_64-pc-windows-msvc.zip</code> |
+| Linux x86_64 | <code>neolint-v1.2.0-x86_64-unknown-linux-gnu.tar.gz</code> |
+| Windows x86_64 | <code>neolint-v1.2.0-x86_64-pc-windows-msvc.zip</code> |
 
 Verify the downloaded archive using its adjacent <code>.sha256</code> file. The [installation guide](docs/getting-started.md#verify-a-download) contains platform-specific verification commands and full installation steps.
 

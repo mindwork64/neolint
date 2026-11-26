@@ -5,13 +5,13 @@ tests and user-facing documentation; update this file at meaningful boundaries.
 
 ## Current release line
 
-- **v1.1.0 promotes the AST-first implementation to stable `main`.**
+- **v1.2.0 builds on the AST-first stable implementation with deeper semantic analysis, runtime profiles and Firestorm Lazy List support.**
 - `ast` is the default CLI and `LintConfig::default()` engine.
 - `legacy` remains available through `--engine legacy` or `engine = legacy`.
   It is not deprecated or removed in this release.
 - `compare` remains opt-in and is intended for maintainers; it displays Legacy
   diagnostics and reports the semantic comparison on stderr.
-- The v1.1.0 release targets remain Linux x86_64 and Windows x86_64.
+- The v1.2.0 release targets remain Linux x86_64 and Windows x86_64.
 - Neolint remains a deterministic, offline-by-default CLI tool. No IDE
   integration, language server, incremental analysis or autofix is included.
 
@@ -52,13 +52,16 @@ tests and user-facing documentation; update this file at meaningful boundaries.
   types; it is accepted only for the Firestorm lazy-list form. Bare reads,
   compound indexed writes and invalid arities fail closed. Parser/semantic
   regression tests are in `tests/ast_firestorm.rs` and
-  `tests/ast_semantic_rules.rs`; live Viewer/grid verification remains an
-  external manual gate.
+  `tests/ast_semantic_rules.rs`. A real Firestorm-Releasex64 6.6.17.70368
+  (Mono) compile/runtime smoke test confirmed the supported forms in a live
+  region; the malformed one-index list extraction failed compilation as
+  expected. This test does not verify the separate `#pragma once` inventory
+  integration.
 - Target profiles separate platform/runtime from preprocessing dialect. Selectors: second-life-mono (default), second-life-lso, second-life-luau, opensim-xengine, opensim-yengine. OpenSim additionally selects a pinned API version: 0.9.2.2/API20, 0.9.3.0/API22, 0.9.3.1/API23, or master-2026-11-25/API24. YEngine defaults to API24; XEngine is restricted to API20.
 - Pinned catalogues cover LSL function signatures/overloads, OSSL signatures, event handlers and constants. XEngine API20: 425 LL functions / 425 signatures, 231 OSSL names / 258 signatures, 35 events, 770 constants. YEngine API20/API22/API23/API24: 425/434/457/473 LL names, 425/434/458/474 signatures, 231/231/258/265 OSSL names, 258/258/289/296 OSSL signatures, 36/36/37/37 events, 770/780/815/888 constants.
 - XEngine events come from its own lexer/parser event productions; YEngine events come from the event-code enum intersected with handler declarations. SEM047 reports standard SL functions absent from OpenSim; SEM049 reports missing canonical SL events; SEM050 reports missing canonical SL constants.
 - OSSL is separate and is not assumed enabled on a region. OsslAllowlist supports strict-empty mode (ossl_allowlist = strict / --strict-ossl) and repeatable expected-enabled functions; SEM048 warns outside that allowlist. Live permissions are not queried.
-- The selected catalogue flows through overload/arity/type checks, return-type inference, event/constant checking, call graph, namespace and reachability. Real Viewer/OpenSim in-world execution remains a manual external verification step; repository tests validate pinned snapshots and analyzer behavior, not a running grid.
+- The selected catalogue flows through overload/arity/type checks, return-type inference, event/constant checking, call graph, namespace and reachability. The Second Life/OpenSim target-profile catalogues are pinned snapshots and are not claimed to have been exercised against every live runtime; OSSL permissions are not queried. The Lazy List smoke test above is a separate, explicitly verified Firestorm case.
 
 - Legacy and AST remain independent implementations. Compare fingerprints
   semantic diagnostics `SEM001`–`SEM023`; `SEM024`–`SEM050` are AST-only.
@@ -79,9 +82,10 @@ share the same prepared source and source map.
   [`preprocessor-ast.md`](architecture/preprocessor-ast.md).
 - Benchmark methodology and limitations are recorded in
   [`ast-stabilization.md`](architecture/ast-stabilization.md).
-- Phase 8 CI recorded 951 passing Rust tests in debug, release and Rust 1.75,
-  plus Python metadata/harness and documentation tests. The v1.1.0 promotion
-  CI repeats those gates against the release branch and the merge candidate.
+- Phase 8 originally recorded 951 passing Rust tests. The expanded v1.2.0
+  candidate has 1,186 passing Rust tests in Debug, Release and Rust 1.75.0
+  configurations, plus passing Clippy, Rustdoc, Python catalogue/documentation/
+  benchmark/site-content checks and the Astro production build.
 - Real-script save-and-lint experiment used a 1,234-line Firestorm script:
   median save+lint 9.328 ms Legacy, 9.916 ms AST and 10.944 ms Compare on a
   Ryzen 5 2600X. This is a fresh-process CLI measurement, not an incremental
@@ -91,10 +95,12 @@ share the same prepared source and source map.
 
 - `main` is the stable release branch; feature development continues through
   dedicated branches and pull requests.
-- Legacy retirement is not part of v1.1.0 and requires a separate decision.
+- Legacy retirement is not part of v1.2.0 and requires a separate decision.
 - Known evidence limits: benchmark timings are single-host/Linux measurements;
   sub-10 ms rows include process-startup and scheduler noise; peak RSS was
   measured only on Linux. `MAX_TYPE_DEPTH` remains a defensive guard that is
-  unreachable through the current parser.
+  unreachable through the current parser. Firestorm `#pragma once` inventory/
+  asset integration remains unverified even though the separate Lazy List
+  compile/runtime smoke test passed.
 - A clean lint result does not guarantee acceptance by the official compiler
   or any simulator.
