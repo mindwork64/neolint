@@ -98,6 +98,14 @@ impl RenderedDiagnostic {
         &self.diagnostic
     }
 
+    /// Mutable diagnostic access for crate-owned configuration application.
+    ///
+    /// The rendered source identity and related locations remain immutable so
+    /// changing a rule's severity cannot detach the diagnostic from its source.
+    pub(crate) fn diagnostic_mut(&mut self) -> &mut Diagnostic {
+        &mut self.diagnostic
+    }
+
     /// Original file that owns the primary location.
     pub fn source(&self) -> SourceId {
         self.source

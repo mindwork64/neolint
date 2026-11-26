@@ -3,6 +3,7 @@
 //! A unit owns its original sources and either prepared mode (one
 //! `PreparedSource`/`SourceMap` pair) or plain-LSL Legacy mode (neither).
 
+use crate::config::LintConfig;
 use crate::diagnostic::resolve::{LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::compare::compare_semantic_diagnostics;
@@ -179,6 +180,41 @@ impl AnalysisUnit {
             false,
             suppression,
         )
+    }
+
+    /// Analyze this unit using the analysis-related settings in [LintConfig].
+    ///
+    /// The configured engine, target profile, OSSL allowlist, disabled rules,
+    /// and severity overrides are applied while preserving the original source
+    /// identities and related locations. Disabled rules are suppressed before
+    /// the per-unit diagnostic cap is evaluated.
+    ///
+    /// Preprocessing settings (preprocess, dialect, and include_dir) are
+    /// consumed when the unit is created; this method does not reprocess source.
+    /// Use the appropriate AnalysisRun add method and
+    /// [PreprocessSettings](crate::preprocessor::PreprocessSettings) when
+    /// constructing the unit. Call [LintConfig::validate_target_settings]
+    /// before analysis when using OSSL configuration.
+    ///
+    /// God Mode is disabled by default. Call
+    /// [AnalysisUnit::analyze_with_target_options_suppressed_and_god_mode]
+    /// when that explicit Second Life-only opt-in is required.
+    pub fn analyze_with_config(
+        &self,
+        config: &LintConfig,
+        options: &EngineAnalysisOptions,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError> {
+        let suppression = config.display_suppression();
+        let analysis = self.analyze_with_target_options_suppressed(
+            config.engine(),
+            options,
+            config.target(),
+            config.ossl_allowlist(),
+            &suppression,
+        )?;
+        let (mut diagnostics, comparison, tokens) = analysis.into_parts();
+        diagnostics.retain_mut(|rendered| config.apply_to_diagnostic(rendered.diagnostic_mut()));
+        Ok(UnitEngineAnalysis::new(diagnostics, comparison, tokens))
     }
 
     /// Run target-aware AST analysis with an explicit Second Life God Mode opt-in.
