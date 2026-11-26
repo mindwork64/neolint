@@ -736,6 +736,11 @@ impl SourceMap {
 impl AnalysisUnit {
     pub fn id(&self) -> AnalysisUnitId;
     pub fn legacy_root(&self) -> Option<SourceId>;
+    pub fn analyze_with_config(
+        &self,
+        config: &LintConfig,
+        options: &EngineAnalysisOptions,
+    ) -> Result<UnitEngineAnalysis, EngineAnalysisError>;
 }
 
 impl RenderedDiagnostic {
@@ -767,6 +772,18 @@ Contract:
 - `UnifiedDiagnosticInput` is a new additive type; `Diagnostic` is not changed.
   `LegacyDiagnostic` pairs the frozen diagnostic with its producing unit and has
   no public constructor, so the Legacy `SourceId` cannot be selected by callers.
+- AnalysisUnit::analyze_with_config is the configured per-unit entry point
+  for library clients. It selects the engine, target profile and OSSL allowlist
+  from LintConfig, applies disabled-rule suppression before the diagnostic
+  cap, then applies severity overrides to rendered diagnostics. Source ids and
+  related locations remain attached to their original diagnostics.
+- Unit creation still owns preprocessing: preprocess, dialect, and include_dir
+  settings must be reflected in the AnalysisRun::add_* method and
+  PreprocessSettings used to create the unit. analyze_with_config does not
+  reprocess an existing unit. Call LintConfig::validate_target_settings before
+  analysis when using OSSL settings. God Mode remains disabled on this entry
+  point; the existing explicit target-aware API is required for opt-in.
+- LintConfig is re-exported from the crate root for downstream integrations.
 - There is no public constructor for `PreparedSpan`, `SourceOrigin`,
   `OriginId`, `LegacyDiagnostic`, or `RenderedDiagnostic`. They are created only
   by `PreparedSource`, the map builder, the unit pipeline, or the conversion

@@ -34,6 +34,7 @@ pub use ast_semantic::{
     analyze_ast, analyze_ast_with_environment, analyze_ast_with_target,
     analyze_ast_with_target_options,
 };
+pub use config::LintConfig;
 pub use diagnostic::resolve::{
     LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic, UnifiedDiagnosticInput,
 };
