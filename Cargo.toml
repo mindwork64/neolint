@@ -4,20 +4,38 @@ version = "1.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
-description = "CLI-only linter for Linden Scripting Language (LSL)"
+description = "Linden Scripting Language (LSL) linter and language server"
 repository = "https://github.com/mindwork64/neolint"
 
 [[bin]]
 name = "neolint"
 path = "src/main.rs"
 
+[[bin]]
+name = "neolint-lsp"
+path = "src/bin/neolint-lsp.rs"
+required-features = ["lsp"]
+
 [lib]
 name = "neolint"
 path = "src/lib.rs"
 
+[features]
+default = []
+lsp = ["dep:lsp-server", "dep:lsp-types", "dep:serde_json", "dep:url"]
+
 [dependencies]
+lsp-server = { version = "=0.7.7", optional = true }
+lsp-types = { version = "=0.95.1", optional = true }
+serde_json = { version = "1.0", optional = true }
+url = { version = "=2.4.1", optional = true }
 
 [build-dependencies]
 winres = "0.1"
 
 [dev-dependencies]
+
+[[test]]
+name = "lsp_protocol"
+path = "tests/lsp_protocol.rs"
+required-features = ["lsp"]

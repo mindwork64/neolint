@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Core library for the CLI-only LSL linter.
+//! Core library for the LSL linter and its CLI and LSP adapters.
 //!
 //! The crate exposes the established lexical, syntactic, and conservative
 //! semantic pipeline alongside an independent typed AST parser. [`lex`] turns
@@ -21,6 +21,8 @@ pub mod config;
 pub mod diagnostic;
 pub mod engine;
 pub mod lexer;
+#[cfg(feature = "lsp")]
+pub mod lsp;
 pub mod parser;
 pub mod pipeline;
 pub mod preprocessor;

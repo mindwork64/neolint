@@ -40,7 +40,7 @@ Current version: `1.2.0` · [stable release](https://github.com/mindwork64/neoli
 | **Language** | Linden Scripting Language (LSL) |
 | **Implementation** | Rust · no runtime dependencies |
 | **Analysis engine** | AST by default · Legacy compatibility mode |
-| **Execution** | Local CLI · deterministic · offline during normal lint runs |
+| **Execution** | Local CLI and VS Code LSP · deterministic · offline during normal lint runs |
 | **Release binaries** | Linux x86_64 · Windows x86_64 |
 | **Current version** | `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0) |
 
@@ -110,6 +110,7 @@ Neolint organizes findings into four diagnostic families:
 The AST engine is the default in v1.1.0. The previous Legacy engine remains available for compatibility; <code>compare</code> mode is provided for maintainers investigating differences between the two.
 
 **Also included:**
+- A VS Code LSP adapter that reuses the configured Rust analysis API. The initial integration targets local `.lsl` files opened by VS Code, including Firestorm external-editor sessions.
 - Standard LSL preprocessing and an opt-in Firestorm preprocessor profile, independent from target runtime profiles (`second-life-mono`, `second-life-lso`, `second-life-luau`, `opensim-xengine`, `opensim-yengine`). OpenSim profiles include version-pinned LSL/OSSL function overloads, event handlers and constants, plus an explicit OSSL allowlist.
 - Include directories, macro expansion, source locations, and related diagnostic locations.
 - AST-only checks for unused variables and parameters, unreachable functions, global initializers, Firestorm switches, Mono state changes, return/control flow, empty states, nested lists and list comparisons, suspicious `if` assignments, detection-context misuse, state reachability, statically provable math-domain hazards, and invalid operator operands (`SEM024`–`SEM046`), OpenSim API checks (`SEM047`, `SEM049`, `SEM050`) and explicit OSSL allowlist checks (`SEM048`).
@@ -128,6 +129,7 @@ Use this as the map to the project docs. The README stays deliberately concise; 
 | Look up command-line flags, JSON output, or exit codes | **[CLI reference](docs/cli-reference.md)** |
 | Configure rules, severities, and analysis engine | **[Configuration](docs/configuration.md)** |
 | Analyze multiple independent LSL scripts with shared defaults | **[Project model](docs/project-model.md)** |
+| Get live LSL diagnostics in VS Code, including a Firestorm external-editor workflow | **[VS Code language server](docs/language-server.md)** |
 | Understand a diagnostic or decide how to fix it | **[Diagnostic reference](docs/diagnostics.md)** |
 | Check which LSL constructs are supported | **[Language support](docs/language-support.md)** |
 | Use Firestorm preprocessing and syntax extensions | **[Firestorm preprocessor](docs/firestorm-preprocessor.md)** |
