@@ -34,7 +34,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: site/package-lock.json
+          cache-dependency-path: |
+            site/package-lock.json
+            editors/vscode/package-lock.json
 
       - name: Install website dependencies
         working-directory: site
@@ -49,6 +51,14 @@ jobs:
 
       - name: Check documentation contracts
         run: python3 scripts/test_documentation.py
+
+      - name: Install VS Code extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Check and compile the VS Code extension
+        working-directory: editors/vscode
+        run: npm run check && npm run compile
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -65,7 +75,7 @@ jobs:
       - name: Check Rust documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --all-features
 
       - name: Install Rust 1.75.0
         uses: dtolnay/rust-toolchain@stable

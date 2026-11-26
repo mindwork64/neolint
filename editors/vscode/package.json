@@ -1,0 +1,54 @@
+{
+  "name": "neolint-vscode",
+  "displayName": "NeoLint",
+  "description": "LSL diagnostics from the NeoLint analysis engine.",
+  "version": "0.1.0",
+  "publisher": "mindwork64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mindwork64/neolint.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "check": "tsc -p ./ --noEmit"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "NeoLint",
+      "properties": {
+        "neolint.serverPath": {
+          "type": "string",
+          "default": "neolint-lsp",
+          "description": "Path or command used to start the NeoLint language server."
+        },
+        "neolint.serverArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional command-line arguments passed to neolint-lsp."
+        },
+        "neolint.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional NeoLint config path. Relative paths are resolved from the first workspace folder. If empty, the server looks for .neolint.conf in the workspace root."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "18.19.39",
+    "@types/vscode": "1.85.0",
+    "typescript": "5.4.5"
+  }
+}

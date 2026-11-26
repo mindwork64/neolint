@@ -1,6 +1,6 @@
 # Getting started
 
-Neolint is a CLI-only linter for Linden Scripting Language (LSL). It does not replace the official Second Life compiler; a clean lint result does not guarantee compiler or simulator acceptance.
+Neolint is a linter for Linden Scripting Language (LSL), with a command-line interface and a VS Code language server. It does not replace the official Second Life compiler; a clean lint result does not guarantee compiler or simulator acceptance.
 
 ## Supported binary targets
 

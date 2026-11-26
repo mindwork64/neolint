@@ -26,3 +26,8 @@ site/src/env.d.ts
 
 # Local working context / handoff notes (machine-specific, never commit)
 PROJECT_CONTEXT.local.md
+
+# Local VS Code extension build artifacts
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix
