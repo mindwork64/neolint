@@ -11,6 +11,7 @@ use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
 use crate::pipeline::AnalysisRun;
 use crate::preprocessor::PreprocessSettings;
 use crate::source::{SourceFile, SourceSpan};
+use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
@@ -19,10 +20,12 @@ use lsp_types::{
     Url,
 };
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 
 const SERVER_NAME: &str = "NeoLint";
 
@@ -65,39 +68,61 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut state = ServerState {
         config,
-        documents: HashMap::new(),
+        documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
+        next_revision: 0,
     };
+    let mut worker = AnalysisWorker::new()?;
 
-    for message in &connection.receiver {
-        match message {
-            Message::Request(request) => {
-                if connection.handle_shutdown(&request)? {
+    loop {
+        select! {
+            recv(connection.receiver) -> message => {
+                let Ok(message) = message else {
                     break;
-                }
-                let response = Response {
-                    id: request.id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: lsp_server::ErrorCode::MethodNotFound as i32,
-                        message: format!("unsupported request: {}", request.method),
-                        data: None,
-                    }),
                 };
-                connection.sender.send(Message::Response(response))?;
-            }
-            Message::Notification(notification) => {
-                if notification.method == "exit" {
-                    break;
+                match message {
+                    Message::Request(request) => {
+                        if connection.handle_shutdown(&request)? {
+                            break;
+                        }
+                        let response = Response {
+                            id: request.id,
+                            result: None,
+                            error: Some(ResponseError {
+                                code: lsp_server::ErrorCode::MethodNotFound as i32,
+                                message: format!("unsupported request: {}", request.method),
+                                data: None,
+                            }),
+                        };
+                        connection.sender.send(Message::Response(response))?;
+                    }
+                    Message::Notification(notification) => {
+                        if notification.method == "exit" {
+                            break;
+                        }
+                        handle_notification(&connection, &mut state, &worker, notification)?;
+                    }
+                    Message::Response(_) => {}
                 }
-                handle_notification(&connection, &mut state, notification)?;
             }
-            Message::Response(_) => {}
+            recv(worker.results) -> result => {
+                match result {
+                    Ok(result) => {
+                        handle_analysis_result(&connection, &mut state, &worker, result)?;
+                    }
+                    Err(_) => {
+                        eprintln!("{SERVER_NAME} analysis worker stopped unexpectedly");
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    // `lsp-server`'s writer thread exits when the connection sender is
-    // dropped. Drop the connection before joining the stdio threads.
+    // Pending work is discarded on shutdown. A running analysis cannot yet be
+    // interrupted inside the analysis engine; the worker is detached and exits
+    // after that invocation returns.
+    worker.stop();
     drop(state);
     drop(connection);
     io_threads.join()?;
@@ -122,20 +147,200 @@ impl LspInitializationOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DocumentState {
-    text: String,
+    /// Immutable source storage is shared by live state and every queued task.
+    text: Arc<str>,
     version: i32,
+    /// Server-local revision distinguishes snapshots even when an LSP save
+    /// updates text without changing the client-supplied document version.
+    revision: u64,
 }
 
 type RootDiagnostics = HashMap<Url, Vec<LspDiagnostic>>;
 
 struct ServerState {
     config: Option<LintConfig>,
-    documents: HashMap<Url, DocumentState>,
+    /// Copy-on-write snapshots let queued roots share one document map.
+    documents: Arc<HashMap<Url, DocumentState>>,
     /// Per-root diagnostic snapshots, keyed by the URI they belong to.
     /// A single included URI may be present in several root snapshots.
     published_by_root: HashMap<Url, RootDiagnostics>,
+    next_revision: u64,
+}
+
+struct AnalysisTask {
+    root_uri: Url,
+    root_version: i32,
+    documents: Arc<HashMap<Url, DocumentState>>,
+    config: LintConfig,
+}
+
+struct AnalysisResult {
+    root_uri: Url,
+    root_version: i32,
+    snapshot_revisions: HashMap<Url, u64>,
+    diagnostics: Result<RootDiagnostics, String>,
+}
+
+#[derive(Default)]
+struct PendingAnalyses {
+    tasks: HashMap<Url, AnalysisTask>,
+    order: VecDeque<Url>,
+    stopped: bool,
+}
+
+/// A single background worker with a latest-task-per-root pending queue.
+///
+/// New edits replace queued work for the same root. One task may already be
+/// running; its result is accepted only while every open-document snapshot
+/// still matches the live document revisions.
+struct AnalysisWorker {
+    pending: Arc<(Mutex<PendingAnalyses>, Condvar)>,
+    results: Receiver<AnalysisResult>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AnalysisWorker {
+    fn new() -> Result<Self, std::io::Error> {
+        let pending = Arc::new((Mutex::new(PendingAnalyses::default()), Condvar::new()));
+        let worker_pending = Arc::clone(&pending);
+        let (result_sender, results) = crossbeam_channel::unbounded();
+
+        let thread = thread::Builder::new()
+            .name("neolint-lsp-analysis".to_owned())
+            .spawn(move || {
+                analysis_worker_loop(worker_pending, result_sender);
+            })?;
+
+        Ok(Self {
+            pending,
+            results,
+            thread: Some(thread),
+        })
+    }
+
+    fn schedule(
+        &self,
+        root_uri: Url,
+        documents: Arc<HashMap<Url, DocumentState>>,
+        config: LintConfig,
+    ) {
+        let Some(root) = documents.get(&root_uri) else {
+            return;
+        };
+        let task = AnalysisTask {
+            root_uri: root_uri.clone(),
+            root_version: root.version,
+            documents,
+            config,
+        };
+        let (lock, ready) = &*self.pending;
+        let mut pending = lock.lock().expect("analysis queue mutex poisoned");
+        if enqueue_pending(&mut pending, task) {
+            ready.notify_one();
+        }
+    }
+
+    fn cancel_pending(&self, root_uri: &Url) {
+        let (lock, _) = &*self.pending;
+        let mut pending = lock.lock().expect("analysis queue mutex poisoned");
+        pending.tasks.remove(root_uri);
+        pending.order.retain(|uri| uri != root_uri);
+    }
+
+    fn stop(&mut self) {
+        let (lock, ready) = &*self.pending;
+        let mut pending = lock.lock().expect("analysis queue mutex poisoned");
+        pending.stopped = true;
+        pending.tasks.clear();
+        pending.order.clear();
+        ready.notify_one();
+        drop(pending);
+        // Dropping JoinHandle detaches a currently running analysis. The
+        // worker owns no connection state and exits when that analysis ends.
+        let _ = self.thread.take();
+    }
+}
+
+impl Drop for AnalysisWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn enqueue_pending(pending: &mut PendingAnalyses, task: AnalysisTask) -> bool {
+    if pending.stopped {
+        return false;
+    }
+    if !pending.tasks.contains_key(&task.root_uri) {
+        pending.order.push_back(task.root_uri.clone());
+    }
+    pending.tasks.insert(task.root_uri.clone(), task);
+    true
+}
+
+fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) -> bool {
+    state.documents.len() == result.snapshot_revisions.len()
+        && result.snapshot_revisions.iter().all(|(uri, revision)| {
+            state
+                .documents
+                .get(uri)
+                .is_some_and(|document| document.revision == *revision)
+        })
+        && state
+            .documents
+            .get(&result.root_uri)
+            .is_some_and(|document| document.version == result.root_version)
+}
+
+fn analysis_worker_loop(
+    pending: Arc<(Mutex<PendingAnalyses>, Condvar)>,
+    result_sender: Sender<AnalysisResult>,
+) {
+    loop {
+        let task = {
+            let (lock, ready) = &*pending;
+            let mut queue = lock.lock().expect("analysis queue mutex poisoned");
+            loop {
+                if queue.stopped {
+                    return;
+                }
+                if let Some(uri) = queue.order.pop_front() {
+                    if let Some(task) = queue.tasks.remove(&uri) {
+                        break task;
+                    }
+                } else {
+                    queue = ready.wait(queue).expect("analysis queue mutex poisoned");
+                }
+            }
+        };
+
+        let snapshot_revisions = task
+            .documents
+            .iter()
+            .map(|(uri, document)| (uri.clone(), document.revision))
+            .collect();
+        let result = analyze_document(
+            &task.root_uri,
+            task.documents
+                .get(&task.root_uri)
+                .expect("analysis task root document"),
+            &task.config,
+            task.documents.as_ref(),
+        );
+        if result_sender
+            .send(AnalysisResult {
+                root_uri: task.root_uri,
+                root_version: task.root_version,
+                snapshot_revisions,
+                diagnostics: result,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 fn is_newer_version(current: i32, incoming: i32) -> bool {
@@ -266,6 +471,7 @@ fn validate_effective_config(config: &LintConfig) -> Result<(), String> {
 fn handle_notification(
     connection: &Connection,
     state: &mut ServerState,
+    worker: &AnalysisWorker,
     notification: Notification,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match notification.method.as_str() {
@@ -276,14 +482,16 @@ fn handle_notification(
             if !is_lsl_document(&document.uri) {
                 return Ok(());
             }
-            state.documents.insert(
+            state.next_revision = state.next_revision.saturating_add(1);
+            Arc::make_mut(&mut state.documents).insert(
                 document.uri.clone(),
                 DocumentState {
-                    text: document.text,
+                    text: Arc::from(document.text),
                     version: document.version,
+                    revision: state.next_revision,
                 },
             );
-            analyze_and_publish(connection, state, &document.uri)?;
+            analyze_or_schedule(connection, state, worker, &document.uri)?;
         }
         "textDocument/didChange" => {
             let params: lsp_types::DidChangeTextDocumentParams =
@@ -292,32 +500,54 @@ fn handle_notification(
             let Some(change) = params.content_changes.into_iter().last() else {
                 return Ok(());
             };
-            if let Some(document) = state.documents.get_mut(&uri) {
-                // LSP document versions are monotonic. Ignore delayed changes
-                // from an older client snapshot instead of publishing them.
-                if !is_newer_version(document.version, params.text_document.version) {
-                    return Ok(());
-                }
-                document.text = change.text;
-                document.version = params.text_document.version;
-                analyze_and_publish(connection, state, &uri)?;
+            let is_newer = state.documents.get(&uri).is_some_and(|document| {
+                is_newer_version(document.version, params.text_document.version)
+            });
+            if !is_newer {
+                return Ok(());
             }
+            state.next_revision = state.next_revision.saturating_add(1);
+            if let Some(document) = Arc::make_mut(&mut state.documents).get_mut(&uri) {
+                document.text = Arc::from(change.text);
+                document.version = params.text_document.version;
+                document.revision = state.next_revision;
+            }
+            analyze_or_schedule(connection, state, worker, &uri)?;
         }
         "textDocument/didSave" => {
             let params: lsp_types::DidSaveTextDocumentParams =
                 serde_json::from_value(notification.params)?;
-            if let Some(document) = state.documents.get_mut(&params.text_document.uri) {
-                if let Some(text) = params.text {
-                    document.text = text;
+            let uri = params.text_document.uri;
+            let changed = params
+                .text
+                .as_ref()
+                .and_then(|text| {
+                    state
+                        .documents
+                        .get(&uri)
+                        .map(|document| document.text.as_ref() != text.as_str())
+                })
+                .unwrap_or(false);
+            if changed {
+                state.next_revision = state.next_revision.saturating_add(1);
+                if let (Some(text), Some(document)) = (
+                    params.text,
+                    Arc::make_mut(&mut state.documents).get_mut(&uri),
+                ) {
+                    document.text = Arc::from(text);
+                    document.revision = state.next_revision;
                 }
-                analyze_and_publish(connection, state, &params.text_document.uri)?;
+            }
+            if state.documents.contains_key(&uri) {
+                analyze_or_schedule(connection, state, worker, &uri)?;
             }
         }
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params)?;
+            worker.cancel_pending(&params.text_document.uri);
+            Arc::make_mut(&mut state.documents).remove(&params.text_document.uri);
             clear_root_diagnostics(connection, state, &params.text_document.uri)?;
-            state.documents.remove(&params.text_document.uri);
         }
         _ => {}
     }
@@ -328,24 +558,46 @@ fn is_lsl_document(uri: &Url) -> bool {
     uri.scheme() == "file" && uri.path().to_ascii_lowercase().ends_with(".lsl")
 }
 
-fn analyze_and_publish(
+fn analyze_or_schedule(
     connection: &Connection,
     state: &mut ServerState,
+    worker: &AnalysisWorker,
     root_uri: &Url,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Some(document) = state.documents.get(root_uri) else {
+    if !state.documents.contains_key(root_uri) {
         return Ok(());
-    };
+    }
     let Some(config) = &state.config else {
         publish_for_root(connection, state, root_uri, HashMap::new())?;
         return Ok(());
     };
 
-    match analyze_document(root_uri, document, config, &state.documents) {
-        Ok(diagnostics) => publish_for_root(connection, state, root_uri, diagnostics)?,
+    worker.schedule(
+        root_uri.clone(),
+        Arc::clone(&state.documents),
+        config.clone(),
+    );
+    Ok(())
+}
+
+fn handle_analysis_result(
+    connection: &Connection,
+    state: &mut ServerState,
+    worker: &AnalysisWorker,
+    result: AnalysisResult,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if !analysis_snapshot_is_current(state, &result) {
+        // A newer document snapshot arrived while the task was running.
+        // Replacing the pending task coalesces any intermediate edits.
+        analyze_or_schedule(connection, state, worker, &result.root_uri)?;
+        return Ok(());
+    }
+
+    match result.diagnostics {
+        Ok(diagnostics) => publish_for_root(connection, state, &result.root_uri, diagnostics)?,
         Err(error) => {
-            eprintln!("NeoLint analysis failed for {root_uri}: {error}");
-            publish_for_root(connection, state, root_uri, HashMap::new())?;
+            eprintln!("NeoLint analysis failed for {}: {error}", result.root_uri);
+            publish_for_root(connection, state, &result.root_uri, HashMap::new())?;
             send_show_message(
                 connection,
                 MessageType::WARNING,
@@ -417,7 +669,7 @@ fn analyze_document(
         // Included files are currently read from disk by the preprocessor.
         // Do not publish their diagnostics against a different, unsaved editor
         // buffer. Open-document overlays are a later workspace milestone.
-        if source_file.text() != open_source.text {
+        if source_file.text() != open_source.text.as_ref() {
             continue;
         }
 
@@ -439,7 +691,7 @@ fn analyze_document(
             let Some(related_document) = open_documents.get(&related_uri) else {
                 continue;
             };
-            if related_file.text() != related_document.text {
+            if related_file.text() != related_document.text.as_ref() {
                 continue;
             }
             let related_range = source_span_to_range(related_file.text(), related.span)?;
@@ -483,7 +735,7 @@ fn uri_for_open_source(
         .or_else(|| Some(PathBuf::from(source.display_name())))?;
     let uri = open_paths.get(&normalize_path(&path))?.clone();
     let document = open_documents.get(&uri)?;
-    (document.text == source.text()).then_some(uri)
+    (document.text.as_ref() == source.text()).then_some(uri)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -728,22 +980,170 @@ mod tests {
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
-                    text: "newer".to_owned(),
+                    text: Arc::from("newer"),
                     version: 8,
+                    revision: 1,
                 },
-            )]),
+            )])
+            .into(),
             published_by_root: HashMap::new(),
+            next_revision: 1,
         };
         let stale_version = 7;
-        let document = state.documents.get_mut(&uri).unwrap();
+        let document = Arc::make_mut(&mut state.documents).get_mut(&uri).unwrap();
         if is_newer_version(document.version, stale_version) {
-            document.text = "older".to_owned();
+            document.text = Arc::from("older");
             document.version = stale_version;
         }
-        assert_eq!(document.text, "newer");
+        assert_eq!(document.text.as_ref(), "newer");
         assert_eq!(document.version, 8);
         assert!(is_newer_version(8, 9));
         assert!(!is_newer_version(9, 9));
+    }
+
+    #[test]
+    fn document_text_and_document_maps_are_shared_by_analysis_snapshots() {
+        let uri = Url::parse("file:///tmp/shared.lsl").unwrap();
+        let text: Arc<str> = Arc::from("default { state_entry() {} }");
+        let documents = Arc::new(HashMap::from([(
+            uri.clone(),
+            DocumentState {
+                text: Arc::clone(&text),
+                version: 1,
+                revision: 1,
+            },
+        )]));
+
+        let first_snapshot = Arc::clone(&documents);
+        let second_snapshot = Arc::clone(&documents);
+
+        assert!(Arc::ptr_eq(&first_snapshot, &second_snapshot));
+        assert!(Arc::ptr_eq(
+            &first_snapshot.get(&uri).unwrap().text,
+            &second_snapshot.get(&uri).unwrap().text
+        ));
+
+        // An edit gets a new immutable buffer and a new map snapshot. Existing
+        // tasks keep the exact previous text they were scheduled with.
+        let mut updated_documents = Arc::clone(&documents);
+        let updated = Arc::make_mut(&mut updated_documents);
+        updated.get_mut(&uri).unwrap().text = Arc::from("new contents");
+        updated.get_mut(&uri).unwrap().revision = 2;
+
+        assert_eq!(
+            first_snapshot.get(&uri).unwrap().text.as_ref(),
+            "default { state_entry() {} }"
+        );
+        assert_eq!(
+            updated_documents.get(&uri).unwrap().text.as_ref(),
+            "new contents"
+        );
+        assert!(!Arc::ptr_eq(&documents, &updated_documents));
+    }
+
+    #[test]
+    fn pending_analysis_is_coalesced_per_root_without_starving_other_roots() {
+        let uri_a = Url::parse("file:///tmp/a.lsl").unwrap();
+        let uri_b = Url::parse("file:///tmp/b.lsl").unwrap();
+        let make_task = |uri: &Url, version, revision| AnalysisTask {
+            root_uri: uri.clone(),
+            root_version: version,
+            documents: HashMap::from([(
+                uri.clone(),
+                DocumentState {
+                    text: Arc::from(format!("version {version}")),
+                    version,
+                    revision,
+                },
+            )])
+            .into(),
+            config: LintConfig::default(),
+        };
+        let mut pending = PendingAnalyses::default();
+
+        assert!(enqueue_pending(&mut pending, make_task(&uri_a, 1, 1)));
+        assert!(enqueue_pending(&mut pending, make_task(&uri_b, 1, 2)));
+        assert!(enqueue_pending(&mut pending, make_task(&uri_a, 2, 3)));
+        assert_eq!(pending.tasks.len(), 2);
+        assert_eq!(
+            pending.order,
+            VecDeque::from([uri_a.clone(), uri_b.clone()])
+        );
+        assert_eq!(pending.tasks.get(&uri_a).unwrap().root_version, 2);
+
+        pending.stopped = true;
+        assert!(!enqueue_pending(&mut pending, make_task(&uri_a, 3, 4)));
+        assert_eq!(pending.tasks.get(&uri_a).unwrap().root_version, 2);
+    }
+
+    #[test]
+    fn analysis_result_is_rejected_when_any_open_document_snapshot_changes() {
+        let root_uri = Url::parse("file:///tmp/root.lsl").unwrap();
+        let include_uri = Url::parse("file:///tmp/shared.lsl").unwrap();
+        let mut state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: HashMap::from([
+                (
+                    root_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("root"),
+                        version: 4,
+                        revision: 10,
+                    },
+                ),
+                (
+                    include_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("include"),
+                        version: 7,
+                        revision: 11,
+                    },
+                ),
+            ])
+            .into(),
+            published_by_root: HashMap::new(),
+            next_revision: 11,
+        };
+        let result = AnalysisResult {
+            root_uri: root_uri.clone(),
+            root_version: 4,
+            snapshot_revisions: HashMap::from([(root_uri.clone(), 10), (include_uri.clone(), 11)]),
+            diagnostics: Ok(HashMap::new()),
+        };
+
+        assert!(analysis_snapshot_is_current(&state, &result));
+
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&include_uri)
+            .unwrap()
+            .revision = 12;
+        assert!(!analysis_snapshot_is_current(&state, &result));
+
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&include_uri)
+            .unwrap()
+            .revision = 11;
+        Arc::make_mut(&mut state.documents).remove(&root_uri);
+        assert!(!analysis_snapshot_is_current(&state, &result));
+
+        Arc::make_mut(&mut state.documents).insert(
+            root_uri.clone(),
+            DocumentState {
+                text: Arc::from("root"),
+                version: 4,
+                revision: 10,
+            },
+        );
+        let newly_opened_uri = Url::parse("file:///tmp/new.lsl").unwrap();
+        Arc::make_mut(&mut state.documents).insert(
+            newly_opened_uri,
+            DocumentState {
+                text: Arc::from("new"),
+                version: 1,
+                revision: 12,
+            },
+        );
+        assert!(!analysis_snapshot_is_current(&state, &result));
     }
 
     fn test_diagnostic(message: &str) -> LspDiagnostic {
@@ -839,14 +1239,16 @@ mod tests {
         let uri = Url::from_file_path(&path).unwrap();
         let text = "default { state_entry() { integer value = ; } }";
         let document = DocumentState {
-            text: text.to_owned(),
+            text: Arc::from(text),
             version: 4,
+            revision: 1,
         };
         let open_documents = HashMap::from([(
             uri.clone(),
             DocumentState {
-                text: text.to_owned(),
+                text: Arc::from(text),
                 version: 4,
+                revision: 1,
             },
         )]);
 

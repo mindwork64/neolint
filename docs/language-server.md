@@ -17,11 +17,18 @@ second lexer, parser, semantic engine, or set of lint rules.
   settings through `LintConfig`.
 - Workspace `.neolint.conf` discovery or an explicit `neolint.configPath`.
 
-The initial implementation analyzes synchronously on the protocol loop. This
-keeps message and diagnostic publication ordered by document version; it does
-not yet provide background jobs or cooperative cancellation. The document
-version is included in every published diagnostic set so clients can discard
-results for an older snapshot.
+Analysis runs on a single background worker so parsing a large script does
+not block the JSON-RPC event loop from receiving edits, close notifications or
+shutdown. Pending work is coalesced per root document: a newer snapshot replaces
+an older queued snapshot for that root.
+
+An analysis already in progress is not yet cooperatively interruptible inside
+the analysis engine. Its result is discarded if any open-document snapshot or
+the set of open documents changed while it was running; the latest snapshot is
+then queued. Every published diagnostic set carries the current version of its
+own document. Thus an older analysis cannot overwrite diagnostics for a newer
+root or included-file buffer, although the obsolete CPU work may finish before
+the latest task starts.
 
 The initial workspace model uses one workspace configuration. When
 preprocessing is enabled, configured include directories are searched first and
