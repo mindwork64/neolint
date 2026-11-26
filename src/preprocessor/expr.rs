@@ -4,6 +4,7 @@
 //! short-circuit evaluation. All arithmetic is checked; errors are reported and
 //! abort evaluation of the current expression.
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::preprocessor::diagnostics::{
     DiagSink, PRE_DIVISION_BY_ZERO, PRE_EXPRESSION_OVERFLOW, PRE_INVALID_IF_EXPRESSION,
     PRE_INVALID_SHIFT, PRE_MALFORMED_LITERAL,
@@ -52,8 +53,29 @@ pub(crate) struct ExprToken {
 /// Tokenize macro-expanded expression items, reporting malformed literals and
 /// invalid operators. Invalid literals become zero so parsing can continue.
 pub(crate) fn tokenize(items: &[WorkItem], diags: &mut DiagSink) -> Vec<ExprToken> {
+    tokenize_controlled(items, diags, None)
+        .expect("non-cancellable expression tokenization cannot be cancelled")
+}
+
+/// Cancellation-aware tokenization for LSP `#if` and `#elif` expressions.
+pub(crate) fn tokenize_cancellable(
+    items: &[WorkItem],
+    diags: &mut DiagSink,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Vec<ExprToken>> {
+    tokenize_controlled(items, diags, Some(cancellation))
+}
+
+fn tokenize_controlled(
+    items: &[WorkItem],
+    diags: &mut DiagSink,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<Vec<ExprToken>> {
     let mut tokens = Vec::new();
     for item in items {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return None;
+        }
         match item.kind {
             PieceKind::Whitespace | PieceKind::Comment => {}
             PieceKind::Identifier => tokens.push(ExprToken {
@@ -115,7 +137,7 @@ pub(crate) fn tokenize(items: &[WorkItem], diags: &mut DiagSink) -> Vec<ExprToke
             }
         }
     }
-    tokens
+    (!cancellation.is_some_and(|token| token.is_cancelled())).then_some(tokens)
 }
 
 fn operator_token(text: &str) -> Option<ExprTokenKind> {
@@ -183,27 +205,64 @@ pub(crate) fn evaluate(
     expression_span: RawSpan,
     diags: &mut DiagSink,
 ) -> Result<i64, ()> {
+    evaluate_controlled(tokens, expression_span, diags, None)
+        .expect("non-cancellable expression evaluation cannot be cancelled")
+}
+
+/// Cancellation-aware expression evaluation. `None` means the analysis was cancelled.
+pub(crate) fn evaluate_cancellable(
+    tokens: &[ExprToken],
+    expression_span: RawSpan,
+    diags: &mut DiagSink,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Result<i64, ()>> {
+    evaluate_controlled(tokens, expression_span, diags, Some(cancellation))
+}
+
+fn evaluate_controlled(
+    tokens: &[ExprToken],
+    expression_span: RawSpan,
+    diags: &mut DiagSink,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<Result<i64, ()>> {
+    if cancellation.is_some_and(|token| token.is_cancelled()) {
+        return None;
+    }
     let mut parser = Parser {
         tokens,
+        cancellation,
         position: 0,
         depth: 0,
         expression_span,
         diags,
     };
-    let value = parser.parse_conditional(true)?;
+    let value = match parser.parse_conditional(true) {
+        Ok(value) => value,
+        Err(()) => {
+            return if parser.is_cancelled() {
+                None
+            } else {
+                Some(Err(()))
+            };
+        }
+    };
+    if parser.is_cancelled() {
+        return None;
+    }
     if let Some(token) = parser.peek() {
         parser.diags.push(
             PRE_INVALID_IF_EXPRESSION,
             "unexpected token after preprocessor expression",
             token.span,
         );
-        return Err(());
+        return Some(Err(()));
     }
-    Ok(value)
+    Some(Ok(value))
 }
 
 struct Parser<'a> {
     tokens: &'a [ExprToken],
+    cancellation: Option<&'a AnalysisCancellationToken>,
     position: usize,
     depth: usize,
     expression_span: RawSpan,
@@ -211,6 +270,10 @@ struct Parser<'a> {
 }
 
 impl Parser<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_some_and(|token| token.is_cancelled())
+    }
+
     fn peek(&self) -> Option<&ExprToken> {
         self.tokens.get(self.position)
     }
@@ -228,6 +291,9 @@ impl Parser<'_> {
     }
 
     fn enter(&mut self) -> Result<(), ()> {
+        if self.is_cancelled() {
+            return Err(());
+        }
         self.depth += 1;
         if self.depth > MAX_EXPRESSION_DEPTH {
             self.diags.push(
@@ -252,6 +318,9 @@ impl Parser<'_> {
     }
 
     fn parse_conditional_inner(&mut self, eval: bool) -> Result<i64, ()> {
+        if self.is_cancelled() {
+            return Err(());
+        }
         let condition = self.parse_binary(1, eval)?;
         if !matches!(
             self.peek().map(|token| &token.kind),
@@ -286,9 +355,15 @@ impl Parser<'_> {
 
     fn parse_binary(&mut self, min_precedence: u8, eval: bool) -> Result<i64, ()> {
         let mut left = self.parse_unary(eval)?;
-        while let Some((precedence, short_circuit)) =
-            self.peek().and_then(|token| binary_precedence(&token.kind))
-        {
+        loop {
+            if self.is_cancelled() {
+                return Err(());
+            }
+            let Some((precedence, short_circuit)) =
+                self.peek().and_then(|token| binary_precedence(&token.kind))
+            else {
+                break;
+            };
             if precedence < min_precedence {
                 break;
             }
@@ -317,6 +392,9 @@ impl Parser<'_> {
     }
 
     fn parse_unary_inner(&mut self, eval: bool) -> Result<i64, ()> {
+        if self.is_cancelled() {
+            return Err(());
+        }
         let Some(token) = self.peek().cloned() else {
             self.diags.push(
                 PRE_INVALID_IF_EXPRESSION,
@@ -359,6 +437,9 @@ impl Parser<'_> {
     }
 
     fn parse_primary(&mut self, eval: bool) -> Result<i64, ()> {
+        if self.is_cancelled() {
+            return Err(());
+        }
         let Some(token) = self.next().cloned() else {
             self.diags.push(
                 PRE_INVALID_IF_EXPRESSION,
@@ -404,6 +485,9 @@ impl Parser<'_> {
         right: i64,
         eval: bool,
     ) -> Result<i64, ()> {
+        if self.is_cancelled() {
+            return Err(());
+        }
         if !eval {
             return Ok(0);
         }
@@ -535,6 +619,25 @@ mod tests {
         );
         let codes = diags.items().iter().map(|item| item.code).collect();
         (result, codes)
+    }
+
+    #[test]
+    fn cancellable_expression_stages_stop_without_returning_partial_values() {
+        let source_id = SourceId::new(AnalysisUnitId::new(RunId::new(78), 0), 0);
+        let items = [WorkItem {
+            text: "1".to_owned(),
+            kind: PieceKind::Number,
+            span: RawSpan::new(source_id, 0, 1),
+            origin: crate::preprocessor::token::WorkOrigin::Direct,
+        }];
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        let mut diags = DiagSink::new();
+        assert!(tokenize_cancellable(&items, &mut diags, &cancellation).is_none());
+        assert!(
+            evaluate_cancellable(&[], RawSpan::point(source_id, 0), &mut diags, &cancellation,)
+                .is_none()
+        );
     }
 
     #[test]

@@ -655,17 +655,24 @@ fn handle_notification(
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params)?;
-            Arc::make_mut(&mut state.documents).remove(&params.text_document.uri);
-            worker.cancel_pending(
-                &params.text_document.uri,
-                &state.documents,
-                state.config.as_ref(),
-            );
+            let was_tracked =
+                remove_tracked_document(&mut state.documents, &params.text_document.uri);
+            if was_tracked {
+                worker.cancel_pending(
+                    &params.text_document.uri,
+                    &state.documents,
+                    state.config.as_ref(),
+                );
+            }
             clear_root_diagnostics(connection, state, &params.text_document.uri)?;
         }
         _ => {}
     }
     Ok(())
+}
+
+fn remove_tracked_document(documents: &mut Arc<HashMap<Url, DocumentState>>, uri: &Url) -> bool {
+    Arc::make_mut(documents).remove(uri).is_some()
 }
 
 fn is_lsl_document(uri: &Url) -> bool {
@@ -1103,6 +1110,25 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn closing_an_untracked_document_does_not_remove_other_open_documents() {
+        let tracked = Url::parse("file:///tmp/open.lsl").unwrap();
+        let unrelated = Url::parse("file:///tmp/ignored.txt").unwrap();
+        let mut documents = Arc::new(HashMap::from([(
+            tracked.clone(),
+            DocumentState {
+                text: Arc::from("default {}"),
+                version: 1,
+                revision: 1,
+            },
+        )]));
+
+        assert!(!remove_tracked_document(&mut documents, &unrelated));
+        assert!(documents.contains_key(&tracked));
+        assert!(remove_tracked_document(&mut documents, &tracked));
+        assert!(documents.is_empty());
+    }
 
     #[test]
     fn utf16_positions_handle_multibyte_and_surrogate_pairs() {

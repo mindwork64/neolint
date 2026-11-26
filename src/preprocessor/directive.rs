@@ -230,7 +230,19 @@ impl<'a> Preprocessor<'a> {
             if !in_block_comment && !continued {
                 if let Some(hash) = directive_hash(&self.text, position, self.cancellation) {
                     self.flush_pending();
-                    let (mapped, end) = MappedText::logical_line(&self.text, self.source, hash + 1);
+                    let (mapped, end) = if let Some(cancellation) = self.cancellation {
+                        let Some(result) = MappedText::logical_line_cancellable(
+                            &self.text,
+                            self.source,
+                            hash + 1,
+                            cancellation,
+                        ) else {
+                            return;
+                        };
+                        result
+                    } else {
+                        MappedText::logical_line(&self.text, self.source, hash + 1)
+                    };
                     let directive_span = directive_span(self.source, &self.text, hash, end);
                     self.process_directive(line_start, hash, &mapped, directive_span);
                     self.last_directive_end = Some(RawSpan::point(self.source, end));
@@ -1050,7 +1062,16 @@ impl<'a> Preprocessor<'a> {
     fn evaluate_condition(&mut self, rest: &MappedText, opening: RawSpan) -> bool {
         let (_, expression_span) = rest.trimmed();
         let before = self.diags.len();
-        let pieces = tokenize_mapped(rest);
+        let pieces = if let Some(cancellation) = self.cancellation {
+            let Some(pieces) =
+                crate::preprocessor::token::tokenize_mapped_cancellable(rest, cancellation)
+            else {
+                return false;
+            };
+            pieces
+        } else {
+            tokenize_mapped(rest)
+        };
         let items = if let Some(cancellation) = self.cancellation {
             let Some(items) = crate::preprocessor::expand::expand_condition_cancellable(
                 pieces,
@@ -1078,8 +1099,24 @@ impl<'a> Preprocessor<'a> {
                 &self.source_files,
             )
         };
-        let tokens = expr::tokenize(&items, &mut self.diags);
-        let result = expr::evaluate(&tokens, expression_span, &mut self.diags);
+        let result = if let Some(cancellation) = self.cancellation {
+            let Some(tokens) = expr::tokenize_cancellable(&items, &mut self.diags, cancellation)
+            else {
+                return false;
+            };
+            let Some(result) =
+                expr::evaluate_cancellable(&tokens, expression_span, &mut self.diags, cancellation)
+            else {
+                return false;
+            };
+            result
+        } else {
+            let tokens = expr::tokenize(&items, &mut self.diags);
+            expr::evaluate(&tokens, expression_span, &mut self.diags)
+        };
+        if self.is_cancelled() {
+            return false;
+        }
         let after = self.diags.len();
         for index in before..after {
             self.diags

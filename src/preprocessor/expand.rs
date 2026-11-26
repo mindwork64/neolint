@@ -1249,8 +1249,14 @@ pub(crate) fn expand_condition_cancellable(
     if cancellation.is_cancelled() {
         return None;
     }
-    let pieces = resolve_defined(pieces, macros, diags);
-    let items: Vec<WorkItem> = pieces.into_iter().map(WorkItem::from_piece).collect();
+    let pieces = resolve_defined_cancellable(pieces, macros, diags, cancellation)?;
+    let mut items = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        items.push(WorkItem::from_piece(piece));
+    }
     let mut expander = Expander::new_cancellable(
         macros,
         prov,
@@ -1266,9 +1272,28 @@ pub(crate) fn expand_condition_cancellable(
 }
 
 fn resolve_defined(pieces: Vec<Piece>, macros: &MacroTable, diags: &mut DiagSink) -> Vec<Piece> {
+    resolve_defined_controlled(pieces, macros, diags, None)
+        .expect("non-cancellable conditional resolution cannot be cancelled")
+}
+
+fn resolve_defined_cancellable(
+    pieces: Vec<Piece>,
+    macros: &MacroTable,
+    diags: &mut DiagSink,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Vec<Piece>> {
+    resolve_defined_controlled(pieces, macros, diags, Some(cancellation))
+}
+
+fn resolve_defined_controlled(
+    pieces: Vec<Piece>,
+    macros: &MacroTable,
+    diags: &mut DiagSink,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<Vec<Piece>> {
     let mut output = Vec::new();
     let mut index = 0;
-    while index < pieces.len() {
+    while index < pieces.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
         let piece = &pieces[index];
         if piece.kind != PieceKind::Identifier || piece.text != "defined" {
             output.push(piece.clone());
@@ -1278,6 +1303,7 @@ fn resolve_defined(pieces: Vec<Piece>, macros: &MacroTable, diags: &mut DiagSink
         let start = piece.span;
         let mut position = index + 1;
         while position < pieces.len()
+            && !cancellation.is_some_and(|token| token.is_cancelled())
             && matches!(
                 pieces[position].kind,
                 PieceKind::Whitespace | PieceKind::Comment
@@ -1290,6 +1316,7 @@ fn resolve_defined(pieces: Vec<Piece>, macros: &MacroTable, diags: &mut DiagSink
         if position < pieces.len() && pieces[position].text == "(" {
             position += 1;
             while position < pieces.len()
+                && !cancellation.is_some_and(|token| token.is_cancelled())
                 && matches!(
                     pieces[position].kind,
                     PieceKind::Whitespace | PieceKind::Comment
@@ -1302,6 +1329,7 @@ fn resolve_defined(pieces: Vec<Piece>, macros: &MacroTable, diags: &mut DiagSink
                 end = pieces[position].span;
                 position += 1;
                 while position < pieces.len()
+                    && !cancellation.is_some_and(|token| token.is_cancelled())
                     && matches!(
                         pieces[position].kind,
                         PieceKind::Whitespace | PieceKind::Comment
@@ -1339,7 +1367,7 @@ fn resolve_defined(pieces: Vec<Piece>, macros: &MacroTable, diags: &mut DiagSink
         }
         index = position;
     }
-    output
+    (!cancellation.is_some_and(|token| token.is_cancelled())).then_some(output)
 }
 
 #[cfg(test)]
@@ -1373,6 +1401,23 @@ mod tests {
         assert!(!limits.charge(0, 1, &mut diags, span()));
         assert_eq!(diags.items().len(), 1);
         assert_eq!(diags.items()[0].code, PRE_EXPANDED_TOKENS_LIMIT);
+    }
+
+    #[test]
+    fn defined_resolution_stops_when_cancellation_is_signalled() {
+        let pieces = vec![Piece::new(
+            "defined".to_owned(),
+            PieceKind::Identifier,
+            span(),
+        )];
+        let macros = MacroTable::default();
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        let mut diagnostics = DiagSink::new();
+        assert!(
+            resolve_defined_cancellable(pieces, &macros, &mut diagnostics, &cancellation,)
+                .is_none()
+        );
     }
 
     #[test]
