@@ -4,6 +4,7 @@
 //! offsets, understands comments and strings, and supports logical directive
 //! lines joined by backslash-newline.
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::source::file::SourceId;
 
 /// A range in an original source file, before map validation.
@@ -71,6 +72,26 @@ impl MappedText {
     /// applying backslash-newline splicing. Returns the text and the offset just
     /// after the consumed terminator (or EOF).
     pub(crate) fn logical_line(source_text: &str, source: SourceId, start: usize) -> (Self, usize) {
+        Self::logical_line_controlled(source_text, source, start, None)
+            .expect("non-cancellable logical-line scanning cannot be cancelled")
+    }
+
+    /// Cancellation-aware logical-line scanner for LSP preprocessing.
+    pub(crate) fn logical_line_cancellable(
+        source_text: &str,
+        source: SourceId,
+        start: usize,
+        cancellation: &AnalysisCancellationToken,
+    ) -> Option<(Self, usize)> {
+        Self::logical_line_controlled(source_text, source, start, Some(cancellation))
+    }
+
+    fn logical_line_controlled(
+        source_text: &str,
+        source: SourceId,
+        start: usize,
+        cancellation: Option<&AnalysisCancellationToken>,
+    ) -> Option<(Self, usize)> {
         let mut mapped = Self {
             source,
             text: String::new(),
@@ -82,7 +103,7 @@ impl MappedText {
         let mut in_block_comment = false;
         let mut in_line_comment = false;
         let mut in_string = false;
-        while index < source_text.len() {
+        while index < source_text.len() && !cancellation.is_some_and(|token| token.is_cancelled()) {
             if source_text[index..].starts_with('\\') {
                 let after_backslash = index + 1;
                 let newline_len = newline_len_at(source_text, after_backslash);
@@ -96,13 +117,16 @@ impl MappedText {
             let ch = source_text[index..].chars().next().unwrap_or('\0');
             if ch == '\n' || ch == '\r' {
                 if !in_block_comment {
+                    if cancellation.is_some_and(|token| token.is_cancelled()) {
+                        return None;
+                    }
                     mapped.push_run(source_text, run_start, index);
                     let len = if source_text[index..].starts_with("\r\n") {
                         2
                     } else {
                         1
                     };
-                    return (mapped, index + len);
+                    return Some((mapped, index + len));
                 }
                 index += ch.len_utf8();
                 continue;
@@ -129,7 +153,7 @@ impl MappedText {
                     }
                     continue;
                 }
-                if ch == '"' {
+                if ch == '\"' {
                     in_string = false;
                 }
                 index += ch.len_utf8();
@@ -145,13 +169,16 @@ impl MappedText {
                 index += 2;
                 continue;
             }
-            if ch == '"' {
+            if ch == '\"' {
                 in_string = true;
             }
             index += ch.len_utf8();
         }
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return None;
+        }
         mapped.push_run(source_text, run_start, source_text.len());
-        (mapped, source_text.len())
+        Some((mapped, source_text.len()))
     }
 
     /// Build a range with all backslash-newline splices removed. This is used
@@ -336,18 +363,46 @@ pub(crate) fn tokenize_mapped(mapped: &MappedText) -> Vec<Piece> {
     })
 }
 
+/// Tokenize a mapped directive while allowing an LSP analysis to stop promptly.
+pub(crate) fn tokenize_mapped_cancellable(
+    mapped: &MappedText,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Vec<Piece>> {
+    tokenize_with_controlled(
+        mapped.text(),
+        0,
+        mapped.text().len(),
+        |from, to| mapped.raw_span(from, to),
+        Some(cancellation),
+    )
+}
+
 fn tokenize_with<F>(text: &str, start: usize, end: usize, span: F) -> Vec<Piece>
+where
+    F: Fn(usize, usize) -> RawSpan,
+{
+    tokenize_with_controlled(text, start, end, span, None)
+        .expect("non-cancellable tokenization cannot be cancelled")
+}
+
+fn tokenize_with_controlled<F>(
+    text: &str,
+    start: usize,
+    end: usize,
+    span: F,
+    cancellation: Option<&AnalysisCancellationToken>,
+) -> Option<Vec<Piece>>
 where
     F: Fn(usize, usize) -> RawSpan,
 {
     let mut pieces = Vec::new();
     let mut index = start;
-    while index < end {
+    while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
         let ch = text[index..].chars().next().unwrap_or('\0');
         let begin = index;
         if ch.is_whitespace() {
             index += ch.len_utf8();
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if !next.is_whitespace() {
                     break;
@@ -363,7 +418,7 @@ where
         }
         if ch == '/' && text[index..].starts_with("//") {
             index += 2;
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if next == '\n' || next == '\r' {
                     break;
@@ -379,7 +434,7 @@ where
         }
         if ch == '/' && text[index..].starts_with("/*") {
             index += 2;
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 if text[index..].starts_with("*/") {
                     index += 2;
                     break;
@@ -396,7 +451,7 @@ where
         }
         if ch == '"' {
             index += 1;
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if next == '\\' {
                     index += 1;
@@ -422,7 +477,7 @@ where
         }
         if is_identifier_start(ch) {
             index += ch.len_utf8();
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if !is_identifier_continue(next) {
                     break;
@@ -438,7 +493,7 @@ where
         }
         if ch.is_ascii_digit() {
             index += ch.len_utf8();
-            while index < end {
+            while index < end && !cancellation.is_some_and(|token| token.is_cancelled()) {
                 let next = text[index..].chars().next().unwrap_or('\0');
                 if next.is_ascii_alphanumeric() || next == '_' || next == '.' {
                     index += next.len_utf8();
@@ -474,7 +529,7 @@ where
             span(begin, index),
         ));
     }
-    pieces
+    (!cancellation.is_some_and(|token| token.is_cancelled())).then_some(pieces)
 }
 
 const OPERATORS: &[&str] = &[
@@ -560,4 +615,34 @@ pub(crate) fn needs_separator(left: &str, right: &str) -> bool {
         (left_ch, right_ch),
         ('/', '/') | ('/', '*') | ('<', '<') | ('>', '>')
     )
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::cancellation::AnalysisCancellationToken;
+    use crate::source::{AnalysisUnitId, RunId};
+
+    #[test]
+    fn mapped_logical_line_stops_when_cancelled() {
+        let source = SourceId::new(AnalysisUnitId::new(RunId::new(1), 0), 0);
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        assert!(MappedText::logical_line_cancellable(
+            "#if 1 + 2\\\n + 3\n",
+            source,
+            0,
+            &cancellation,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mapped_tokenizer_returns_no_partial_pieces_when_cancelled() {
+        let source = SourceId::new(AnalysisUnitId::new(RunId::new(1), 0), 0);
+        let (mapped, _) = MappedText::logical_line("1 + 2", source, 0);
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+        assert!(tokenize_mapped_cancellable(&mapped, &cancellation).is_none());
+    }
 }

@@ -83,6 +83,26 @@ pub fn preprocess_with_includes(
     }
 }
 
+/// Internal full preprocessing entry point for background analysis.
+#[allow(dead_code)] // Consumed by the optional LSP worker feature.
+pub(crate) fn preprocess_with_includes_cancellable(
+    manager: &mut crate::source::manager::SourceManager,
+    root: crate::source::SourceId,
+    settings: &PreprocessSettings,
+    cancellation: &crate::cancellation::AnalysisCancellationToken,
+) -> Option<Result<PreparedSource, SpanError>> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    let result = match settings.mode() {
+        PreprocessMode::Identity => identity::preprocess_identity(manager, root),
+        PreprocessMode::Full => {
+            directive::preprocess_full_cancellable(manager, root, settings, cancellation)?
+        }
+    };
+    (!cancellation.is_cancelled()).then_some(result)
+}
+
 /// Immutable prepared buffer plus its mapping and preprocessor findings.
 #[derive(Debug)]
 pub struct PreparedSource {
@@ -275,6 +295,25 @@ mod tests {
             }),
             Err(SpanError::OutOfBounds)
         );
+    }
+
+    #[test]
+    fn cancellable_full_preprocessing_discards_a_cancelled_run() {
+        let unit = AnalysisUnitId::new(RunId::new(1), 0);
+        let mut manager = SourceManager::new(unit);
+        let root = manager
+            .load_root_text("root.lsl", "#define VALUE 42\ndefault {}")
+            .unwrap();
+        let cancellation = crate::cancellation::AnalysisCancellationToken::new();
+        cancellation.cancel();
+
+        assert!(preprocess_with_includes_cancellable(
+            &mut manager,
+            root,
+            &PreprocessSettings::full(),
+            &cancellation,
+        )
+        .is_none());
     }
 
     #[test]

@@ -22,13 +22,25 @@ not block the JSON-RPC event loop from receiving edits, close notifications or
 shutdown. Pending work is coalesced per root document: a newer snapshot replaces
 an older queued snapshot for that root.
 
-An analysis already in progress is not yet cooperatively interruptible inside
-the analysis engine. Its result is discarded if any open-document snapshot or
-the set of open documents changed while it was running; the latest snapshot is
-then queued. Every published diagnostic set carries the current version of its
-own document. Thus an older analysis cannot overwrite diagnostics for a newer
-root or included-file buffer, although the obsolete CPU work may finish before
-the latest task starts.
+An edit that changes the open-document snapshot signals cancellation to the
+currently running analysis. The interrupted root is queued again against the
+newest snapshot, and pending roots are refreshed without changing their FIFO
+order. Closing a document cancels an active snapshot as well; the closed root is
+removed while still-open roots are rescheduled. Shutdown signals cancellation
+and does not wait for the worker thread.
+
+The default prepared AST path checks cancellation while scanning source and
+expanding directives/macros, during AST parsing, between semantic passes, and
+while rendering diagnostics. Cancellation discards the whole in-progress
+result: partial diagnostics are never published. The Legacy semantic pass and
+a single filesystem operation (for example, reading one include file) and the
+Firestorm preprocessing-off identity-map path remain non-preemptible; they finish
+the current operation before observing cancellation.
+The Compare engine likewise cannot interrupt its Legacy leg while that pass is
+running. These limits do not weaken stale-result validation: a result is still
+accepted only while every open-document revision and the open-document set
+match the task snapshot. Every published diagnostic set carries the current
+version of its own document.
 
 The initial workspace model uses one workspace configuration. When
 preprocessing is enabled, configured include directories are searched first and

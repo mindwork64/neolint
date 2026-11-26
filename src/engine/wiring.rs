@@ -43,6 +43,17 @@ impl AstSyntax {
         (ast, Self(diagnostics))
     }
 
+    /// Parse with cooperative cancellation for background analysis.
+    pub(crate) fn parse_cancellable(
+        tokens: &[Token],
+        options: AstParseOptions,
+        cancellation: &crate::cancellation::AnalysisCancellationToken,
+    ) -> Option<(Ast, Self)> {
+        let (ast, diagnostics) =
+            crate::ast::parse_ast_with_options_cancellable(tokens, options, cancellation)?;
+        Some((ast, Self(diagnostics)))
+    }
+
     /// Consume the raw parser findings for display rendering.
     pub(crate) fn into_diagnostics(self) -> Vec<Diagnostic> {
         self.0
@@ -80,6 +91,27 @@ pub(crate) fn analyze_ast(
     target: TargetProfile,
 ) -> Vec<Diagnostic> {
     crate::ast_semantic::analyze_ast_with_target(ast, &syntax.0, environment_reliable, target)
+}
+
+/// Run target-aware AST semantics with cooperative cancellation checkpoints.
+pub(crate) fn analyze_ast_with_target_options_cancellable(
+    ast: &Ast,
+    syntax: &AstSyntax,
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+    allow_god_mode: bool,
+    cancellation: &crate::cancellation::AnalysisCancellationToken,
+) -> Option<Vec<Diagnostic>> {
+    crate::ast_semantic::analyze_ast_with_target_options_and_god_mode_cancellable(
+        ast,
+        &syntax.0,
+        environment_reliable,
+        target,
+        ossl_allowlist,
+        allow_god_mode,
+        cancellation,
+    )
 }
 
 /// Run target-aware AST semantics with an explicit OSSL allowlist.

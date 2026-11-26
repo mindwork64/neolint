@@ -3,12 +3,14 @@
 //! A unit owns its original sources and either prepared mode (one
 //! `PreparedSource`/`SourceMap` pair) or plain-LSL Legacy mode (neither).
 
+use crate::cancellation::AnalysisCancellationToken;
 use crate::config::LintConfig;
 use crate::diagnostic::resolve::{LegacyDiagnostic, PreparedDiagnostic, RenderedDiagnostic};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::engine::compare::compare_semantic_diagnostics;
 use crate::engine::wiring::{
     analyze_ast_with_target_options as analyze_ast_semantics,
+    analyze_ast_with_target_options_cancellable as analyze_ast_semantics_cancellable,
     analyze_legacy as analyze_legacy_semantics, AstSyntax, LegacySyntax,
 };
 use crate::engine::{
@@ -22,6 +24,25 @@ use crate::source::manager::SourceManager;
 use crate::source::map::SpanError;
 use crate::target::{OsslAllowlist, TargetProfile};
 use std::sync::Arc;
+
+/// Internal cancellation outcome for background analysis.
+#[derive(Debug)]
+pub(crate) enum CancellableAnalysisError {
+    Cancelled,
+    Analysis(EngineAnalysisError),
+}
+
+impl From<EngineAnalysisError> for CancellableAnalysisError {
+    fn from(error: EngineAnalysisError) -> Self {
+        Self::Analysis(error)
+    }
+}
+
+impl From<SpanError> for CancellableAnalysisError {
+    fn from(error: SpanError) -> Self {
+        Self::Analysis(EngineAnalysisError::Span(error))
+    }
+}
 
 /// One independent analysis of a single root source.
 #[derive(Debug)]
@@ -217,6 +238,57 @@ impl AnalysisUnit {
         Ok(UnitEngineAnalysis::new(diagnostics, comparison, tokens))
     }
 
+    /// Analyze a configured unit with cooperative cancellation for LSP work.
+    #[allow(dead_code)] // Consumed by the optional LSP worker feature.
+    pub(crate) fn analyze_with_config_cancellable(
+        &self,
+        config: &LintConfig,
+        options: &EngineAnalysisOptions,
+        cancellation: &AnalysisCancellationToken,
+    ) -> Result<UnitEngineAnalysis, CancellableAnalysisError> {
+        if cancellation.is_cancelled() {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
+        let suppression = config.display_suppression();
+        let analysis = if let Some(prepared) = &self.prepared {
+            self.analyze_prepared_controlled(
+                prepared,
+                config.engine(),
+                options.collect_tokens,
+                config.target(),
+                config.ossl_allowlist(),
+                false,
+                &suppression,
+                Some(cancellation),
+            )?
+        } else {
+            if config.engine().requires_prepared_source() {
+                return Err(CancellableAnalysisError::Analysis(
+                    EngineAnalysisError::PreparedSourceRequired { unit: self.id },
+                ));
+            }
+            let (diagnostics, tokens) = self.analyze_plain(options.collect_tokens, &suppression)?;
+            if cancellation.is_cancelled() {
+                return Err(CancellableAnalysisError::Cancelled);
+            }
+            UnitEngineAnalysis::new(diagnostics, None, tokens)
+        };
+        if cancellation.is_cancelled() {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
+        let (diagnostics, comparison, tokens) = analysis.into_parts();
+        let mut configured = Vec::with_capacity(diagnostics.len());
+        for mut rendered in diagnostics {
+            if cancellation.is_cancelled() {
+                return Err(CancellableAnalysisError::Cancelled);
+            }
+            if config.apply_to_diagnostic(rendered.diagnostic_mut()) {
+                configured.push(rendered);
+            }
+        }
+        Ok(UnitEngineAnalysis::new(configured, comparison, tokens))
+    }
+
     /// Run target-aware AST analysis with an explicit Second Life God Mode opt-in.
     /// This additive entry point preserves the existing `EngineAnalysisOptions` contract.
     pub fn analyze_with_target_options_suppressed_and_god_mode(
@@ -316,6 +388,44 @@ impl AnalysisUnit {
         allow_god_mode: bool,
         suppression: &DisplaySuppression,
     ) -> Result<UnitEngineAnalysis, SpanError> {
+        match self.analyze_prepared_controlled(
+            prepared,
+            engine,
+            collect_tokens,
+            target,
+            ossl_allowlist,
+            allow_god_mode,
+            suppression,
+            None,
+        ) {
+            Ok(result) => Ok(result),
+            Err(CancellableAnalysisError::Analysis(EngineAnalysisError::Span(error))) => Err(error),
+            Err(CancellableAnalysisError::Cancelled) => {
+                unreachable!("no cancellation token was supplied")
+            }
+            Err(CancellableAnalysisError::Analysis(
+                EngineAnalysisError::PreparedSourceRequired { .. },
+            )) => {
+                unreachable!("prepared analysis does not require a plain-source error")
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn analyze_prepared_controlled(
+        &self,
+        prepared: &PreparedSource,
+        engine: AnalysisEngine,
+        collect_tokens: bool,
+        target: TargetProfile,
+        ossl_allowlist: &OsslAllowlist,
+        allow_god_mode: bool,
+        suppression: &DisplaySuppression,
+        cancellation: Option<&AnalysisCancellationToken>,
+    ) -> Result<UnitEngineAnalysis, CancellableAnalysisError> {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
         let mut rendered = Vec::new();
         for diagnostic in prepared.preprocess_diagnostics() {
             rendered.push(RenderedDiagnostic::from_preprocess(
@@ -324,7 +434,15 @@ impl AnalysisUnit {
             )?);
         }
         let text = prepared.text();
-        let (tokens, lexical) = crate::lex(text);
+        let (tokens, lexical) = if let Some(cancellation) = cancellation {
+            crate::lexer::lex_cancellable(text, cancellation)
+                .ok_or(CancellableAnalysisError::Cancelled)?
+        } else {
+            crate::lex(text)
+        };
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
         // Error-severity preprocessing may have dropped source before this text
         // was produced, and error-severity lexical diagnostics mean parts of it
         // were not tokenized. Either makes the Phase 7 read/use and reachability
@@ -351,15 +469,36 @@ impl AnalysisUnit {
                 display
             }
             AnalysisEngine::Ast => {
-                let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(
-                    &ast,
-                    &ast_syntax,
-                    environment_reliable,
-                    target,
-                    ossl_allowlist,
-                    allow_god_mode,
-                );
+                let (ast, ast_syntax) = if let Some(cancellation) = cancellation {
+                    AstSyntax::parse_cancellable(&tokens, options, cancellation)
+                        .ok_or(CancellableAnalysisError::Cancelled)?
+                } else {
+                    AstSyntax::parse(&tokens, options)
+                };
+                let ast_semantic = if let Some(cancellation) = cancellation {
+                    analyze_ast_semantics_cancellable(
+                        &ast,
+                        &ast_syntax,
+                        environment_reliable,
+                        target,
+                        ossl_allowlist,
+                        allow_god_mode,
+                        cancellation,
+                    )
+                    .ok_or(CancellableAnalysisError::Cancelled)?
+                } else {
+                    analyze_ast_semantics(
+                        &ast,
+                        &ast_syntax,
+                        environment_reliable,
+                        target,
+                        ossl_allowlist,
+                        allow_god_mode,
+                    )
+                };
+                if cancellation.is_some_and(|token| token.is_cancelled()) {
+                    return Err(CancellableAnalysisError::Cancelled);
+                }
                 let mut display = lexical;
                 display.extend(ast_syntax.into_diagnostics());
                 display.extend(ast_semantic);
@@ -368,15 +507,36 @@ impl AnalysisUnit {
             AnalysisEngine::Compare => {
                 let legacy_syntax = LegacySyntax::parse(&tokens);
                 let legacy_semantic = analyze_legacy_semantics(&tokens, &legacy_syntax);
-                let (ast, ast_syntax) = AstSyntax::parse(&tokens, options);
-                let ast_semantic = analyze_ast_semantics(
-                    &ast,
-                    &ast_syntax,
-                    environment_reliable,
-                    target,
-                    ossl_allowlist,
-                    allow_god_mode,
-                );
+                let (ast, ast_syntax) = if let Some(cancellation) = cancellation {
+                    AstSyntax::parse_cancellable(&tokens, options, cancellation)
+                        .ok_or(CancellableAnalysisError::Cancelled)?
+                } else {
+                    AstSyntax::parse(&tokens, options)
+                };
+                let ast_semantic = if let Some(cancellation) = cancellation {
+                    analyze_ast_semantics_cancellable(
+                        &ast,
+                        &ast_syntax,
+                        environment_reliable,
+                        target,
+                        ossl_allowlist,
+                        allow_god_mode,
+                        cancellation,
+                    )
+                    .ok_or(CancellableAnalysisError::Cancelled)?
+                } else {
+                    analyze_ast_semantics(
+                        &ast,
+                        &ast_syntax,
+                        environment_reliable,
+                        target,
+                        ossl_allowlist,
+                        allow_god_mode,
+                    )
+                };
+                if cancellation.is_some_and(|token| token.is_cancelled()) {
+                    return Err(CancellableAnalysisError::Cancelled);
+                }
                 comparison = Some(compare_semantic_diagnostics(
                     &legacy_semantic,
                     &ast_semantic,
@@ -387,11 +547,17 @@ impl AnalysisUnit {
                 display
             }
         };
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
         // Validate the prepared source once per unit: the check compares the whole
         // prepared buffer, so doing it per diagnostic made rendering quadratic in
         // the number of diagnostics.
         RenderedDiagnostic::validate(prepared)?;
         for diagnostic in display {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return Err(CancellableAnalysisError::Cancelled);
+            }
             rendered.push(RenderedDiagnostic::from_prepared_validated(
                 PreparedDiagnostic::new(
                     diagnostic.code,
@@ -403,6 +569,9 @@ impl AnalysisUnit {
                 prepared,
             )?);
         }
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(CancellableAnalysisError::Cancelled);
+        }
         if suppression.is_empty() {
             crate::preprocessor::diagnostics::cap_rendered(prepared, &mut rendered)?;
         } else {
@@ -411,6 +580,9 @@ impl AnalysisUnit {
                 &mut rendered,
                 |diagnostic| !suppression.is_suppressed(diagnostic.diagnostic().code),
             )?;
+        }
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(CancellableAnalysisError::Cancelled);
         }
         let tokens = if collect_tokens { tokens } else { Vec::new() };
         Ok(UnitEngineAnalysis::new(rendered, comparison, tokens))
@@ -441,6 +613,21 @@ mod engine_tests {
         let mut run = AnalysisRun::new().unwrap();
         let index = run.add_prepared_text("root.lsl", source).unwrap();
         (run, index)
+    }
+
+    #[test]
+    fn cancellable_configured_analysis_returns_no_partial_result_when_cancelled() {
+        let (run, index) = prepared_unit("default { state_entry() { integer value = 1; } }");
+        let unit = run.unit(index).unwrap();
+        let cancellation = AnalysisCancellationToken::new();
+        cancellation.cancel();
+
+        let result = unit.analyze_with_config_cancellable(
+            &LintConfig::default(),
+            &EngineAnalysisOptions::default(),
+            &cancellation,
+        );
+        assert!(matches!(result, Err(CancellableAnalysisError::Cancelled)));
     }
 
     /// The AST engine display is exactly `lexical ++ ast_syntax ++ ast_semantic`,

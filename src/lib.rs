@@ -14,6 +14,8 @@
 //! unresolved expressions, and unverified language behavior are deliberately
 //! left unchecked rather than guessed.
 
+mod cancellation;
+
 pub mod ast;
 pub mod ast_semantic;
 pub mod builtins;
