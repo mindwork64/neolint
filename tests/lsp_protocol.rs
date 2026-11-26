@@ -1,69 +1,201 @@
 use serde_json::{json, Value};
 use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn frame(value: Value) -> String {
     let body = serde_json::to_string(&value).unwrap();
     format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
 }
 
-fn read_frames(mut bytes: &[u8]) -> Vec<Value> {
-    let mut messages = Vec::new();
-    while !bytes.is_empty() {
-        let header_end = bytes
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .expect("LSP frame header terminator");
-        let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
-        let length = header
-            .lines()
-            .find_map(|line| line.strip_prefix("Content-Length:"))
-            .unwrap()
-            .trim()
-            .parse::<usize>()
-            .unwrap();
-        let body_start = header_end + 4;
-        let body_end = body_start + length;
-        let value = serde_json::from_slice(&bytes[body_start..body_end]).unwrap();
-        messages.push(value);
-        bytes = &bytes[body_end..];
+fn read_frame(reader: &mut impl BufRead) -> std::io::Result<Option<Value>> {
+    let mut content_length = None;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(std::io::Error::other)?,
+            );
+        }
     }
-    messages
+
+    let length = content_length.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing Content-Length")
+    })?;
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(std::io::Error::other)
 }
 
-#[test]
-fn stdio_lsp_initializes_publishes_and_clears_diagnostics_then_shuts_down() {
+struct LspClient {
+    input: Option<ChildStdin>,
+    messages: Receiver<Value>,
+    child: Child,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl LspClient {
+    fn new(workspace_uri: &str) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start neolint-lsp binary");
+        let input = child.stdin.take().expect("piped LSP stdin");
+        let stdout = child.stdout.take().expect("piped LSP stdout");
+        let (sender, messages) = mpsc::channel();
+
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                match read_frame(&mut reader) {
+                    Ok(Some(message)) => {
+                        if sender.send(message).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) | Err(_) => return,
+                }
+            }
+        });
+
+        let mut client = Self {
+            input: Some(input),
+            messages,
+            child,
+            reader: Some(reader),
+        };
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": workspace_uri,
+                "capabilities": {}
+            }
+        }));
+        client.receive_until(|message| {
+            message.get("id") == Some(&json!(1)) && message.get("result").is_some()
+        });
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }));
+        client
+    }
+
+    fn send(&mut self, message: Value) {
+        self.input
+            .as_mut()
+            .expect("LSP client is still connected")
+            .write_all(frame(message).as_bytes())
+            .expect("write LSP frame");
+    }
+
+    fn receive_until(&self, mut predicate: impl FnMut(&Value) -> bool) -> Vec<Value> {
+        let mut received = Vec::new();
+        loop {
+            let message = self
+                .messages
+                .recv_timeout(Duration::from_secs(15))
+                .unwrap_or_else(|error| {
+                    panic!("timed out waiting for LSP message ({error}); received: {received:#?}")
+                });
+            let matched = predicate(&message);
+            received.push(message);
+            if matched {
+                return received;
+            }
+        }
+    }
+
+    fn shutdown(mut self) {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": null
+        }));
+        self.receive_until(|message| {
+            message.get("id") == Some(&json!(2)) && message.get("result") == Some(&Value::Null)
+        });
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": null
+        }));
+        self.input.take();
+        let status = self.child.wait().expect("wait for LSP server");
+        assert!(status.success(), "LSP server exited with {status}");
+        if let Some(reader) = self.reader.take() {
+            reader.join().expect("join LSP stdout reader");
+        }
+    }
+}
+
+impl Drop for LspClient {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn is_publish(message: &Value, uri: &str, version: Option<i32>) -> bool {
+    if message.get("method") != Some(&json!("textDocument/publishDiagnostics"))
+        || message["params"]["uri"] != json!(uri)
+    {
+        return false;
+    }
+    match version {
+        Some(version) => message["params"]["version"] == json!(version),
+        None => message["params"]
+            .get("version")
+            .map_or(true, Value::is_null),
+    }
+}
+
+fn unique_workspace(prefix: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let workspace = std::env::temp_dir().join(format!("neolint-lsp-protocol-{unique}"));
+    let workspace = std::env::temp_dir().join(format!("{prefix}-{unique}"));
     fs::create_dir_all(&workspace).unwrap();
+    workspace
+}
+
+#[test]
+fn stdio_lsp_publishes_current_versions_and_clears_diagnostics_on_close() {
+    let workspace = unique_workspace("neolint-lsp-protocol");
     let source_path = workspace.join("script.lsl");
     let source_uri = url::Url::from_file_path(&source_path).unwrap().to_string();
     let workspace_uri = url::Url::from_directory_path(&workspace)
         .unwrap()
         .to_string();
+    let mut client = LspClient::new(&workspace_uri);
 
-    let mut input = String::new();
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "processId": null,
-            "rootUri": workspace_uri,
-            "capabilities": {}
-        }
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
-    })));
-    input.push_str(&frame(json!({
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
@@ -74,8 +206,18 @@ fn stdio_lsp_initializes_publishes_and_clears_diagnostics_then_shuts_down() {
                 "text": "default { state_entry() { integer value = ; } }"
             }
         }
-    })));
-    input.push_str(&frame(json!({
+    }));
+    let first = client.receive_until(|message| is_publish(message, &source_uri, Some(1)));
+    let first_publication = first
+        .iter()
+        .find(|message| is_publish(message, &source_uri, Some(1)))
+        .unwrap();
+    assert!(!first_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didChange",
         "params": {
@@ -84,10 +226,19 @@ fn stdio_lsp_initializes_publishes_and_clears_diagnostics_then_shuts_down() {
                 "text": "default { state_entry() { llOwnerSay(\"fine\"); } }"
             }]
         }
-    })));
-    // A delayed old snapshot must not replace the version-2 document or its
-    // diagnostics after a newer version has already been analyzed.
-    input.push_str(&frame(json!({
+    }));
+    let second = client.receive_until(|message| is_publish(message, &source_uri, Some(2)));
+    let second_publication = second
+        .iter()
+        .find(|message| is_publish(message, &source_uri, Some(2)))
+        .unwrap();
+    assert!(second_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // A delayed old snapshot must not replace the current document state.
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didChange",
         "params": {
@@ -96,78 +247,46 @@ fn stdio_lsp_initializes_publishes_and_clears_diagnostics_then_shuts_down() {
                 "text": "default { state_entry() { integer value = ; } }"
             }]
         }
-    })));
-    input.push_str(&frame(json!({
+    }));
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didClose",
         "params": { "textDocument": { "uri": source_uri } }
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "shutdown",
-        "params": null
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": null
-    })));
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start neolint-lsp binary");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "server failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let messages = read_frames(&output.stdout);
-    assert!(messages.iter().any(|message| {
-        message.get("id") == Some(&json!(1)) && message.get("result").is_some()
     }));
-    assert!(messages.iter().any(|message| {
-        message.get("id") == Some(&json!(2)) && message.get("result") == Some(&Value::Null)
-    }));
-
-    let published: Vec<_> = messages
+    let closed = client.receive_until(|message| is_publish(message, &source_uri, None));
+    let cleared = closed
         .iter()
-        .filter(|message| message.get("method") == Some(&json!("textDocument/publishDiagnostics")))
-        .collect();
-    assert_eq!(published.len(), 3, "{messages:#?}");
-    let first = published[0]["params"].as_object().unwrap();
-    assert_eq!(first["version"], json!(1));
-    assert!(!first["diagnostics"].as_array().unwrap().is_empty());
-    let second = published[1]["params"].as_object().unwrap();
-    assert_eq!(second["version"], json!(2));
-    assert!(second["diagnostics"].as_array().unwrap().is_empty());
-    let cleared = published[2]["params"].as_object().unwrap();
-    assert_eq!(cleared["uri"], json!(source_uri));
-    assert!(cleared["diagnostics"].as_array().unwrap().is_empty());
+        .find(|message| is_publish(message, &source_uri, None))
+        .unwrap();
+    assert!(cleared["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
+    client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
+}
+
+fn diagnostic_roots(diagnostics: &[Value]) -> (bool, bool) {
+    let mut root_a = false;
+    let mut root_b = false;
+    for diagnostic in diagnostics {
+        for related in diagnostic["relatedInformation"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let uri = related["location"]["uri"].as_str().unwrap_or_default();
+            root_a |= uri.ends_with("/a.lsl");
+            root_b |= uri.ends_with("/b.lsl");
+        }
+    }
+    (root_a, root_b)
 }
 
 #[test]
 fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let workspace = std::env::temp_dir().join(format!("neolint-lsp-shared-{unique}"));
-    fs::create_dir_all(&workspace).unwrap();
-
+    let workspace = unique_workspace("neolint-lsp-shared");
     let shared_path = workspace.join("shared.lsl");
     let root_a_path = workspace.join("a.lsl");
     let root_b_path = workspace.join("b.lsl");
@@ -190,24 +309,9 @@ fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
     let root_a_text = fs::read_to_string(&root_a_path).unwrap();
     let root_b_text = fs::read_to_string(&root_b_path).unwrap();
     let valid_root_text = "default { state_entry() {} }";
+    let mut client = LspClient::new(&workspace_uri);
 
-    let mut input = String::new();
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "processId": null,
-            "rootUri": workspace_uri,
-            "capabilities": {}
-        }
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
-    })));
-    input.push_str(&frame(json!({
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
@@ -218,8 +322,8 @@ fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
                 "text": shared_text
             }
         }
-    })));
-    input.push_str(&frame(json!({
+    }));
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
@@ -230,8 +334,8 @@ fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
                 "text": root_a_text
             }
         }
-    })));
-    input.push_str(&frame(json!({
+    }));
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
@@ -242,97 +346,87 @@ fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
                 "text": root_b_text
             }
         }
-    })));
+    }));
 
-    // Root A stops including shared.lsl. Root B's distinct include-context
-    // diagnostic for the same URI must remain published.
-    input.push_str(&frame(json!({
+    let initial = client.receive_until(|message| {
+        if !is_publish(message, &shared_uri, Some(1)) {
+            return false;
+        }
+        let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+        diagnostic_roots(diagnostics) == (true, true)
+    });
+    let initial_shared = initial
+        .iter()
+        .rev()
+        .find(|message| {
+            if !is_publish(message, &shared_uri, Some(1)) {
+                return false;
+            }
+            let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+            diagnostic_roots(diagnostics) == (true, true)
+        })
+        .unwrap();
+    assert!(!initial_shared["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Root A stops including shared.lsl. Root B's distinct diagnostic for the
+    // same URI must remain published.
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didChange",
         "params": {
             "textDocument": { "uri": root_a_uri, "version": 2 },
             "contentChanges": [{ "text": valid_root_text }]
         }
-    })));
+    }));
+    let after_a = client.receive_until(|message| {
+        if !is_publish(message, &shared_uri, Some(1)) {
+            return false;
+        }
+        let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+        diagnostic_roots(diagnostics) == (false, true)
+    });
+    let after_a_shared = after_a
+        .iter()
+        .rev()
+        .find(|message| {
+            if !is_publish(message, &shared_uri, Some(1)) {
+                return false;
+            }
+            let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+            diagnostic_roots(diagnostics) == (false, true)
+        })
+        .unwrap();
+    assert!(!after_a_shared["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
-    // When the final including root also stops referencing it, the shared
-    // URI's aggregate diagnostics must be cleared.
-    input.push_str(&frame(json!({
+    // When the final including root also stops referencing it, the shared URI
+    // diagnostics are cleared.
+    client.send(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didChange",
         "params": {
             "textDocument": { "uri": root_b_uri, "version": 2 },
             "contentChanges": [{ "text": valid_root_text }]
         }
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "shutdown",
-        "params": null
-    })));
-    input.push_str(&frame(json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": null
-    })));
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start neolint-lsp binary");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "server failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let messages = read_frames(&output.stdout);
-    let shared_publications: Vec<_> = messages
-        .iter()
-        .filter(|message| {
-            message.get("method") == Some(&json!("textDocument/publishDiagnostics"))
-                && message["params"]["uri"] == json!(shared_uri)
-        })
-        .collect();
-    assert_eq!(shared_publications.len(), 5, "{shared_publications:#?}");
-
-    let after_root_a_reanalysis = shared_publications[3]["params"]["diagnostics"]
-        .as_array()
-        .unwrap();
-    assert!(!after_root_a_reanalysis.is_empty());
-    assert!(after_root_a_reanalysis.iter().any(|diagnostic| {
-        diagnostic["relatedInformation"]
-            .as_array()
-            .is_some_and(|related| {
-                related
-                    .iter()
-                    .any(|item| item["location"]["uri"] == json!(root_b_uri))
-            })
     }));
-    assert!(!after_root_a_reanalysis.iter().any(|diagnostic| {
-        diagnostic["relatedInformation"]
-            .as_array()
-            .is_some_and(|related| {
-                related
-                    .iter()
-                    .any(|item| item["location"]["uri"] == json!(root_a_uri))
-            })
+    let after_b = client.receive_until(|message| {
+        is_publish(message, &shared_uri, Some(1))
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+    });
+    assert!(after_b.iter().any(|message| {
+        is_publish(message, &shared_uri, Some(1))
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
     }));
 
-    let after_root_b_reanalysis = shared_publications[4]["params"]["diagnostics"]
-        .as_array()
-        .unwrap();
-    assert!(after_root_b_reanalysis.is_empty());
-
+    client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
 }
