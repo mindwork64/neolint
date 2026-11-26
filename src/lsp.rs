@@ -68,7 +68,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut state = ServerState {
         config,
-        documents: HashMap::new(),
+        documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
         next_revision: 0,
     };
@@ -149,7 +149,8 @@ impl LspInitializationOptions {
 
 #[derive(Clone, Debug)]
 struct DocumentState {
-    text: String,
+    /// Immutable source storage is shared by live state and every queued task.
+    text: Arc<str>,
     version: i32,
     /// Server-local revision distinguishes snapshots even when an LSP save
     /// updates text without changing the client-supplied document version.
@@ -160,7 +161,8 @@ type RootDiagnostics = HashMap<Url, Vec<LspDiagnostic>>;
 
 struct ServerState {
     config: Option<LintConfig>,
-    documents: HashMap<Url, DocumentState>,
+    /// Copy-on-write snapshots let queued roots share one document map.
+    documents: Arc<HashMap<Url, DocumentState>>,
     /// Per-root diagnostic snapshots, keyed by the URI they belong to.
     /// A single included URI may be present in several root snapshots.
     published_by_root: HashMap<Url, RootDiagnostics>,
@@ -170,7 +172,7 @@ struct ServerState {
 struct AnalysisTask {
     root_uri: Url,
     root_version: i32,
-    documents: HashMap<Url, DocumentState>,
+    documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
 }
 
@@ -218,7 +220,12 @@ impl AnalysisWorker {
         })
     }
 
-    fn schedule(&self, root_uri: Url, documents: HashMap<Url, DocumentState>, config: LintConfig) {
+    fn schedule(
+        &self,
+        root_uri: Url,
+        documents: Arc<HashMap<Url, DocumentState>>,
+        config: LintConfig,
+    ) {
         let Some(root) = documents.get(&root_uri) else {
             return;
         };
@@ -320,7 +327,7 @@ fn analysis_worker_loop(
                 .get(&task.root_uri)
                 .expect("analysis task root document"),
             &task.config,
-            &task.documents,
+            task.documents.as_ref(),
         );
         if result_sender
             .send(AnalysisResult {
@@ -476,10 +483,10 @@ fn handle_notification(
                 return Ok(());
             }
             state.next_revision = state.next_revision.saturating_add(1);
-            state.documents.insert(
+            Arc::make_mut(&mut state.documents).insert(
                 document.uri.clone(),
                 DocumentState {
-                    text: document.text,
+                    text: Arc::from(document.text),
                     version: document.version,
                     revision: state.next_revision,
                 },
@@ -500,8 +507,8 @@ fn handle_notification(
                 return Ok(());
             }
             state.next_revision = state.next_revision.saturating_add(1);
-            if let Some(document) = state.documents.get_mut(&uri) {
-                document.text = change.text;
+            if let Some(document) = Arc::make_mut(&mut state.documents).get_mut(&uri) {
+                document.text = Arc::from(change.text);
                 document.version = params.text_document.version;
                 document.revision = state.next_revision;
             }
@@ -518,13 +525,16 @@ fn handle_notification(
                     state
                         .documents
                         .get(&uri)
-                        .map(|document| document.text != *text)
+                        .map(|document| document.text.as_ref() != text.as_str())
                 })
                 .unwrap_or(false);
             if changed {
                 state.next_revision = state.next_revision.saturating_add(1);
-                if let (Some(text), Some(document)) = (params.text, state.documents.get_mut(&uri)) {
-                    document.text = text;
+                if let (Some(text), Some(document)) = (
+                    params.text,
+                    Arc::make_mut(&mut state.documents).get_mut(&uri),
+                ) {
+                    document.text = Arc::from(text);
                     document.revision = state.next_revision;
                 }
             }
@@ -536,7 +546,7 @@ fn handle_notification(
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params)?;
             worker.cancel_pending(&params.text_document.uri);
-            state.documents.remove(&params.text_document.uri);
+            Arc::make_mut(&mut state.documents).remove(&params.text_document.uri);
             clear_root_diagnostics(connection, state, &params.text_document.uri)?;
         }
         _ => {}
@@ -562,7 +572,11 @@ fn analyze_or_schedule(
         return Ok(());
     };
 
-    worker.schedule(root_uri.clone(), state.documents.clone(), config.clone());
+    worker.schedule(
+        root_uri.clone(),
+        Arc::clone(&state.documents),
+        config.clone(),
+    );
     Ok(())
 }
 
@@ -655,7 +669,7 @@ fn analyze_document(
         // Included files are currently read from disk by the preprocessor.
         // Do not publish their diagnostics against a different, unsaved editor
         // buffer. Open-document overlays are a later workspace milestone.
-        if source_file.text() != open_source.text {
+        if source_file.text() != open_source.text.as_ref() {
             continue;
         }
 
@@ -677,7 +691,7 @@ fn analyze_document(
             let Some(related_document) = open_documents.get(&related_uri) else {
                 continue;
             };
-            if related_file.text() != related_document.text {
+            if related_file.text() != related_document.text.as_ref() {
                 continue;
             }
             let related_range = source_span_to_range(related_file.text(), related.span)?;
@@ -721,7 +735,7 @@ fn uri_for_open_source(
         .or_else(|| Some(PathBuf::from(source.display_name())))?;
     let uri = open_paths.get(&normalize_path(&path))?.clone();
     let document = open_documents.get(&uri)?;
-    (document.text == source.text()).then_some(uri)
+    (document.text.as_ref() == source.text()).then_some(uri)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -966,24 +980,65 @@ mod tests {
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
-                    text: "newer".to_owned(),
+                    text: Arc::from("newer"),
                     version: 8,
                     revision: 1,
                 },
-            )]),
+            )])
+            .into(),
             published_by_root: HashMap::new(),
             next_revision: 1,
         };
         let stale_version = 7;
-        let document = state.documents.get_mut(&uri).unwrap();
+        let document = Arc::make_mut(&mut state.documents).get_mut(&uri).unwrap();
         if is_newer_version(document.version, stale_version) {
-            document.text = "older".to_owned();
+            document.text = Arc::from("older");
             document.version = stale_version;
         }
-        assert_eq!(document.text, "newer");
+        assert_eq!(document.text.as_ref(), "newer");
         assert_eq!(document.version, 8);
         assert!(is_newer_version(8, 9));
         assert!(!is_newer_version(9, 9));
+    }
+
+    #[test]
+    fn document_text_and_document_maps_are_shared_by_analysis_snapshots() {
+        let uri = Url::parse("file:///tmp/shared.lsl").unwrap();
+        let text: Arc<str> = Arc::from("default { state_entry() {} }");
+        let documents = Arc::new(HashMap::from([(
+            uri.clone(),
+            DocumentState {
+                text: Arc::clone(&text),
+                version: 1,
+                revision: 1,
+            },
+        )]));
+
+        let first_snapshot = Arc::clone(&documents);
+        let second_snapshot = Arc::clone(&documents);
+
+        assert!(Arc::ptr_eq(&first_snapshot, &second_snapshot));
+        assert!(Arc::ptr_eq(
+            &first_snapshot.get(&uri).unwrap().text,
+            &second_snapshot.get(&uri).unwrap().text
+        ));
+
+        // An edit gets a new immutable buffer and a new map snapshot. Existing
+        // tasks keep the exact previous text they were scheduled with.
+        let mut updated_documents = Arc::clone(&documents);
+        let updated = Arc::make_mut(&mut updated_documents);
+        updated.get_mut(&uri).unwrap().text = Arc::from("new contents");
+        updated.get_mut(&uri).unwrap().revision = 2;
+
+        assert_eq!(
+            first_snapshot.get(&uri).unwrap().text.as_ref(),
+            "default { state_entry() {} }"
+        );
+        assert_eq!(
+            updated_documents.get(&uri).unwrap().text.as_ref(),
+            "new contents"
+        );
+        assert!(!Arc::ptr_eq(&documents, &updated_documents));
     }
 
     #[test]
@@ -996,11 +1051,12 @@ mod tests {
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
-                    text: format!("version {version}"),
+                    text: Arc::from(format!("version {version}")),
                     version,
                     revision,
                 },
-            )]),
+            )])
+            .into(),
             config: LintConfig::default(),
         };
         let mut pending = PendingAnalyses::default();
@@ -1030,7 +1086,7 @@ mod tests {
                 (
                     root_uri.clone(),
                     DocumentState {
-                        text: "root".to_owned(),
+                        text: Arc::from("root"),
                         version: 4,
                         revision: 10,
                     },
@@ -1038,12 +1094,13 @@ mod tests {
                 (
                     include_uri.clone(),
                     DocumentState {
-                        text: "include".to_owned(),
+                        text: Arc::from("include"),
                         version: 7,
                         revision: 11,
                     },
                 ),
-            ]),
+            ])
+            .into(),
             published_by_root: HashMap::new(),
             next_revision: 11,
         };
@@ -1056,26 +1113,32 @@ mod tests {
 
         assert!(analysis_snapshot_is_current(&state, &result));
 
-        state.documents.get_mut(&include_uri).unwrap().revision = 12;
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&include_uri)
+            .unwrap()
+            .revision = 12;
         assert!(!analysis_snapshot_is_current(&state, &result));
 
-        state.documents.get_mut(&include_uri).unwrap().revision = 11;
-        state.documents.remove(&root_uri);
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&include_uri)
+            .unwrap()
+            .revision = 11;
+        Arc::make_mut(&mut state.documents).remove(&root_uri);
         assert!(!analysis_snapshot_is_current(&state, &result));
 
-        state.documents.insert(
+        Arc::make_mut(&mut state.documents).insert(
             root_uri.clone(),
             DocumentState {
-                text: "root".to_owned(),
+                text: Arc::from("root"),
                 version: 4,
                 revision: 10,
             },
         );
         let newly_opened_uri = Url::parse("file:///tmp/new.lsl").unwrap();
-        state.documents.insert(
+        Arc::make_mut(&mut state.documents).insert(
             newly_opened_uri,
             DocumentState {
-                text: "new".to_owned(),
+                text: Arc::from("new"),
                 version: 1,
                 revision: 12,
             },
@@ -1176,14 +1239,14 @@ mod tests {
         let uri = Url::from_file_path(&path).unwrap();
         let text = "default { state_entry() { integer value = ; } }";
         let document = DocumentState {
-            text: text.to_owned(),
+            text: Arc::from(text),
             version: 4,
             revision: 1,
         };
         let open_documents = HashMap::from([(
             uri.clone(),
             DocumentState {
-                text: text.to_owned(),
+                text: Arc::from(text),
                 version: 4,
                 revision: 1,
             },
