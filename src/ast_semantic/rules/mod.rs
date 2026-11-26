@@ -15,6 +15,7 @@ pub(crate) mod event_signatures;
 pub(crate) mod explicit_casts;
 pub(crate) mod firestorm_switches;
 pub(crate) mod global_initializers;
+pub(crate) mod legacy_compat;
 pub(crate) mod list_semantics;
 pub(crate) mod math_errors;
 pub(crate) mod operator_types;

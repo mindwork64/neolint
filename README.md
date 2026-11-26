@@ -167,3 +167,6 @@ Vendored Linden Research LSL definitions in <code>data/lsl-builtins.txt</code> a
 <p align="center">
   <sub>Built for people who write LSL and would rather catch mistakes before uploading.</sub>
 </p>
+
+
+Second Life God Mode-only functions are rejected by default. Use `--god-mode` only when the target region and script permissions explicitly allow them.

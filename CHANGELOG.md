@@ -3,6 +3,17 @@
 Notable user-facing changes are recorded here. Release archives and SHA-256
 checksums are published on the [GitHub Releases page](https://github.com/mindwork64/neolint/releases).
 
+## [Unreleased]
+
+### Added
+
+- LSLint-inspired AST diagnostics for:
+  - constant conditions, including literal assignment results, unchanged local
+    empty-string comparisons, and immutable global integer initializers;
+  - empty `if` statements, transitions to the current state, multiple LSO jump
+    sites, and unsafe `print()` usage.
+- Second Life God Mode-only function guard with explicit `--god-mode` opt-in.
+
 ## [1.2.0] - 2026-11-26
 
 ### Added

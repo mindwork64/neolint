@@ -576,6 +576,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
         "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048", "SEM049", "SEM050",
+        "SEM053", "SEM054", "SEM055", "SEM056", "SEM057", "SEM058",
     ] {
         assert!(!stdout.contains(code), "{stdout}");
     }
@@ -593,6 +594,7 @@ fn compare_ignores_ast_only_sem024_through_sem046() {
         "SEM024", "SEM025", "SEM026", "SEM027", "SEM028", "SEM029", "SEM030", "SEM031", "SEM032",
         "SEM033", "SEM034", "SEM035", "SEM036", "SEM037", "SEM038", "SEM039", "SEM040", "SEM041",
         "SEM042", "SEM043", "SEM044", "SEM045", "SEM046", "SEM047", "SEM048", "SEM049", "SEM050",
+        "SEM053", "SEM054", "SEM055", "SEM056", "SEM057", "SEM058",
     ] {
         assert!(!stderr.contains(code), "{stderr}");
     }
@@ -2835,6 +2837,34 @@ fn target_profiles_are_independent_from_preprocessor_dialects() {
     let firestorm_stdout = String::from_utf8_lossy(&firestorm_mono.stdout);
     assert!(firestorm_stdout.contains("SEM034"), "{firestorm_stdout}");
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn god_mode_guard_is_explicit_and_second_life_only() {
+    let directory = temporary_directory();
+    let source = directory.join("god_mode.lsl");
+    fs::write(
+        &source,
+        "default { state_entry() { llGodLikeRezObject(llGetOwner(), ZERO_VECTOR); } }\n",
+    )
+    .unwrap();
+    let path = source.to_str().unwrap();
+    let denied = run_args(&[path]);
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&denied.stdout).contains("error[SEM058]"));
+
+    let allowed = run_args(&["--god-mode", path]);
+    assert_eq!(allowed.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&allowed.stdout).contains("SEM058"));
+
+    let opensim = run_args(&["--target", "opensim-yengine", "--god-mode", path]);
+    assert_eq!(opensim.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&opensim.stderr).contains("only valid for Second Life"));
+
+    let legacy = run_args(&["--engine", "legacy", "--god-mode", path]);
+    assert_eq!(legacy.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("requires the AST or Compare engine"));
     fs::remove_dir_all(directory).unwrap();
 }
 

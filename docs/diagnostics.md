@@ -127,8 +127,8 @@ plain-Legacy path and never emits `PRE039`.
 All SEM diagnostics have kind semantic except SEM013, SEM023, SEM024,
 SEM025, SEM026, SEM030–SEM033, SEM035, SEM037, SEM040–SEM044, and SEM048,
 which are lint. SEM012, SEM013, SEM023, SEM024–SEM026, SEM030–SEM033,
-SEM035, SEM037, SEM040–SEM044, and SEM048 default to warning. SEM047,
-SEM049, and SEM050 are AST-only semantic errors. The frozen Legacy/Compare
+SEM035, SEM037, SEM040–SEM044, SEM048, and SEM053–SEM057 default to warning.
+SEM047, SEM049, SEM050, and SEM058 are AST-only semantic errors. The frozen Legacy/Compare
 parity range remains SEM001–SEM023.
 
 
@@ -184,6 +184,14 @@ parity range remains SEM001–SEM023.
 | `SEM048` | A known OSSL call is not listed in the project's explicit OpenSim OSSL allowlist. | warning / lint | AST-only. Emitted only for an OpenSim target when ossl_allowlist = strict / --strict-ossl is selected or at least one ossl_function / --ossl-function entry is configured. The allowlist describes what the project expects to be enabled; it does not query region security settings. No list means no OSSL availability assumption. |
 | `SEM049` | A canonical Second Life LSL event handler is absent from the selected OpenSim compiler/runtime. | error / semantic | AST-only target-aware check. XEngine uses its own lexer/parser event productions; YEngine uses the event-code enum intersected with handler declarations. Only complete event handlers in reliable input are considered. |
 | `SEM050` | A canonical Second Life LSL constant is absent from the selected OpenSim API snapshot. | error / semantic | AST-only target-aware check. Uses the selected version's constants table; local/global variables shadowing the same name are respected. Parser errors and unreliable preprocessing suppress the rule. |
+
+| `SEM053` | State transition targets the current state. | warning / lint | AST-only Second Life check; event-handler context only. |
+| `SEM054` | Multiple `jump` statements target the same label, an LSO execution hazard. | warning / lint | AST-only Second Life LSO check; only valid, accessible jump targets count. |
+| `SEM055` | An `if` statement has no effect because both branches are empty. | warning / lint | AST-only; malformed conditions are skipped. |
+| `SEM056` | A condition is statically always true or always false. | warning / lint | AST-only; folds numeric constants and literal assignment results, compares a local string with an empty literal only when its empty initializer is unchanged before the condition (and the body has no loops or legacy jumps), and propagates integer global initializers only when no write to that name exists anywhere in the AST. Other mutable/unknown values remain unknown. |
+| `SEM057` | `print()` is unsupported or unsafe on the selected Second Life compiler. | warning / lint | AST-only Second Life check; Mono reports compile failure, LSO/Luau report possible runtime failure. |
+| `SEM058` | A God Mode-only Second Life built-in is used without explicit opt-in. | error / semantic | AST-only Second Life check for `llGodLikeRezObject`, `llSetInventoryPermMask`, and `llSetObjectPermMask`; `--god-mode` suppresses this guard but does not change simulator permissions. |
+
 
 ## Illustrative minimal examples
 

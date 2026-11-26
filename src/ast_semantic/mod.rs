@@ -89,6 +89,25 @@ pub fn analyze_ast_with_target_options(
     target: TargetProfile,
     ossl_allowlist: &OsslAllowlist,
 ) -> Vec<Diagnostic> {
+    analyze_ast_with_target_options_and_god_mode(
+        ast,
+        syntax_diagnostics,
+        environment_reliable,
+        target,
+        ossl_allowlist,
+        false,
+    )
+}
+
+/// Run target-aware AST semantics with an explicit project God Mode setting.
+pub(crate) fn analyze_ast_with_target_options_and_god_mode(
+    ast: &Ast,
+    syntax_diagnostics: &[Diagnostic],
+    environment_reliable: bool,
+    target: TargetProfile,
+    ossl_allowlist: &OsslAllowlist,
+    god_mode_enabled: bool,
+) -> Vec<Diagnostic> {
     let api_catalog = builtins::catalog_for_target(target);
     let standard_functions = &api_catalog.functions;
     let ossl_functions = &api_catalog.ossl_functions;
@@ -180,6 +199,15 @@ pub fn analyze_ast_with_target_options(
         builtin_functions,
     ));
     diagnostics.extend(rules::state_targets::check(ast, builtin_events));
+    diagnostics.extend(rules::legacy_compat::check(
+        ast,
+        &calls,
+        &scopes,
+        syntax_diagnostics,
+        environment_reliable,
+        target,
+        god_mode_enabled,
+    ));
     diagnostics.extend(rules::state_transitions::check(
         ast,
         syntax_diagnostics,
@@ -192,7 +220,7 @@ pub fn analyze_ast_with_target_options(
         environment_reliable,
         builtin_functions,
     ));
-    let jumps = flow::check_jumps(ast, &scopes);
+    let jumps = flow::check_jumps(ast, &scopes, target);
     diagnostics.extend(rules::return_hazards::check(
         ast,
         &scopes,
