@@ -76,16 +76,20 @@ by an earlier layer. OSSL function entries are additive unless a later config
 explicitly contains `ossl_allowlist = strict`, which resets inherited entries
 to an explicitly empty list before applying any `ossl_function` entries in that
 same file. A target-layer change alone does not remove inherited OSSL entries;
-incompatible combinations are rejected during effective-config validation. An include_dir
-list from a later layer replaces the previous list only when that layer
-contains at least one include_dir setting. Command-line include directories
+incompatible combinations are rejected during effective-config validation. An
+include_dir list from a later layer replaces the previous list only when that
+layer contains at least one include_dir setting. Command-line include directories
 replace the effective list when any -I/--include-dir option is present.
 
 --config is an overlay for every script in project mode, not a replacement
 for the project's configuration chain. Relative include_dir paths inside a
 project, per-script, or CLI config file are resolved relative to the directory
-containing that particular config file. This makes project runs independent
-of the shell's current working directory for manifest-owned settings.
+containing that particular config file. Include paths are not checked when an
+individual config file is read: existence and directory type are checked only
+after all config layers and CLI overrides have been applied. A stale inherited
+include list can therefore be replaced by a valid later list without failing
+early. This makes project runs independent of the shell's current working
+directory for manifest-owned settings.
 
 Validation is performed against every script's final effective configuration
 before analysis begins. An invalid target/engine pairing or missing include

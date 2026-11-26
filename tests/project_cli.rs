@@ -312,6 +312,117 @@ fn project_resolves_each_script_include_directories_from_its_config_file() {
 }
 
 #[test]
+fn replaced_missing_include_directories_are_not_validated_before_overlays() {
+    let project = TempProject::new();
+    project.write(
+        ".neolint.conf",
+        "preprocess = true\ninclude_dir = missing-from-project\n",
+    );
+    project.write(
+        "config-include/helper.lsl",
+        "integer included_config_unused;\n",
+    );
+    project.write("cli-include/helper.lsl", "integer included_cli_unused;\n");
+    project.write(
+        "Scripts/per-script.lsl",
+        "#include \"helper.lsl\"\ndefault { state_entry() {} }\n",
+    );
+    project.write(
+        "Scripts/cli-override.lsl",
+        "#include \"helper.lsl\"\ndefault { state_entry() {} }\n",
+    );
+    project.write(
+        "config/per-script.conf",
+        "include_dir = ../config-include\n",
+    );
+
+    project.manifest(
+        "config = .neolint.conf\n\
+         script = Scripts/per-script.lsl\n\
+         script_config = Scripts/per-script.lsl => config/per-script.conf\n",
+    );
+    let per_script = project.run(&[]);
+    assert_eq!(
+        per_script.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&per_script.stdout),
+        String::from_utf8_lossy(&per_script.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&per_script.stdout).contains("helper.lsl"),
+        "{}",
+        String::from_utf8_lossy(&per_script.stdout)
+    );
+
+    project.manifest("config = .neolint.conf\nscript = Scripts/cli-override.lsl\n");
+    let cli_include = project.root.join("cli-include");
+    let cli_override = project.run(&["-I", cli_include.to_str().unwrap()]);
+    assert_eq!(
+        cli_override.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cli_override.stdout),
+        String::from_utf8_lossy(&cli_override.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&cli_override.stdout).contains("helper.lsl"),
+        "{}",
+        String::from_utf8_lossy(&cli_override.stdout)
+    );
+}
+
+#[test]
+fn project_rejects_missing_include_directory_after_all_overlays() {
+    let project = TempProject::new();
+    project.write(
+        ".neolint.conf",
+        "preprocess = true\ninclude_dir = missing-from-project\n",
+    );
+    project.write("Scripts/a.lsl", "default { state_entry() {} }\n");
+    project.manifest("config = .neolint.conf\nscript = Scripts/a.lsl\n");
+
+    let output = project.run(&[]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot access include directory"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("missing-from-project"), "{stderr}");
+}
+
+#[test]
+fn project_json_related_locations_use_manifest_path_for_root_script() {
+    let project = TempProject::new();
+    project.write(
+        "Scripts/repeat.lsl",
+        "#define ITEM 1\n#define ITEM 2\ndefault { state_entry() {} }\n",
+    );
+    project.manifest("script = Scripts/repeat.lsl\n");
+
+    let output = project.run(&["--preprocess", "--format", "json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"PRE005\""), "{stdout}");
+    assert_eq!(
+        stdout.matches("\"file\":\"Scripts/repeat.lsl\"").count(),
+        2,
+        "both primary and related root locations must use the manifest spelling: {stdout}"
+    );
+    assert!(
+        !stdout.contains(project.root.to_str().unwrap()),
+        "absolute project path leaked into JSON related locations: {stdout}"
+    );
+}
+
+#[test]
 fn project_rejects_positional_inputs_and_missing_manifest_entries() {
     let project = TempProject::new();
     project.write("Scripts/a.lsl", "default { state_entry() {} }\n");

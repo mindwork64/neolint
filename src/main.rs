@@ -344,7 +344,7 @@ fn run() -> i32 {
             }
         };
         let project_config = if let Some(path) = project.default_config() {
-            match load_config_file(path, true) {
+            match load_config_file(path) {
                 Ok(config) => config,
                 Err(error) => {
                     eprintln!(
@@ -358,7 +358,7 @@ fn run() -> i32 {
             LintConfig::default()
         };
         let cli_config = if let Some(path) = config_path.as_deref() {
-            match load_config_file(Path::new(path), true) {
+            match load_config_file(Path::new(path)) {
                 Ok(config) => Some(config),
                 Err(error) => {
                     eprintln!("neolint: cannot load --config '{path}': {error}");
@@ -372,7 +372,7 @@ fn run() -> i32 {
         for script in project.scripts() {
             let mut config = project_config.clone();
             if let Some(path) = script.config() {
-                let overrides = match load_config_file(path, true) {
+                let overrides = match load_config_file(path) {
                     Ok(config) => config,
                     Err(error) => {
                         eprintln!(
@@ -639,30 +639,28 @@ fn run() -> i32 {
     }
 }
 
-fn load_config_file(path: &Path, resolve_include_dirs: bool) -> Result<LintConfig, String> {
+fn load_config_file(path: &Path) -> Result<LintConfig, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
     let mut config = LintConfig::parse(&source)
         .map_err(|error| format!("invalid config '{}': {error}", path.display()))?;
-    if resolve_include_dirs && !config.include_dirs().is_empty() {
+
+    // Preserve each config file's relative include-dir base without touching
+    // the filesystem yet. A later config/CLI layer may replace this list, so
+    // validate existence only after the final effective config is assembled.
+    if !config.include_dirs().is_empty() {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let resolved = config
             .include_dirs()
             .iter()
             .map(|directory| {
-                let candidate = if directory.is_absolute() {
+                if directory.is_absolute() {
                     directory.clone()
                 } else {
                     base.join(directory)
-                };
-                fs::canonicalize(&candidate).map_err(|error| {
-                    format!(
-                        "cannot resolve include directory '{}': {error}",
-                        candidate.display()
-                    )
-                })
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         config.set_include_dirs(resolved);
     }
     Ok(config)
@@ -952,14 +950,18 @@ fn run_units_with_jobs(
 
         let mut groups: Vec<(neolint::SourceId, Vec<OutputDiagnostic>)> = Vec::new();
         for diagnostic in analysis.diagnostics() {
-            let related = match json_related_locations(unit, diagnostic.related()) {
-                Ok(related) => related,
-                Err(error) => {
-                    eprintln!("neolint: cannot render related locations for unit {index}: {error}");
-                    input_failed = true;
-                    continue;
-                }
-            };
+            let related =
+                match json_related_locations(unit, diagnostic.related(), job.display_path.as_str())
+                {
+                    Ok(related) => related,
+                    Err(error) => {
+                        eprintln!(
+                            "neolint: cannot render related locations for unit {index}: {error}"
+                        );
+                        input_failed = true;
+                        continue;
+                    }
+                };
             let output = OutputDiagnostic {
                 diagnostic: diagnostic.diagnostic().clone(),
                 related,
@@ -1556,6 +1558,7 @@ fn print_json(results: &[FileResult]) {
 fn json_related_locations(
     unit: &neolint::AnalysisUnit,
     related: &[neolint::RelatedLocation],
+    root_display_path: &str,
 ) -> Result<Vec<JsonRelatedLocation>, String> {
     if related.is_empty() {
         return Ok(Vec::new());
@@ -1563,17 +1566,23 @@ fn json_related_locations(
     let map = unit
         .source_map()
         .ok_or_else(|| "analysis unit has no source map".to_owned())?;
+    let root = unit.root();
     let mut output = Vec::with_capacity(related.len());
     for location in related {
+        let source = location.span.source();
         let file = unit
             .manager()
-            .file(location.span.source())
+            .file(source)
             .ok_or_else(|| "related location references an unknown source file".to_owned())?;
         let span = map
             .render_span(location.span)
             .map_err(|error| format!("cannot resolve related source span: {error}"))?;
         output.push(JsonRelatedLocation {
-            file: file.display_name().to_owned(),
+            file: if Some(source) == root {
+                root_display_path.to_owned()
+            } else {
+                file.display_name().to_owned()
+            },
             label: location.label.clone(),
             span,
         });

@@ -46,7 +46,10 @@ additive; later severity values replace earlier values; explicit scalar
 settings override inherited values. A later include_dir list replaces the
 previous list when it contains at least one include_dir entry. Relative
 include_dir paths in project-owned config files are resolved from the
-directory containing that config file. See [project-model.md](project-model.md)
+directory containing that config file. Include directories are validated
+only after all project, per-script, invocation-wide config, and CLI overlays,
+so a replaced inherited path does not fail prematurely. See
+[project-model.md](project-model.md)
 for the complete manifest format and configuration rules.
 
 
