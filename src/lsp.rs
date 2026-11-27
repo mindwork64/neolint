@@ -14,6 +14,7 @@ use crate::diagnostic::{Severity, Span};
 use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
 use crate::pipeline::{AnalysisRun, CancellableSetupError};
 use crate::preprocessor::PreprocessSettings;
+use crate::project::ProjectManifest;
 use crate::source::manager::{normalize_lexical_path, normalize_local_path};
 use crate::source::unit::CancellableAnalysisError;
 use crate::source::{SourceFile, SourceFileKind, SourceSpan};
@@ -23,14 +24,15 @@ use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionResponse, CompletionTextEdit, CreateFilesParams, DeleteFilesParams,
-    Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DocumentChanges,
-    FileOperationFilter, FileOperationPattern, FileOperationRegistrationOptions, Hover,
-    HoverContents, HoverProviderCapability, InitializeParams, InsertTextFormat, Location,
-    MarkupContent, MarkupKind, MessageType, OneOf, OptionalVersionedTextDocumentIdentifier,
-    Position, PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
-    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Url, WorkspaceEdit,
-    WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
+    Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
+    DidChangeWorkspaceFoldersParams, DocumentChanges, FileOperationFilter, FileOperationPattern,
+    FileOperationRegistrationOptions, Hover, HoverContents, HoverProviderCapability,
+    InitializeParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    OptionalVersionedTextDocumentIdentifier, Position, PublishDiagnosticsParams, Range,
+    RenameFilesParams, ServerCapabilities, TextDocumentEdit, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+    WorkspaceEdit, WorkspaceFileOperationsServerCapabilities, WorkspaceFolder,
+    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -53,9 +55,12 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
     let initialize_params: InitializeParams = serde_json::from_value(initialize_value)?;
     let options =
         LspInitializationOptions::from_value(initialize_params.initialization_options.clone());
-    let workspace_root = workspace_root(&initialize_params);
-    let (config, config_error) =
-        load_config(workspace_root.as_deref(), options.config_path.as_deref());
+    let workspace_folders = initial_workspace_folders(&initialize_params);
+    let known_workspace_folders = workspace_folders
+        .iter()
+        .filter_map(|folder| folder.uri.to_file_path().ok())
+        .map(|path| normalize_path(&path))
+        .collect();
 
     let file_operations = FileOperationRegistrationOptions {
         filters: vec![FileOperationFilter {
@@ -121,16 +126,28 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .then(|| file_operations.clone()),
             ..Default::default()
         });
-    let workspace = server_file_operations
-        .filter(|operations| {
-            operations.did_create.is_some()
-                || operations.did_rename.is_some()
-                || operations.did_delete.is_some()
-        })
-        .map(|file_operations| WorkspaceServerCapabilities {
-            file_operations: Some(file_operations),
-            ..Default::default()
-        });
+    let client_supports_workspace_folders = initialize_params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.workspace_folders)
+        .unwrap_or(false);
+    let has_file_operations = server_file_operations.as_ref().is_some_and(|operations| {
+        operations.did_create.is_some()
+            || operations.did_rename.is_some()
+            || operations.did_delete.is_some()
+    });
+    let workspace = (client_supports_workspace_folders || has_file_operations).then(|| {
+        WorkspaceServerCapabilities {
+            workspace_folders: client_supports_workspace_folders.then_some(
+                WorkspaceFoldersServerCapabilities {
+                    supported: Some(true),
+                    change_notifications: Some(OneOf::Left(true)),
+                },
+            ),
+            file_operations: server_file_operations,
+        }
+    });
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -158,25 +175,20 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(capabilities)?)?;
 
-    if let Some(error) = &config_error {
-        send_show_message(
-            &connection,
-            MessageType::ERROR,
-            &format!("NeoLint configuration: {error}"),
-        )?;
-    } else {
-        eprintln!("{SERVER_NAME} LSP initialized");
-    }
+    eprintln!("{SERVER_NAME} LSP initialized");
 
     let mut state = ServerState {
-        config,
+        workspace_folders,
+        known_workspace_folders,
+        config_path: options.config_path,
+        configuration_errors_by_root: HashMap::new(),
         documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
         symbols_by_root: HashMap::new(),
         dependencies_by_root: HashMap::new(),
         dependency_tracking_incomplete_by_root: HashSet::new(),
         next_revision: 0,
-        file_operation_revision: 0,
+        workspace_revision: 0,
     };
     let mut worker = AnalysisWorker::new()?;
 
@@ -264,7 +276,18 @@ struct DocumentState {
 type RootDiagnostics = HashMap<Url, Vec<LspDiagnostic>>;
 
 struct ServerState {
-    config: Option<LintConfig>,
+    /// Workspace folders are kept in the client-provided order; the most
+    /// specific containing folder owns a document in nested workspaces.
+    workspace_folders: Vec<WorkspaceFolder>,
+    /// Roots ever announced by the client. This prevents a document in a
+    /// removed workspace from being mistaken for a Firestorm external copy
+    /// when only one unrelated workspace folder remains.
+    known_workspace_folders: HashSet<PathBuf>,
+    /// Optional config overlay from the extension, resolved against each
+    /// document's selected workspace folder.
+    config_path: Option<PathBuf>,
+    /// Avoid repeating the same configuration warning on every edit.
+    configuration_errors_by_root: HashMap<Url, String>,
     /// Copy-on-write snapshots let queued roots share one document map.
     documents: Arc<HashMap<Url, DocumentState>>,
     /// Per-root diagnostic snapshots, keyed by the URI they belong to.
@@ -279,26 +302,27 @@ struct ServerState {
     /// open local document conservatively reanalyze these roots.
     dependency_tracking_incomplete_by_root: HashSet<Url>,
     next_revision: u64,
-    /// Global filesystem-operation generation. Any result started before a
-    /// create/rename/delete notification is stale, even if the worker has
-    /// already finished and its result is waiting for the LSP thread.
-    file_operation_revision: u64,
+    /// Workspace-environment generation. File operations and workspace-folder
+    /// changes make older results stale, even if the worker has already
+    /// finished and its result is waiting for the LSP thread.
+    workspace_revision: u64,
 }
 
 struct AnalysisTask {
     root_uri: Url,
     root_version: i32,
     root_revision: u64,
-    file_operation_revision: u64,
+    workspace_revision: u64,
     documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
+    configuration_dependencies: HashSet<PathBuf>,
 }
 
 struct AnalysisResult {
     root_uri: Url,
     root_version: i32,
     root_revision: u64,
-    file_operation_revision: u64,
+    workspace_revision: u64,
     dependencies: HashSet<PathBuf>,
     dependencies_complete: bool,
     dependency_revisions: HashMap<PathBuf, HashMap<Url, u64>>,
@@ -392,24 +416,7 @@ impl AnalysisWorker {
         })
     }
 
-    fn schedule_many(
-        &self,
-        root_uris: impl IntoIterator<Item = Url>,
-        documents: Arc<HashMap<Url, DocumentState>>,
-        config: LintConfig,
-        file_operation_revision: u64,
-    ) {
-        let tasks: Vec<_> = root_uris
-            .into_iter()
-            .filter_map(|uri| {
-                make_analysis_task(
-                    uri,
-                    Arc::clone(&documents),
-                    config.clone(),
-                    file_operation_revision,
-                )
-            })
-            .collect();
+    fn schedule_many(&self, tasks: Vec<AnalysisTask>) {
         if tasks.is_empty() {
             return;
         }
@@ -469,16 +476,18 @@ fn make_analysis_task(
     root_uri: Url,
     documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
-    file_operation_revision: u64,
+    configuration_dependencies: HashSet<PathBuf>,
+    workspace_revision: u64,
 ) -> Option<AnalysisTask> {
     let root = documents.get(&root_uri)?;
     Some(AnalysisTask {
         root_uri,
         root_version: root.version,
         root_revision: root.revision,
-        file_operation_revision,
+        workspace_revision,
         documents,
         config,
+        configuration_dependencies,
     })
 }
 
@@ -574,7 +583,7 @@ fn dependency_revision_snapshot(
 }
 
 fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) -> bool {
-    state.file_operation_revision == result.file_operation_revision
+    state.workspace_revision == result.workspace_revision
         && state
             .documents
             .get(&result.root_uri)
@@ -635,7 +644,7 @@ fn analysis_worker_loop(
         if was_cancelled {
             continue;
         }
-        let (dependencies, dependencies_complete, diagnostics, symbols) = match result {
+        let (mut dependencies, dependencies_complete, diagnostics, symbols) = match result {
             Ok(analysis) => (
                 analysis.dependencies,
                 analysis.dependencies_complete,
@@ -653,6 +662,7 @@ fn analysis_worker_loop(
             }
             Err(AnalyzeDocumentError::Cancelled) => continue,
         };
+        dependencies.extend(task.configuration_dependencies.iter().cloned());
         let dependency_revisions = dependency_revision_snapshot(
             &dependencies,
             task.documents.as_ref(),
@@ -663,7 +673,7 @@ fn analysis_worker_loop(
                 root_uri: task.root_uri,
                 root_version: task.root_version,
                 root_revision: task.root_revision,
-                file_operation_revision: task.file_operation_revision,
+                workspace_revision: task.workspace_revision,
                 dependencies,
                 dependencies_complete,
                 dependency_revisions,
@@ -682,54 +692,138 @@ fn is_newer_version(current: i32, incoming: i32) -> bool {
 }
 
 #[allow(deprecated)]
-fn workspace_root(params: &InitializeParams) -> Option<PathBuf> {
-    if let Some(folders) = &params.workspace_folders {
-        if let Some(folder) = folders.first() {
-            if let Ok(path) = folder.uri.to_file_path() {
-                return Some(path);
+fn initial_workspace_folders(params: &InitializeParams) -> Vec<WorkspaceFolder> {
+    if let Some(folders) = params
+        .workspace_folders
+        .as_ref()
+        .filter(|folders| !folders.is_empty())
+    {
+        return folders.clone();
+    }
+
+    let fallback_uri = params.root_uri.clone().or_else(|| {
+        params
+            .root_path
+            .as_ref()
+            .and_then(|path| Url::from_file_path(path).ok())
+    });
+    fallback_uri
+        .filter(|uri| uri.scheme() == "file")
+        .map(|uri| {
+            let name = uri
+                .to_file_path()
+                .ok()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "workspace".to_owned());
+            vec![WorkspaceFolder { uri, name }]
+        })
+        .unwrap_or_default()
+}
+
+fn workspace_root_for_document(
+    uri: &Url,
+    folders: &[WorkspaceFolder],
+    known_folders: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let document_path = uri.to_file_path().ok()?;
+    let document_path = normalize_path(&document_path);
+    let mut matching: Vec<_> = folders
+        .iter()
+        .filter_map(|folder| {
+            let path = folder.uri.to_file_path().ok()?;
+            let path = normalize_path(&path);
+            document_path.starts_with(&path).then_some(path)
+        })
+        .collect();
+    matching.sort_by_key(|path| path.components().count());
+    matching.pop().or_else(|| {
+        // Preserve the established single-folder Firestorm workflow: Viewer
+        // temporary copies may live outside the project directory. With more
+        // than one folder, an outside document is ambiguous and gets defaults.
+        (folders.len() == 1
+            && !known_folders
+                .iter()
+                .any(|known| document_path.starts_with(known)))
+        .then(|| folders[0].uri.to_file_path().ok())
+        .flatten()
+        .map(|path| normalize_path(&path))
+    })
+}
+
+fn load_document_config(
+    document_path: &Path,
+    workspace_root: Option<&Path>,
+    explicit_path: Option<&Path>,
+    open_documents: &HashMap<Url, DocumentState>,
+) -> Result<(LintConfig, HashSet<PathBuf>), String> {
+    let mut config = LintConfig::default();
+    let mut dependencies = HashSet::new();
+
+    if let Some(root) = workspace_root {
+        let manifest_path = root.join("neolint.project");
+        dependencies.insert(normalize_path(&manifest_path));
+        if manifest_path.is_file()
+            || open_document_text_for_path(&manifest_path, open_documents).is_some()
+        {
+            let manifest =
+                load_project_manifest(&manifest_path, open_documents).map_err(|error| {
+                    format!(
+                        "invalid project manifest '{}': {error}",
+                        manifest_path.display()
+                    )
+                })?;
+            dependencies.insert(normalize_path(manifest.path()));
+
+            // The project config is a folder-wide default, including for
+            // external-editor copies and other open roots not listed as CLI
+            // project entries. A script_config overlay is path-specific.
+            if let Some(path) = manifest.default_config() {
+                apply_config_layer(&mut config, path, &mut dependencies, open_documents)?;
+            }
+            let document_path =
+                fs::canonicalize(document_path).unwrap_or_else(|_| normalize_path(document_path));
+            if let Some(path) = manifest
+                .scripts()
+                .iter()
+                .find(|script| script.path() == document_path)
+                .and_then(|script| script.config())
+            {
+                apply_config_layer(&mut config, path, &mut dependencies, open_documents)?;
+            }
+        } else {
+            let path = root.join(".neolint.conf");
+            dependencies.insert(normalize_path(&path));
+            if path.is_file() || open_document_text_for_path(&path, open_documents).is_some() {
+                apply_config_layer(&mut config, &path, &mut dependencies, open_documents)?;
             }
         }
     }
-    params
-        .root_uri
-        .as_ref()
-        .and_then(|uri| uri.to_file_path().ok())
-        .or_else(|| params.root_path.as_ref().map(PathBuf::from))
-}
 
-fn load_config(
-    root: Option<&Path>,
-    explicit_path: Option<&Path>,
-) -> (Option<LintConfig>, Option<String>) {
-    let selected = explicit_path
-        .map(|path| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else if let Some(root) = root {
-                root.join(path)
-            } else {
-                path.to_path_buf()
-            }
-        })
-        .or_else(|| {
-            root.map(|path| path.join(".neolint.conf"))
-                .filter(|path| path.is_file())
-        });
-
-    let mut config = if let Some(path) = selected {
-        match load_config_file(&path) {
-            Ok(config) => config,
-            Err(error) => return (None, Some(error)),
+    if let Some(path) = explicit_path {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(root) = workspace_root {
+            root.join(path)
+        } else {
+            // A relative extension setting has no meaningful base for a
+            // document outside every folder in a multi-root workspace.
+            // Leave this root on defaults instead of silently resolving
+            // against the server's process-wide (first-folder) cwd.
+            PathBuf::new()
+        };
+        if !path.as_os_str().is_empty() {
+            apply_config_layer(&mut config, &path, &mut dependencies, open_documents)?;
         }
-    } else {
-        LintConfig::default()
-    };
+    }
 
-    // Firestorm opens a temporary copy of the script, so its containing
-    // directory is not necessarily the project root. Keep configured include
-    // directories first, then use the workspace root as the final fallback.
+    // Firestorm may open a temporary copy outside the workspace folder. Keep
+    // configured include directories first and the selected project root last.
     if config.preprocess_enabled() {
-        if let Some(root) = root {
+        if let Some(root) = workspace_root {
             let workspace_path = normalize_path(root);
             let mut include_dirs = config.include_dirs().to_vec();
             if !include_dirs
@@ -741,16 +835,70 @@ fn load_config(
             config.set_include_dirs(include_dirs);
         }
     }
-    if let Err(error) = validate_effective_config(&config) {
-        return (None, Some(error));
-    }
-    (Some(config), None)
+
+    validate_effective_config(&config)?;
+    Ok((config, dependencies))
 }
 
+fn apply_config_layer(
+    config: &mut LintConfig,
+    path: &Path,
+    dependencies: &mut HashSet<PathBuf>,
+    open_documents: &HashMap<Url, DocumentState>,
+) -> Result<(), String> {
+    let overrides = load_config_file_with_overlays(path, open_documents)?;
+    config.apply_overrides_from(&overrides);
+    dependencies.insert(normalize_path(path));
+    Ok(())
+}
+
+fn load_project_manifest(
+    path: &Path,
+    open_documents: &HashMap<Url, DocumentState>,
+) -> Result<ProjectManifest, String> {
+    if let Some(source) = open_document_text_for_path(path, open_documents) {
+        ProjectManifest::parse(path, source)
+    } else {
+        ProjectManifest::load(path)
+    }
+}
+
+fn load_config_file_with_overlays(
+    path: &Path,
+    open_documents: &HashMap<Url, DocumentState>,
+) -> Result<LintConfig, String> {
+    if let Some(source) = open_document_text_for_path(path, open_documents) {
+        parse_config_file(path, source)
+    } else {
+        load_config_file(path)
+    }
+}
+
+fn open_document_text_for_path<'a>(
+    path: &Path,
+    open_documents: &'a HashMap<Url, DocumentState>,
+) -> Option<&'a str> {
+    let target = normalize_path(path);
+    open_documents
+        .iter()
+        .filter_map(|(uri, document)| {
+            let path = uri.to_file_path().ok()?;
+            (normalize_path(&path) == target).then_some((uri, document.text.as_ref()))
+        })
+        .min_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()))
+        .map(|(_, text)| text)
+}
+
+/// Parse one layer and resolve its relative include paths. Cross-layer
+/// compatibility and include-directory validation happen only after overlays.
 fn load_config_file(path: &Path) -> Result<LintConfig, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
-    let mut config = LintConfig::parse(&source)
+    parse_config_file(path, &source)
+}
+
+fn parse_config_file(path: &Path, source: &str) -> Result<LintConfig, String> {
+    let mut config = LintConfig::parse(source)
         .map_err(|error| format!("invalid config '{}': {error}", path.display()))?;
     if !config.include_dirs().is_empty() {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
@@ -767,7 +915,6 @@ fn load_config_file(path: &Path) -> Result<LintConfig, String> {
             .collect();
         config.set_include_dirs(include_dirs);
     }
-    validate_effective_config(&config)?;
     Ok(config)
 }
 
@@ -809,6 +956,39 @@ fn handle_notification(
     notification: Notification,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match notification.method.as_str() {
+        "workspace/didChangeWorkspaceFolders" => {
+            let params: DidChangeWorkspaceFoldersParams =
+                serde_json::from_value(notification.params)?;
+            state.workspace_revision = state.workspace_revision.wrapping_add(1);
+            for removed in params.event.removed {
+                state
+                    .workspace_folders
+                    .retain(|folder| folder.uri != removed.uri);
+            }
+            for added in params.event.added {
+                if let Ok(path) = added.uri.to_file_path() {
+                    state.known_workspace_folders.insert(normalize_path(&path));
+                }
+                if !state
+                    .workspace_folders
+                    .iter()
+                    .any(|folder| folder.uri == added.uri)
+                {
+                    state.workspace_folders.push(added);
+                }
+            }
+            state
+                .workspace_folders
+                .sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
+            let mut roots: Vec<_> = state
+                .documents
+                .keys()
+                .filter(|uri| is_lsl_document(uri))
+                .cloned()
+                .collect();
+            roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            schedule_roots(connection, state, worker, roots)?;
+        }
         "textDocument/didOpen" => {
             let params: lsp_types::DidOpenTextDocumentParams =
                 serde_json::from_value(notification.params)?;
@@ -916,6 +1096,7 @@ fn handle_notification(
                 affected.retain(|root| root != &closed_uri);
                 worker.close_root(&closed_uri);
                 state.symbols_by_root.remove(&closed_uri);
+                state.configuration_errors_by_root.remove(&closed_uri);
                 state.dependencies_by_root.remove(&closed_uri);
                 state
                     .dependency_tracking_incomplete_by_root
@@ -941,7 +1122,7 @@ fn schedule_file_operation_roots(
     // filesystem generation must be discarded even when their dependency
     // scan has not populated dependencies_by_root yet (or the worker has
     // cleared `running` but the main thread has not accepted its result).
-    state.file_operation_revision = state.file_operation_revision.saturating_add(1);
+    state.workspace_revision = state.workspace_revision.wrapping_add(1);
 
     // Requeue pending and active roots immediately. The generation check below
     // remains necessary for the narrow completed-but-not-yet-accepted window.
@@ -984,23 +1165,74 @@ fn schedule_roots(
     if roots.is_empty() {
         return Ok(());
     }
-    for root_uri in &roots {
-        state.symbols_by_root.remove(root_uri);
-    }
-    let Some(config) = &state.config else {
-        for root_uri in roots {
-            if state.documents.contains_key(&root_uri) {
+
+    let mut tasks = Vec::with_capacity(roots.len());
+    for root_uri in roots {
+        state.symbols_by_root.remove(&root_uri);
+        if !state.documents.contains_key(&root_uri) {
+            continue;
+        }
+        let root_path = match root_uri.to_file_path() {
+            Ok(path) => path,
+            Err(_) => {
                 publish_for_root(connection, state, &root_uri, HashMap::new())?;
+                continue;
+            }
+        };
+        let workspace_root = workspace_root_for_document(
+            &root_uri,
+            &state.workspace_folders,
+            &state.known_workspace_folders,
+        );
+        match load_document_config(
+            &root_path,
+            workspace_root.as_deref(),
+            state.config_path.as_deref(),
+            state.documents.as_ref(),
+        ) {
+            Ok((config, configuration_dependencies)) => {
+                state.configuration_errors_by_root.remove(&root_uri);
+                if let Some(task) = make_analysis_task(
+                    root_uri,
+                    Arc::clone(&state.documents),
+                    config,
+                    configuration_dependencies,
+                    state.workspace_revision,
+                ) {
+                    tasks.push(task);
+                }
+            }
+            Err(error) => {
+                // A failed config/manifest parse has no worker result from
+                // which to retain file dependencies. Keep a conservative
+                // incomplete entry so editing any local file can recover it.
+                if let Ok(path) = root_uri.to_file_path() {
+                    state
+                        .dependencies_by_root
+                        .entry(root_uri.clone())
+                        .or_insert_with(|| HashSet::from([normalize_path(&path)]));
+                    state
+                        .dependency_tracking_incomplete_by_root
+                        .insert(root_uri.clone());
+                }
+                let should_report = state
+                    .configuration_errors_by_root
+                    .insert(root_uri.clone(), error.clone())
+                    .as_ref()
+                    != Some(&error);
+                eprintln!("NeoLint configuration for {root_uri}: {error}");
+                publish_for_root(connection, state, &root_uri, HashMap::new())?;
+                if should_report {
+                    send_show_message(
+                        connection,
+                        MessageType::ERROR,
+                        &format!("NeoLint configuration for {}: {error}", root_uri),
+                    )?;
+                }
             }
         }
-        return Ok(());
-    };
-    worker.schedule_many(
-        roots,
-        Arc::clone(&state.documents),
-        config.clone(),
-        state.file_operation_revision,
-    );
+    }
+    worker.schedule_many(tasks);
     Ok(())
 }
 
@@ -2791,7 +3023,10 @@ mod tests {
     fn ignores_stale_document_versions() {
         let uri = Url::parse("file:///tmp/hello.lsl").unwrap();
         let mut state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
@@ -2806,7 +3041,7 @@ mod tests {
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
         let stale_version = 7;
         let document = Arc::make_mut(&mut state.documents).get_mut(&uri).unwrap();
@@ -2868,7 +3103,7 @@ mod tests {
             root_uri: uri.clone(),
             root_version: version,
             root_revision: revision,
-            file_operation_revision: 0,
+            workspace_revision: 0,
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
@@ -2879,6 +3114,7 @@ mod tests {
             )])
             .into(),
             config: LintConfig::default(),
+            configuration_dependencies: HashSet::new(),
         };
         let mut pending = PendingAnalyses::default();
 
@@ -2903,7 +3139,10 @@ mod tests {
         let include_uri = Url::parse("file:///tmp/shared.inc").unwrap();
         let unrelated_uri = Url::parse("file:///tmp/unrelated.lsl").unwrap();
         let mut state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: HashMap::from([
                 (
                     root_uri.clone(),
@@ -2936,13 +3175,13 @@ mod tests {
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 12,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 4,
             root_revision: 10,
-            file_operation_revision: 0,
+            workspace_revision: 0,
             dependencies: HashSet::from([
                 normalize_path(&root_uri.to_file_path().unwrap()),
                 normalize_path(&include_uri.to_file_path().unwrap()),
@@ -3033,10 +3272,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_file_operation_revision_rejects_pre_operation_results() {
+    fn workspace_revision_rejects_pre_operation_results() {
         let root_uri = Url::parse("file:///tmp/file-operation-race.lsl").unwrap();
         let mut state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: HashMap::from([(
                 root_uri.clone(),
                 DocumentState {
@@ -3051,13 +3293,13 @@ mod tests {
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
-            file_operation_revision: 7,
+            workspace_revision: 7,
         };
         let result = AnalysisResult {
             root_uri,
             root_version: 1,
             root_revision: 1,
-            file_operation_revision: 7,
+            workspace_revision: 7,
             dependencies: HashSet::new(),
             dependencies_complete: true,
             dependency_revisions: HashMap::new(),
@@ -3068,7 +3310,7 @@ mod tests {
         assert!(analysis_snapshot_is_current(&state, &result));
         // Document versions and dependency signatures stay exactly the same;
         // only the workspace filesystem generation changes.
-        state.file_operation_revision += 1;
+        state.workspace_revision += 1;
         assert!(
             !analysis_snapshot_is_current(&state, &result),
             "a result created before a file operation must never be published"
@@ -3083,7 +3325,7 @@ mod tests {
             root_uri: uri.clone(),
             root_version: 1,
             root_revision: 1,
-            file_operation_revision: 3,
+            workspace_revision: 3,
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
@@ -3094,6 +3336,7 @@ mod tests {
             )])
             .into(),
             config: LintConfig::default(),
+            configuration_dependencies: HashSet::new(),
         };
         let pending = PendingAnalyses {
             tasks: HashMap::from([(pending_uri.clone(), make_task(&pending_uri))]),
@@ -3117,7 +3360,10 @@ mod tests {
         let include_uri = Url::parse("file:///tmp/incomplete.inc").unwrap();
         let unrelated_uri = Url::parse("file:///tmp/unrelated.inc").unwrap();
         let mut state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: HashMap::from([
                 (
                     root_uri.clone(),
@@ -3153,7 +3399,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::from([root_uri.clone()]),
             next_revision: 3,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
 
         assert_eq!(
@@ -3167,7 +3413,7 @@ mod tests {
             root_uri: root_uri.clone(),
             root_version: 1,
             root_revision: 1,
-            file_operation_revision: 0,
+            workspace_revision: 0,
             dependencies,
             dependencies_complete: false,
             dependency_revisions: snapshot,
@@ -3277,7 +3523,10 @@ mod tests {
             ),
         ]);
         let state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: Arc::new(documents),
             published_by_root: HashMap::new(),
             symbols_by_root: HashMap::new(),
@@ -3304,7 +3553,7 @@ mod tests {
             ]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 3,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
 
         assert_eq!(
@@ -3324,7 +3573,10 @@ mod tests {
         let folder_uri = Url::parse("file:///tmp/project/includes").unwrap();
         let nested_include = PathBuf::from("/tmp/project/includes/nested/shared.inc");
         let state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: Arc::new(HashMap::from([(
                 root_uri.clone(),
                 DocumentState {
@@ -3344,7 +3596,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
 
         assert_eq!(
@@ -3359,7 +3611,10 @@ mod tests {
         let folder_uri = Url::parse("file:///tmp/project/include-alias").unwrap();
         let lexical_include = PathBuf::from("/tmp/project/include-alias/nested/shared.inc");
         let state = ServerState {
-            config: Some(LintConfig::default()),
+            workspace_folders: Vec::new(),
+            known_workspace_folders: HashSet::new(),
+            config_path: None,
+            configuration_errors_by_root: HashMap::new(),
             documents: Arc::new(HashMap::from([(
                 root_uri.clone(),
                 DocumentState {
@@ -3379,7 +3634,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
-            file_operation_revision: 0,
+            workspace_revision: 0,
         };
 
         assert_eq!(
@@ -3423,6 +3678,7 @@ mod tests {
                 uri.clone(),
                 Arc::clone(&documents),
                 LintConfig::default(),
+                HashSet::new(),
                 0,
             )
             .unwrap()
@@ -3649,13 +3905,77 @@ mod tests {
             "preprocess = true\ninclude_dir = includes\n",
         )
         .unwrap();
-        let (config, error) = load_config(Some(&root), None);
-        assert!(error.is_none(), "{error:?}");
-        let config = config.unwrap();
+        let document = root.join("main.lsl");
+        fs::write(&document, "default {}\n").unwrap();
+        let (config, dependencies) =
+            load_document_config(&document, Some(&root), None, &HashMap::new()).unwrap();
+        assert!(dependencies.contains(&normalize_path(&root.join(".neolint.conf"))));
         assert_eq!(
             config.include_dirs(),
             &[root.join("includes"), normalize_path(&root)]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_defaults_apply_to_external_editor_copies_but_script_overlays_do_not() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("neolint-lsp-project-config-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("main.lsl"), "default {}\n").unwrap();
+        fs::write(root.join("temporary-copy.lsl"), "default {}\n").unwrap();
+        fs::write(root.join("project.conf"), "severity.SEM041 = error\n").unwrap();
+        fs::write(root.join("script.conf"), "disable = SEM041\n").unwrap();
+        fs::write(
+            root.join("neolint.project"),
+            "config = project.conf\nscript = main.lsl\nscript_config = main.lsl => script.conf\n",
+        )
+        .unwrap();
+
+        let (listed, listed_dependencies) =
+            load_document_config(&root.join("main.lsl"), Some(&root), None, &HashMap::new())
+                .unwrap();
+        let (external, external_dependencies) = load_document_config(
+            &root.join("temporary-copy.lsl"),
+            Some(&root),
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(listed.display_suppression().is_suppressed("SEM041"));
+        assert!(!external.display_suppression().is_suppressed("SEM041"));
+        assert!(listed_dependencies.contains(&normalize_path(&root.join("script.conf"))));
+        assert!(!external_dependencies.contains(&normalize_path(&root.join("script.conf"))));
+        assert!(external_dependencies.contains(&normalize_path(&root.join("project.conf"))));
+
+        fs::write(root.join("editor-overlay.conf"), "disable = SEM044\n").unwrap();
+        let (with_overlay, overlay_dependencies) = load_document_config(
+            &root.join("main.lsl"),
+            Some(&root),
+            Some(Path::new("editor-overlay.conf")),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(with_overlay.display_suppression().is_suppressed("SEM044"));
+        assert!(overlay_dependencies.contains(&normalize_path(&root.join("editor-overlay.conf"))));
+
+        // A relative extension path has no stable base for an outside document
+        // in a multi-root workspace; an absolute path remains globally usable.
+        let (outside_without_base, outside_dependencies) = load_document_config(
+            &root.join("temporary-copy.lsl"),
+            None,
+            Some(Path::new("editor-overlay.conf")),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(!outside_without_base
+            .display_suppression()
+            .is_suppressed("SEM044"));
+        assert!(outside_dependencies.is_empty());
+
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3683,8 +4003,16 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("neolint-lsp-validation-{unique}"));
         fs::create_dir_all(root.join("includes")).unwrap();
+        let document = root.join("main.lsl");
+        fs::write(&document, "default {}\n").unwrap();
         fs::write(root.join("plain.conf"), "include_dir = includes\n").unwrap();
-        let no_preprocess = load_config_file(&root.join("plain.conf")).unwrap_err();
+        let no_preprocess = load_document_config(
+            &document,
+            None,
+            Some(&root.join("plain.conf")),
+            &HashMap::new(),
+        )
+        .unwrap_err();
         assert!(
             no_preprocess.contains("include directories require"),
             "{no_preprocess}"
@@ -3695,7 +4023,13 @@ mod tests {
             "preprocess = true\ninclude_dir = missing\n",
         )
         .unwrap();
-        let missing = load_config_file(&root.join("missing.conf")).unwrap_err();
+        let missing = load_document_config(
+            &document,
+            None,
+            Some(&root.join("missing.conf")),
+            &HashMap::new(),
+        )
+        .unwrap_err();
         assert!(
             missing.contains("cannot access include directory"),
             "{missing}"
@@ -3706,7 +4040,13 @@ mod tests {
             "engine = legacy\ntarget = opensim-yengine\n",
         )
         .unwrap();
-        let legacy_target = load_config_file(&root.join("legacy-target.conf")).unwrap_err();
+        let legacy_target = load_document_config(
+            &document,
+            None,
+            Some(&root.join("legacy-target.conf")),
+            &HashMap::new(),
+        )
+        .unwrap_err();
         assert!(
             legacy_target.contains("target profiles require"),
             "{legacy_target}"

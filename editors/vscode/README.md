@@ -35,10 +35,22 @@ then install the resulting `.vsix` through **Extensions: Install from VSIX**.
 
 ## Configuration
 
-The server loads `.neolint.conf` from the first VS Code workspace folder when
-present. Relative `include_dir` paths are resolved relative to that config
-file, matching the CLI's config-file behavior. A custom file can be selected
-with `neolint.configPath` in VS Code settings:
+Configuration is selected independently for each open `.lsl` root. The
+most-specific VS Code workspace folder containing the script is selected.
+Within that folder, NeoLint discovers `neolint.project`: its `config =`
+project-wide layer applies to every root in the folder, while an optional
+`script_config = SCRIPT => CONFIG` overlay applies only to the matching listed
+script. This also lets a Firestorm temporary copy inherit project defaults
+without accidentally inheriting another script's private override. Without a
+project manifest, `.neolint.conf` is used directly. Every script remains an
+independent LSL compilation unit with its own symbols and analysis state.
+
+Relative `include_dir` paths are resolved relative to the config file that
+declares them. An optional `neolint.configPath` setting adds a final config
+overlay to every script; relative paths are resolved against that script's
+selected workspace folder. For files outside all folders in a multi-root
+workspace, use an absolute path for a shared overlay; relative paths have no
+unambiguous base and are not applied:
 
 ```json
 {
@@ -61,13 +73,20 @@ If no config file is found, NeoLint's normal defaults apply. The extension's
    for the Viewer WebSocket session and live synchronization; NeoLint analyses
    the `.lsl` file VS Code opens.
 
-The server supports local `file:` `.lsl` documents. When preprocessing is
-enabled, configured include directories are searched first and the VS Code
-workspace root is added as the final fallback; this avoids treating Firestorm's
-temporary script directory as the project root. Open include buffers are used
-as unsaved overlays, and include changes invalidate only the open roots that
-depend on them. Each affected root is currently reanalyzed in full; incremental
-parsing is not implemented. Per-script `neolint.project` overlays and
-multi-root workspace-specific configuration remain future work. Diagnostics
-originating in an included file are published only to the selected open URI
-whose buffer supplied the analysis snapshot.
+The server supports local `file:` `.lsl` documents and dynamic VS Code
+workspace-folder changes. In a single-folder workspace, an external Firestorm
+temporary script copy retains the historical fallback to that folder. In a
+multi-root workspace, scripts outside every workspace folder are intentionally
+not guessed to belong to the first project and receive workspace-independent
+defaults (an absolute `neolint.configPath` overlay still applies).
+When preprocessing is enabled for a selected workspace, configured include
+directories are searched first and that workspace root is added as the final
+fallback. Open include buffers are used as unsaved overlays, and include
+changes invalidate only the open roots that depend on them. Configuration
+files and the project manifest are tracked as dependencies too, so editing
+their open buffers refreshes affected roots using the unsaved contents. The
+extension synchronizes `.lsl`, `.inc`, `.h`, `.conf`, and `neolint.project`
+files with the server. Each affected root is currently reanalyzed in full;
+incremental parsing is not implemented. Diagnostics originating in an included
+file are published only to the selected open URI whose buffer supplied the
+analysis snapshot.
