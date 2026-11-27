@@ -38,7 +38,7 @@
         "neolint.configPath": {
           "type": "string",
           "default": "",
-          "description": "Optional NeoLint config path. Relative paths are resolved from the first workspace folder. If empty, the server looks for .neolint.conf in the workspace root."
+          "description": "Optional config overlay applied to every script. Relative paths are resolved from that script's selected workspace folder (files outside every folder need an absolute path). If empty, NeoLint discovers neolint.project or .neolint.conf per workspace."
         }
       }
     }

@@ -1,4 +1,3 @@
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
     LanguageClient,
@@ -14,9 +13,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const args = settings.get<string[]>('serverArgs', []);
     const configuredPath = settings.get<string>('configPath', '').trim();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const configPath = configuredPath
-        ? path.resolve(workspaceRoot ?? process.cwd(), configuredPath)
-        : undefined;
+    // Keep relative paths relative: the server resolves this overlay against
+    // the workspace folder selected for each individual document.
+    const configPath = configuredPath || undefined;
 
     const serverOptions: ServerOptions = {
         command,
@@ -27,6 +26,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
             { scheme: 'file', pattern: '**/*.lsl' },
+            { scheme: 'file', pattern: '**/*.inc' },
+            { scheme: 'file', pattern: '**/*.h' },
+            { scheme: 'file', pattern: '**/*.conf' },
+            { scheme: 'file', pattern: '**/neolint.project' },
         ],
         initializationOptions: { configPath },
         outputChannelName: 'NeoLint',

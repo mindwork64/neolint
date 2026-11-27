@@ -98,6 +98,38 @@ impl LspClient {
         supports_document_changes: bool,
         supports_quickfix_literals: bool,
     ) -> Self {
+        Self::with_workspace_folders_and_capabilities(
+            workspace_uri,
+            &[workspace_uri.to_owned()],
+            supports_file_operations,
+            supports_snippets,
+            supports_document_changes,
+            supports_quickfix_literals,
+        )
+    }
+
+    fn with_workspace_folders(workspace_uris: &[String]) -> Self {
+        let workspace_uri = workspace_uris
+            .first()
+            .expect("at least one workspace folder");
+        Self::with_workspace_folders_and_capabilities(
+            workspace_uri,
+            workspace_uris,
+            true,
+            true,
+            true,
+            true,
+        )
+    }
+
+    fn with_workspace_folders_and_capabilities(
+        workspace_uri: &str,
+        workspace_uris: &[String],
+        supports_file_operations: bool,
+        supports_snippets: bool,
+        supports_document_changes: bool,
+        supports_quickfix_literals: bool,
+    ) -> Self {
         let mut capabilities = json!({
             "textDocument": {
                 "completion": {
@@ -105,7 +137,8 @@ impl LspClient {
                 }
             },
             "workspace": {
-                "workspaceEdit": { "documentChanges": supports_document_changes }
+                "workspaceEdit": { "documentChanges": supports_document_changes },
+                "workspaceFolders": true
             }
         });
         if supports_quickfix_literals {
@@ -160,6 +193,14 @@ impl LspClient {
             "params": {
                 "processId": null,
                 "rootUri": workspace_uri,
+                "workspaceFolders": workspace_uris
+                    .iter()
+                    .enumerate()
+                    .map(|(index, uri)| json!({
+                        "uri": uri,
+                        "name": format!("workspace-{index}")
+                    }))
+                    .collect::<Vec<_>>(),
                 "capabilities": capabilities
             }
         }));
@@ -194,6 +235,10 @@ impl LspClient {
                 "the server must not advertise code actions a client cannot receive"
             );
         }
+        assert_eq!(
+            initialize_result["result"]["workspace"]["workspaceFolders"]["supported"], true,
+            "the server must advertise workspace folder support"
+        );
         if supports_file_operations {
             assert_eq!(
                 initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]
@@ -2888,6 +2933,381 @@ fn server_does_not_advertise_or_return_quickfixes_without_literal_support() {
             .find(|message| message.get("id") == Some(&json!(53)))
             .unwrap()["result"],
         json!([])
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn multi_root_workspace_applies_project_and_per_script_config_without_cross_root_leaks() {
+    let workspace_a = unique_workspace("neolint-lsp-multi-root-a");
+    let workspace_b = unique_workspace("neolint-lsp-multi-root-b");
+    fs::create_dir_all(workspace_a.join("scripts")).unwrap();
+    fs::write(
+        workspace_a.join("neolint.project"),
+        concat!(
+            "config = project.conf\n",
+            "script = scripts/project-default.lsl\n",
+            "script = scripts/script-override.lsl\n",
+            "script_config = scripts/script-override.lsl => script.conf\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        workspace_a.join("project.conf"),
+        "severity.SEM041 = error\n",
+    )
+    .unwrap();
+    fs::write(workspace_a.join("script.conf"), "disable = SEM041\n").unwrap();
+    fs::write(workspace_b.join(".neolint.conf"), "disable = SEM041\n").unwrap();
+
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) { llOwnerSay((string)value); } } }\n",
+    );
+    let root_a_path = workspace_a.join("scripts/project-default.lsl");
+    let root_a_override_path = workspace_a.join("scripts/script-override.lsl");
+    let root_b_path = workspace_b.join("main.lsl");
+    fs::write(&root_a_path, source).unwrap();
+    fs::write(&root_a_override_path, source).unwrap();
+    fs::write(&root_b_path, source).unwrap();
+    let root_a_uri = url::Url::from_file_path(&root_a_path).unwrap().to_string();
+    let root_a_override_uri = url::Url::from_file_path(&root_a_override_path)
+        .unwrap()
+        .to_string();
+    let root_b_uri = url::Url::from_file_path(&root_b_path).unwrap().to_string();
+    let workspace_a_uri = url::Url::from_directory_path(&workspace_a)
+        .unwrap()
+        .to_string();
+    let workspace_b_uri = url::Url::from_directory_path(&workspace_b)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::with_workspace_folders(&[workspace_a_uri, workspace_b_uri]);
+
+    let mut published = Vec::new();
+    for root_uri in [&root_a_uri, &root_a_override_uri, &root_b_uri] {
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": root_uri,
+                    "languageId": "lsl",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }));
+        published.extend(client.receive_until(|message| is_publish(message, root_uri, Some(1))));
+    }
+
+    let diagnostic_count = |uri: &str| {
+        published
+            .iter()
+            .find(|message| is_publish(message, uri, Some(1)))
+            .unwrap_or_else(|| panic!("missing diagnostics for {uri}: {published:#?}"))["params"]
+            ["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "SEM041")
+            .cloned()
+    };
+    let project_diagnostic =
+        diagnostic_count(&root_a_uri).expect("project-level config must enable SEM041");
+    assert_eq!(
+        project_diagnostic["severity"], 1,
+        "project severity overlay"
+    );
+    assert!(
+        diagnostic_count(&root_a_override_uri).is_none(),
+        "per-script disable must override the project severity layer"
+    );
+    assert!(
+        diagnostic_count(&root_b_uri).is_none(),
+        "the second workspace's config must not leak into or from the first workspace"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace_a).unwrap();
+    fs::remove_dir_all(workspace_b).unwrap();
+}
+
+#[test]
+fn adding_workspace_folder_reconfigures_already_open_script() {
+    let workspace_a = unique_workspace("neolint-lsp-workspace-change-a");
+    let workspace_b = unique_workspace("neolint-lsp-workspace-change-b");
+    fs::write(workspace_b.join(".neolint.conf"), "disable = SEM041\n").unwrap();
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) { llOwnerSay((string)value); } } }\n",
+    );
+    let root_path = workspace_b.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_a_uri = url::Url::from_directory_path(&workspace_a)
+        .unwrap()
+        .to_string();
+    let workspace_b_uri = url::Url::from_directory_path(&workspace_b)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_a_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_diagnostics = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_diagnostics["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "SEM041"),
+        "outside documents use the single-workspace fallback before the new folder is added"
+    );
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWorkspaceFolders",
+        "params": {
+            "event": {
+                "added": [{ "uri": workspace_b_uri, "name": "second" }],
+                "removed": []
+            }
+        }
+    }));
+    let updated = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let updated_diagnostics = updated
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        updated_diagnostics["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "SEM041"),
+        "adding the document's workspace must reload its own config and reanalyze it"
+    );
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWorkspaceFolders",
+        "params": {
+            "event": {
+                "added": [],
+                "removed": [{ "uri": workspace_b_uri, "name": "second" }]
+            }
+        }
+    }));
+    let removed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let removed_diagnostics = removed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        removed_diagnostics["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "SEM041"),
+        "a document from a removed workspace must not inherit the remaining workspace config"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace_a).unwrap();
+    fs::remove_dir_all(workspace_b).unwrap();
+}
+
+#[test]
+fn editing_a_workspace_config_reanalyzes_roots_that_depend_on_it() {
+    let workspace = unique_workspace("neolint-lsp-config-dependency");
+    let config_path = workspace.join(".neolint.conf");
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) { llOwnerSay((string)value); } } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let config_uri = url::Url::from_file_path(&config_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": config_uri,
+                "languageId": "ini",
+                "version": 1,
+                "text": "severity.SEM041 = error\n"
+            }
+        }
+    }));
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_diagnostic = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap()["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .unwrap()
+        .clone();
+    assert_eq!(initial_diagnostic["severity"], 1);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": config_uri, "version": 2 },
+            "contentChanges": [{ "text": "disable = SEM041\n" }]
+        }
+    }));
+    let updated = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let diagnostics = updated
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap()["params"]["diagnostics"]
+        .as_array()
+        .unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "SEM041"),
+        "editing an unsaved configuration dependency must refresh the effective config"
+    );
+    assert!(
+        !config_path.exists(),
+        "the configuration must remain an unsaved open-document overlay"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn editing_an_open_project_manifest_applies_unsaved_per_script_overrides() {
+    let workspace = unique_workspace("neolint-lsp-manifest-overlay");
+    let manifest_path = workspace.join("neolint.project");
+    let manifest_source = "config = project.conf\nscript = main.lsl\n";
+    fs::write(&manifest_path, manifest_source).unwrap();
+    fs::write(workspace.join("project.conf"), "severity.SEM041 = error\n").unwrap();
+    fs::write(workspace.join("script.conf"), "disable = SEM041\n").unwrap();
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) { llOwnerSay((string)value); } } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let manifest_uri = url::Url::from_file_path(&manifest_path)
+        .unwrap()
+        .to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_diagnostic = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap()["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .unwrap();
+    assert_eq!(initial_diagnostic["severity"], 1);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": manifest_uri,
+                "languageId": "ini",
+                "version": 1,
+                "text": manifest_source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let updated_manifest = concat!(
+        "config = project.conf\n",
+        "script = main.lsl\n",
+        "script_config = main.lsl => script.conf\n",
+    );
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": manifest_uri, "version": 2 },
+            "contentChanges": [{ "text": updated_manifest }]
+        }
+    }));
+    let updated = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let diagnostics = updated
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap()["params"]["diagnostics"]
+        .as_array()
+        .unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "SEM041"),
+        "the unsaved project manifest must supply the live per-script overlay"
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_path).unwrap(),
+        manifest_source,
+        "the test must not rely on saving the changed manifest to disk"
     );
 
     client.shutdown();

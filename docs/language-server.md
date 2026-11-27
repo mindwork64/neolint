@@ -15,7 +15,11 @@ second lexer, parser, semantic engine, or set of lint rules.
   LF, CRLF and supplementary Unicode characters.
 - Configured engine, target, disabled rules, severity overrides, and preprocessor
   settings through `LintConfig`.
-- Workspace `.neolint.conf` discovery or an explicit `neolint.configPath`.
+- Per-document configuration from `neolint.project` (`config` and
+  `script_config` layers) or `.neolint.conf`, with an optional final
+  `neolint.configPath` overlay.
+- Multi-root workspace selection using the most-specific containing folder,
+  including `workspace/didChangeWorkspaceFolders` updates.
 - `textDocument/hover`, `textDocument/definition`, and
   `textDocument/completion` for the current root analysis and target API.
 
@@ -73,12 +77,31 @@ result is accepted only while the root version and every dependency-path open-UR
 revision signature match the task snapshot. Unrelated open documents are ignored.
 Every published diagnostic set carries the current version of its own document.
 
-The initial workspace model uses one workspace configuration. When
-preprocessing is enabled, configured include directories are searched first and
-the workspace root is appended as the final fallback. This is important for
-Firestorm, which opens a temporary copy outside the workspace directory. The
-server does not yet apply per-script project overlays or multi-root
-workspace-specific configuration.
+Every open root `.lsl` document receives its own effective `LintConfig`.
+The server selects the most-specific workspace folder containing that root.
+If the folder contains `neolint.project`, its project `config` layer applies
+to every root in that folder; a matching `script_config` overlay applies only
+to that exact listed script. This lets external-editor temporary copies inherit
+project defaults without inheriting a different script's override. When no
+manifest exists, `.neolint.conf` is used directly.
+The optional initialization `configPath` is applied last and relative paths
+are resolved against the selected folder. These layers use the existing
+`LintConfig::apply_overrides_from` semantics.
+
+Workspace-folder changes reselect configurations and reschedule every open
+root. In a single-folder workspace, documents outside the folder retain the
+legacy fallback to that folder for Firestorm's temporary external-editor copy.
+In a multi-root workspace, an outside document is ambiguous and receives
+NeoLint defaults instead of inheriting an arbitrary project's configuration.
+An absolute `configPath` can still provide a shared overlay; a relative path is
+not applied when no containing folder can provide its base. When preprocessing
+is enabled, configured include directories are searched
+first and the selected workspace root is appended as the final fallback.
+Project manifests and config files are retained in each root's dependency set.
+Open manifest/config buffers are parsed from their current unsaved contents, and
+edits or file operations invalidate roots that use those settings. The VS Code
+client synchronizes `.lsl`, `.inc`, `.h`, `.conf` and `neolint.project` files.
+Each root still has its own independent parser, symbol index and analysis state.
 
 For every analysis task, open local file buffers are captured in an immutable
 snapshot. When a resolved include path matches an open local document, the
