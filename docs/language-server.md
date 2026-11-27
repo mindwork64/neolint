@@ -120,8 +120,12 @@ atomically with the corresponding diagnostics snapshot. The index is discarded
 when a newer document analysis is scheduled, on document close, and whenever
 its version or server-local revision no longer matches the open buffer.
 
-Hover resolves user-defined functions, globals, parameters and locals using the
-AST lexical scope tree. It also provides signatures for functions/events and
+The symbol index is built from the same effective prepared source as analysis,
+so declarations in inactive preprocessor branches are excluded and macro-
+expanded declarations participate in lookup. Source-map spans are projected
+back to the open root buffer before they are exposed to the editor. Hover
+resolves user-defined functions, globals, parameters and locals using the AST
+lexical scope tree. It also provides signatures for functions/events and
 type/value information for built-in constants from the selected target runtime
 catalogue (including target-specific OpenSim APIs). Definition navigates to the
 declaration span for symbols defined in the current script; runtime built-ins

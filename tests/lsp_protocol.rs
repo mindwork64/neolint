@@ -531,6 +531,70 @@ fn hover_and_definition_ignore_vector_component_selectors() {
 }
 
 #[test]
+fn hover_and_definition_follow_the_active_preprocessed_script() {
+    let workspace = unique_workspace("neolint-lsp-hover-preprocessed-symbols");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "#if 0\n",
+        "integer hidden = 1;\n",
+        "#endif\n",
+        "#define DECLARE_COUNTER integer expanded = 7;\n",
+        "DECLARE_COUNTER\n",
+        "default { state_entry() { llOwnerSay((string)expanded); } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let hidden_offset = source.find("hidden").unwrap();
+    let (line, character) = position_of(source, hidden_offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    assert!(
+        hover["result"].is_null(),
+        "declarations removed by #if must not be indexed: {hover:#?}"
+    );
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    assert!(definition["result"].is_null());
+
+    let use_offset = source.rfind("expanded").unwrap();
+    let (line, character) = position_of(source, use_offset);
+    let hover = client.request_position(12, "textDocument/hover", &root_uri, line, character);
+    let hover_text = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        hover_text.contains("integer expanded"),
+        "macro-expanded declaration must participate in symbol resolution: {hover_text}"
+    );
+    let definition =
+        client.request_position(13, "textDocument/definition", &root_uri, line, character);
+    assert_eq!(definition["result"]["uri"], root_uri);
+    assert!(
+        definition["result"]["range"]["start"]["line"].is_number(),
+        "macro-expanded declaration should map to an original root location: {definition:#?}"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn hover_uses_the_selected_opensim_runtime_api_catalogue() {
     let workspace = unique_workspace("neolint-lsp-hover-opensim");
     fs::write(

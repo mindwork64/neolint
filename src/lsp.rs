@@ -266,12 +266,16 @@ struct CachedScriptSymbols {
 }
 
 struct ScriptSymbolIndex {
-    tokens: Vec<crate::lexer::Token>,
-    /// Identifier spans that are AST vector/rotation component selectors, not
-    /// variable references (for example the `x` in `position.x`).
-    component_spans: Vec<Span>,
-    scopes: ScopeTree,
-    function_signatures: HashMap<usize, String>,
+    /// Identifier occurrences mapped back to the open root buffer. Building
+    /// these from the prepared AST keeps inactive preprocessor branches out of
+    /// editor lookup and gives each occurrence its effective source mapping.
+    occurrences: Vec<SymbolOccurrence>,
+}
+
+struct SymbolOccurrence {
+    span: Span,
+    hover: String,
+    definition: Option<Span>,
 }
 
 struct RunningAnalysis {
@@ -1174,17 +1178,29 @@ fn analyze_document(
     if cancellation.is_cancelled() {
         return Err(AnalyzeDocumentError::Cancelled);
     }
-    let parser_options =
-        unit.prepared_source()
-            .map_or(crate::ast::AstParseOptions::lsl(), |prepared| {
+    let prepared = unit.prepared_source();
+    let (symbol_source, parser_options) = prepared.map_or(
+        (document.text.as_ref(), crate::ast::AstParseOptions::lsl()),
+        |prepared| {
+            (
+                prepared.text(),
                 crate::ast::AstParseOptions::from_flags(
                     prepared.switches_enabled(),
                     prepared.lazy_lists_enabled(),
-                )
-            });
+                ),
+            )
+        },
+    );
     let symbols = Arc::new(
-        build_script_symbol_index(&document.text, config, parser_options, cancellation)
-            .ok_or(AnalyzeDocumentError::Cancelled)?,
+        build_script_symbol_index(
+            symbol_source,
+            config,
+            parser_options,
+            cancellation,
+            prepared,
+            root_source,
+        )
+        .ok_or(AnalyzeDocumentError::Cancelled)?,
     );
     if cancellation.is_cancelled() {
         return Err(AnalyzeDocumentError::Cancelled);
@@ -1202,12 +1218,13 @@ fn build_script_symbol_index(
     config: &LintConfig,
     parser_options: crate::ast::AstParseOptions,
     cancellation: &AnalysisCancellationToken,
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
 ) -> Option<ScriptSymbolIndex> {
-    // The raw root buffer is used deliberately: editor positions and symbol
-    // spans must refer to the exact text sent by the client, not preprocessed
-    // include expansions or temporary Firestorm copies. Effective parser gates
-    // come from the prepared analysis snapshot, while lexing/parsing remain
-    // cooperatively cancellable just like the primary analysis pipeline.
+    // The primary analysis and editor index must share one effective source:
+    // inactive conditional branches are absent and macro expansions are
+    // represented in the AST. SourceMap projects each indexed occurrence back
+    // onto the exact open root buffer before it is exposed to the editor.
     let (tokens, _) = crate::lexer::lex_cancellable(source, cancellation)?;
     let (ast, _) =
         crate::ast::parse_ast_with_options_cancellable(&tokens, parser_options, cancellation)?;
@@ -1216,14 +1233,7 @@ fn build_script_symbol_index(
         builtins::catalog_for_target(config.target()),
         config.target(),
     );
-    let component_spans = crate::ast_semantic::expressions::collect_facts(&ast, &scopes)
-        .expressions
-        .into_iter()
-        .filter_map(|site| match &site.expression.kind {
-            crate::ast::ExpressionKind::Component(component) => Some(component.component_span),
-            _ => None,
-        })
-        .collect();
+    let facts = crate::ast_semantic::expressions::collect_facts(&ast, &scopes);
     let mut function_signatures = HashMap::new();
     for item in &ast.items {
         if let TopLevel::Function(function) = item {
@@ -1255,12 +1265,142 @@ fn build_script_symbol_index(
                 )
             });
     }
-    (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex {
-        tokens,
-        component_spans,
-        scopes,
-        function_signatures,
-    })
+
+    let mut occurrences = Vec::new();
+    let mut occurrence_indices = HashMap::new();
+
+    // Declarations themselves are valid hover/definition locations. A
+    // declaration originating in an include can still provide contextual
+    // hover text, but definition is deliberately limited to the open root.
+    for scope in scopes.scopes() {
+        for symbol in &scope.symbols {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            // Declarations in included files have no location in the currently
+            // open root buffer, so keep navigation scoped to this script.
+            if let Some(span) = map_index_span(prepared, root_source, symbol.span) {
+                push_symbol_occurrence(
+                    &mut occurrences,
+                    &mut occurrence_indices,
+                    SymbolOccurrence {
+                        span,
+                        hover: hover_for_user_symbol(&function_signatures, symbol),
+                        definition: Some(span),
+                    },
+                );
+            }
+        }
+    }
+
+    // Resolve each parsed identifier reference using the same lexical scope
+    // and declaration-order rules as semantic analysis. Component selectors
+    // are not IdentifierUse nodes in the AST, so `position.x` cannot bind to an
+    // unrelated variable named `x`.
+    for usage in &facts.uses {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let identifier = usage.identifier;
+        let user_symbol = scopes
+            .lookup_value_at(usage.scope, &identifier.name, identifier.span.start)
+            .or_else(|| {
+                scopes
+                    .lookup(usage.scope, &identifier.name)
+                    .filter(|symbol| symbol.kind == SymbolKind::Function)
+            });
+        let (hover, definition) = if let Some(symbol) = user_symbol {
+            let definition = map_index_span(prepared, root_source, symbol.span);
+            (
+                hover_for_user_symbol(&function_signatures, symbol),
+                definition,
+            )
+        } else {
+            let Some(hover) = hover_for_builtin(&scopes, &identifier.name) else {
+                continue;
+            };
+            (hover, None)
+        };
+        let Some(span) = map_index_span(prepared, root_source, identifier.span) else {
+            continue;
+        };
+        push_symbol_occurrence(
+            &mut occurrences,
+            &mut occurrence_indices,
+            SymbolOccurrence {
+                span,
+                hover,
+                definition,
+            },
+        );
+    }
+
+    // Event names are declaration-like built-in uses, rather than expression
+    // Identifier nodes, so index them explicitly from the parsed active AST.
+    for item in &ast.items {
+        let TopLevel::State(state) = item else {
+            continue;
+        };
+        for event in &state.events {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            let Some(signature) = scopes.builtin_events().get(&event.name) else {
+                continue;
+            };
+            let Some(span) = map_index_span(prepared, root_source, event.name_span) else {
+                continue;
+            };
+            push_symbol_occurrence(
+                &mut occurrences,
+                &mut occurrence_indices,
+                SymbolOccurrence {
+                    span,
+                    hover: format_builtin_signature(signature),
+                    definition: None,
+                },
+            );
+        }
+    }
+
+    occurrences.sort_by_key(|occurrence| (occurrence.span.start, occurrence.span.end));
+
+    (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex { occurrences })
+}
+
+/// Resolve an AST/prepared span to a span in the open root source. Without a
+/// prepared map (the Legacy-only path), AST offsets already address the root.
+fn map_index_span(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Option<Span> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return Some(span);
+    };
+    let prepared_span = prepared.prepared_span(span).ok()?;
+    let resolved = prepared.map().resolve_span(prepared_span).ok()?;
+    let source_span = resolved.primary();
+    (source_span.source() == root_source)
+        .then(|| prepared.map().render_span(source_span).ok())
+        .flatten()
+}
+
+fn push_symbol_occurrence(
+    occurrences: &mut Vec<SymbolOccurrence>,
+    occurrence_indices: &mut HashMap<(usize, usize), usize>,
+    occurrence: SymbolOccurrence,
+) {
+    let key = (occurrence.span.start, occurrence.span.end);
+    if let Some(index) = occurrence_indices.get(&key).copied() {
+        let existing = &mut occurrences[index];
+        if existing.definition.is_none() && occurrence.definition.is_some() {
+            *existing = occurrence;
+        }
+        return;
+    }
+    occurrence_indices.insert(key, occurrences.len());
+    occurrences.push(occurrence);
 }
 
 fn handle_request(request: lsp_server::Request, state: &ServerState) -> Response {
@@ -1317,18 +1457,12 @@ fn hover_at(state: &ServerState, params: &TextDocumentPositionParams) -> Option<
     let uri = &params.text_document.uri;
     let (document, index) = current_symbol_index(state, uri)?;
     let offset = position_to_offset(&document.text, params.position).ok()??;
-    let token = identifier_token_at(index, offset)?;
-    let symbol = resolve_user_symbol(index, offset, token);
-    let value = if let Some(symbol) = symbol {
-        hover_for_user_symbol(index, symbol)
-    } else {
-        hover_for_builtin(index, &token.lexeme)?
-    };
-    let range = span_to_range(&document.text, token.span).ok()?;
+    let occurrence = symbol_occurrence_at(index, offset)?;
+    let range = span_to_range(&document.text, occurrence.span).ok()?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value,
+            value: occurrence.hover.clone(),
         }),
         range: Some(range),
     })
@@ -1338,56 +1472,23 @@ fn definition_at(state: &ServerState, params: &TextDocumentPositionParams) -> Op
     let uri = &params.text_document.uri;
     let (document, index) = current_symbol_index(state, uri)?;
     let offset = position_to_offset(&document.text, params.position).ok()??;
-    let token = identifier_token_at(index, offset)?;
-    let symbol = resolve_user_symbol(index, offset, token)?;
+    let definition = symbol_occurrence_at(index, offset)?.definition?;
     Some(Location {
         uri: uri.clone(),
-        range: span_to_range(&document.text, symbol.span).ok()?,
+        range: span_to_range(&document.text, definition).ok()?,
     })
 }
 
-fn identifier_token_at(index: &ScriptSymbolIndex, offset: usize) -> Option<&crate::lexer::Token> {
-    index.tokens.iter().find(|token| {
-        token.kind == crate::lexer::TokenKind::Identifier
-            && token.span.start <= offset
-            && offset < token.span.end
-            && !index.component_spans.contains(&token.span)
-    })
-}
-
-fn resolve_user_symbol<'a>(
-    index: &'a ScriptSymbolIndex,
-    offset: usize,
-    token: &crate::lexer::Token,
-) -> Option<&'a Symbol> {
-    // A declaration resolves to its own name span even before normal
-    // declaration-order visibility rules would make it available.
-    if let Some(declaration) = index
-        .scopes
-        .scopes()
-        .iter()
-        .flat_map(|scope| &scope.symbols)
-        .find(|symbol| symbol.name == token.lexeme && symbol.span.start == token.span.start)
-    {
-        return Some(declaration);
-    }
-
-    let scope = index.scopes.scope_at(offset);
+fn symbol_occurrence_at(index: &ScriptSymbolIndex, offset: usize) -> Option<&SymbolOccurrence> {
     index
-        .scopes
-        .lookup_value_at(scope, &token.lexeme, offset)
-        .or_else(|| {
-            index
-                .scopes
-                .lookup(scope, &token.lexeme)
-                .filter(|symbol| symbol.kind == SymbolKind::Function)
-        })
+        .occurrences
+        .iter()
+        .find(|occurrence| occurrence.span.start <= offset && offset < occurrence.span.end)
 }
 
-fn hover_for_user_symbol(index: &ScriptSymbolIndex, symbol: &Symbol) -> String {
+fn hover_for_user_symbol(function_signatures: &HashMap<usize, String>, symbol: &Symbol) -> String {
     let declaration = if symbol.kind == SymbolKind::Function {
-        index
-            .function_signatures
+        function_signatures
             .get(&symbol.span.start)
             .cloned()
             .unwrap_or_else(|| format!("function {}", symbol.name))
@@ -1401,8 +1502,8 @@ fn hover_for_user_symbol(index: &ScriptSymbolIndex, symbol: &Symbol) -> String {
     format!("```lsl\n{declaration}\n```")
 }
 
-fn hover_for_builtin(index: &ScriptSymbolIndex, name: &str) -> Option<String> {
-    if let Some(signatures) = index.scopes.builtin_functions().get(name) {
+fn hover_for_builtin(scopes: &ScopeTree, name: &str) -> Option<String> {
+    if let Some(signatures) = scopes.builtin_functions().get(name) {
         let rendered = signatures
             .iter()
             .map(format_builtin_signature)
@@ -1412,10 +1513,10 @@ fn hover_for_builtin(index: &ScriptSymbolIndex, name: &str) -> Option<String> {
             return Some(rendered);
         }
     }
-    if let Some(signature) = index.scopes.builtin_events().get(name) {
+    if let Some(signature) = scopes.builtin_events().get(name) {
         return Some(format_builtin_signature(signature));
     }
-    index.scopes.builtin_constants().get(name).map(|constant| {
+    scopes.builtin_constants().get(name).map(|constant| {
         format!(
             "```lsl\n{} {} = {}\n```",
             constant.type_name, constant.name, constant.value
