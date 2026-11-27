@@ -112,6 +112,28 @@ temporarily exceeds the source-size limit remains watched and a later edit can
 recover the dependent root. Included-file diagnostics are published only to
 the selected open URI whose buffer supplied the snapshot.
 
+## Hover and definition
+
+The server advertises `textDocument/hover` and `textDocument/definition`.
+Queries use a symbol index built on the background analysis worker and published
+atomically with the corresponding diagnostics snapshot. The index is discarded
+when a newer document analysis is scheduled, on document close, and whenever
+its version or server-local revision no longer matches the open buffer.
+
+Hover resolves user-defined functions, globals, parameters and locals using the
+AST lexical scope tree. It also provides signatures for functions/events and
+type/value information for built-in constants from the selected target runtime
+catalogue (including target-specific OpenSim APIs). Definition navigates to the
+declaration span for symbols defined in the current script; runtime built-ins
+have hover documentation but no source definition. Identifiers inside comments
+or string literals are not treated as symbols. Cursor coordinates use LSP
+UTF-16 positions and are converted to source UTF-8 offsets without splitting
+Unicode scalar values or CRLF pairs.
+
+The current navigation scope is intentionally limited to the open script.
+Cross-file include navigation and workspace-wide symbol indexing are not yet
+implemented.
+
 ## Build and run
 
 ```sh

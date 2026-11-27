@@ -256,6 +256,26 @@ impl ScopeTree {
         }
     }
 
+    /// Return the innermost lexical scope containing a source byte offset.
+    ///
+    /// Offsets outside nested blocks resolve in the root scope. Block and
+    /// switch spans are indexed during the same AST walk as declarations, so
+    /// editor queries do not need to reconstruct the lexical hierarchy.
+    #[cfg(feature = "lsp")]
+    pub(crate) fn scope_at(&self, offset: usize) -> ScopeId {
+        let mut selected = (usize::MAX, self.root);
+        for ((start, end), scope) in self.block_scopes.iter().chain(self.switch_scopes.iter()) {
+            if *start <= offset && offset < *end {
+                let width = end.saturating_sub(*start);
+                if width >= selected.0 {
+                    continue;
+                }
+                selected = (width, *scope);
+            }
+        }
+        selected.1
+    }
+
     /// Resolve a visible value binding at a source byte position.
     ///
     /// Function declarations are excluded: they are not LSL values unless
@@ -521,6 +541,28 @@ mod tests {
             }
             scope = current.parent?;
         }
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn scope_at_selects_the_innermost_nested_block() {
+        let source =
+            "default { state_entry() { integer value; { integer value; value = 2; } value = 1; } }";
+        let tree = tree_for(source);
+        let inner_use = source.find("value = 2").unwrap();
+        let outer_use = source.find("value = 1").unwrap();
+
+        let inner_scope = tree.scope_at(inner_use);
+        let outer_scope = tree.scope_at(outer_use);
+        let inner = tree
+            .lookup_value_at(inner_scope, "value", inner_use)
+            .expect("inner block binding is visible");
+        let outer = tree
+            .lookup_value_at(outer_scope, "value", outer_use)
+            .expect("outer block binding is visible after leaving inner block");
+
+        assert_ne!(inner.scope, outer.scope);
+        assert!(tree.is_ancestor(outer.scope, inner.scope));
     }
 
     #[test]
