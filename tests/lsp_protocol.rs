@@ -2423,3 +2423,73 @@ fn completion_preserves_scope_ranges_across_preprocessor_source_gaps() {
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
 }
+
+#[test]
+fn completion_uses_macro_invocation_position_for_declaration_order() {
+    let workspace = unique_workspace("neolint-lsp-completion-macro-local-order");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "#define DECLARE_LOCAL integer macro_local = 1;\n",
+        "integer helper(integer value) {\n",
+        "    integer before_macro = value;\n",
+        "    llGetTime();\n",
+        "    DECLARE_LOCAL\n",
+        "    integer after_macro = macro_local;\n",
+        "    return after_macro;\n",
+        "}\n",
+        "default { state_entry() {} }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let before_cursor =
+        source.find("before_macro = value;").unwrap() + "before_macro = value;".len();
+    let (line, character) = position_of(source, before_cursor);
+    let before = client.request_position(42, "textDocument/completion", &root_uri, line, character);
+    let before_labels: Vec<_> = before["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        !before_labels.contains(&"macro_local"),
+        "macro local must not be suggested before its invocation: {before_labels:?}"
+    );
+
+    let after_cursor =
+        source.find("after_macro = macro_local;").unwrap() + "after_macro = macro_local;".len();
+    let (line, character) = position_of(source, after_cursor);
+    let after = client.request_position(43, "textDocument/completion", &root_uri, line, character);
+    let after_labels: Vec<_> = after["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        after_labels.contains(&"macro_local"),
+        "macro local should be visible after its invocation: {after_labels:?}"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}

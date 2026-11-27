@@ -287,9 +287,11 @@ struct ScriptSymbolIndex {
     scope_tree: ScopeTree,
     /// Lexical scope ranges projected into one or more ranges in the open root buffer.
     scope_ranges: Vec<((usize, usize), crate::ast_semantic::scopes::ScopeId)>,
-    /// Root-buffer declaration spans keyed by lexical scope and AST span.
-    /// Included declarations have no root-buffer span and remain globally visible.
-    symbol_spans: HashMap<(usize, usize, usize), Span>,
+    /// Root-buffer declaration start offsets keyed by lexical scope and AST span.
+    /// Macro expansions use the latest root provenance start (the invocation),
+    /// not the macro definition site. Included declarations have no root offset
+    /// and remain globally visible throughout the including root.
+    symbol_declaration_starts: HashMap<(usize, usize, usize), usize>,
     /// Rendered signatures for user-defined functions keyed by name offset.
     function_signatures: HashMap<usize, String>,
     /// Snippet-form calls for user-defined functions keyed by name offset.
@@ -1427,14 +1429,19 @@ fn build_script_symbol_index(
             scope_ranges.push(((mapped.start, mapped.end), scope));
         }
     }
-    let mut symbol_spans = HashMap::new();
+    let mut symbol_declaration_starts = HashMap::new();
     for (scope_index, scope) in scopes.scopes().iter().enumerate() {
         for symbol in &scope.symbols {
             if cancellation.is_cancelled() {
                 return None;
             }
-            if let Some(mapped) = map_index_span(prepared, root_source, symbol.span) {
-                symbol_spans.insert((scope_index, symbol.span.start, symbol.span.end), mapped);
+            if let Some(declaration_start) =
+                map_index_declaration_start(prepared, root_source, symbol.span)
+            {
+                symbol_declaration_starts.insert(
+                    (scope_index, symbol.span.start, symbol.span.end),
+                    declaration_start,
+                );
             }
         }
     }
@@ -1443,7 +1450,7 @@ fn build_script_symbol_index(
         occurrences,
         scope_tree: scopes,
         scope_ranges,
-        symbol_spans,
+        symbol_declaration_starts,
         function_signatures,
         function_snippets,
         function_plain_calls,
@@ -1483,6 +1490,30 @@ fn map_index_spans(
         }
     }
     mapped
+}
+
+/// Return the declaration's visibility start in the open root buffer.
+///
+/// For a macro-expanded declaration the primary source location can be the
+/// macro definition. The root invocation is retained in the provenance chain,
+/// so the latest root location marks when the declaration becomes visible.
+/// Included-file declarations have no root location and return `None`; they
+/// are visible throughout the including root.
+fn map_index_declaration_start(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Option<usize> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return Some(span.start);
+    };
+    let prepared_span = prepared.prepared_span(span).ok()?;
+    let resolved = prepared.map().resolve_span(prepared_span).ok()?;
+    std::iter::once(resolved.primary())
+        .chain(resolved.related().iter().copied())
+        .filter(|source_span| source_span.source() == root_source)
+        .map(|source_span| source_span.start())
+        .max()
 }
 
 /// Resolve an AST/prepared span to a span in the open root source. Without a
@@ -1656,9 +1687,9 @@ fn completion_at(
             }
             if symbol.kind != SymbolKind::Function
                 && index
-                    .symbol_spans
+                    .symbol_declaration_starts
                     .get(&(scope_id.index(), symbol.span.start, symbol.span.end))
-                    .is_some_and(|span| span.start > offset)
+                    .is_some_and(|declaration_start| *declaration_start > offset)
             {
                 continue;
             }
