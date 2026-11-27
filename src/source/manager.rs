@@ -80,6 +80,20 @@ pub(crate) fn normalize_local_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Identity of a path when its final component is missing, while resolving
+/// existing parent directories (including symlinks). This preserves the
+/// spelling used for a symlinked include after that file is unlinked.
+#[cfg(feature = "lsp")]
+pub(crate) fn normalize_missing_leaf_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return normalize_local_path(path);
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut normalized = normalize_local_path(parent);
+    normalized.push(file_name);
+    normalized
+}
+
 /// Failure to load an original source file.
 #[derive(Debug)]
 pub enum SourceLoadError {
@@ -210,15 +224,20 @@ impl SourceManager {
         if !self.include_dependencies_complete {
             return false;
         }
-        let normalized = normalize_local_path(path);
-        if self.include_dependencies.contains(&normalized) {
-            return true;
+        let normalized = [
+            normalize_local_path(path),
+            normalize_missing_leaf_path(path),
+        ];
+        for dependency in normalized {
+            if self.include_dependencies.contains(&dependency) {
+                continue;
+            }
+            if self.include_dependencies.len() >= MAX_TRACKED_INCLUDE_DEPENDENCIES {
+                self.include_dependencies_complete = false;
+                return false;
+            }
+            self.include_dependencies.insert(dependency);
         }
-        if self.include_dependencies.len() >= MAX_TRACKED_INCLUDE_DEPENDENCIES {
-            self.include_dependencies_complete = false;
-            return false;
-        }
-        self.include_dependencies.insert(normalized);
         true
     }
 
@@ -542,6 +561,32 @@ mod tests {
                 normalize_local_path(&missing_file)
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn records_symlink_include_identity_after_the_link_is_removed() {
+        let directory = temp_dir();
+        let target = directory.join("target.inc");
+        let alias = directory.join("shared.inc");
+        fs::write(&target, "integer shared = 1;").unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let mut manager = SourceManager::new(unit(0));
+
+        assert!(manager.record_include_dependency(&alias));
+        let canonical = normalize_local_path(&alias);
+        let missing_alias = normalize_missing_leaf_path(&alias);
+        assert_ne!(canonical, missing_alias);
+        assert!(manager.include_dependencies().contains(&canonical));
+        assert!(manager.include_dependencies().contains(&missing_alias));
+
+        fs::remove_file(&alias).unwrap();
+        assert_eq!(normalize_local_path(&alias), missing_alias);
+        assert!(manager
+            .include_dependencies()
+            .contains(&normalize_local_path(&alias)));
         fs::remove_dir_all(directory).unwrap();
     }
 

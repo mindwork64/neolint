@@ -858,6 +858,81 @@ fn workspace_file_operations_invalidate_missing_include_dependencies() {
     fs::remove_dir_all(workspace).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn deleting_a_symlinked_include_reanalyzes_its_dependent_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-include");
+    let target_path = workspace.join("actual.inc");
+    let alias_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&target_path, "integer shared = 1;\n").unwrap();
+    std::os::unix::fs::symlink(&target_path, &alias_path).unwrap();
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let alias_uri = url::Url::from_file_path(&alias_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the symlinked include should initially resolve successfully"
+    );
+
+    // The target remains present; only the include alias is unlinked.
+    fs::remove_file(&alias_path).unwrap();
+    assert!(target_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let deleted = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let deleted_publication = deleted
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !deleted_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting a symlinked include must invalidate the root even while its target remains"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
 #[test]
 fn creating_a_higher_priority_include_candidate_changes_resolution() {
     let workspace = unique_workspace("neolint-lsp-include-precedence");

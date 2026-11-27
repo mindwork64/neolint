@@ -755,10 +755,11 @@ fn handle_notification(
         }
         "workspace/didDeleteFiles" => {
             let params: DeleteFilesParams = serde_json::from_value(notification.params)?;
-            let uris = params
+            let uris: Vec<_> = params
                 .files
                 .into_iter()
-                .filter_map(|file| Url::parse(&file.uri).ok());
+                .filter_map(|file| Url::parse(&file.uri).ok())
+                .collect();
             schedule_file_operation_roots(connection, state, worker, uris)?;
         }
         "textDocument/didClose" => {
@@ -795,7 +796,8 @@ fn schedule_file_operation_roots(
     let mut roots = HashSet::new();
     for uri in changed_uris {
         if uri.scheme() == "file" {
-            roots.extend(affected_roots_for_document(state, &uri));
+            let affected = affected_roots_for_document(state, &uri);
+            roots.extend(affected);
         }
     }
     let mut roots: Vec<_> = roots.into_iter().collect();
@@ -1093,7 +1095,9 @@ fn source_dependencies(
     if let Ok(root_path) = root_uri.to_file_path() {
         dependencies.insert(normalize_path(&root_path));
     }
-    dependencies.extend(include_dependencies.iter().map(|path| normalize_path(path)));
+    // The manager stores both canonical targets and post-unlink path
+    // identities for symlink aliases. Do not canonicalize these again here.
+    dependencies.extend(include_dependencies.iter().cloned());
     for source in files {
         if source.kind() != SourceFileKind::Included {
             continue;
