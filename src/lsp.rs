@@ -11,15 +11,18 @@ use crate::diagnostic::{Severity, Span};
 use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
 use crate::pipeline::{AnalysisRun, CancellableSetupError};
 use crate::preprocessor::PreprocessSettings;
+use crate::source::manager::normalize_local_path;
 use crate::source::unit::CancellableAnalysisError;
 use crate::source::{SourceFile, SourceFileKind, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
-    Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
-    InitializeParams, Location, MessageType, Position, PublishDiagnosticsParams, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    Url,
+    CreateFilesParams, DeleteFilesParams, Diagnostic as LspDiagnostic,
+    DiagnosticRelatedInformation, DiagnosticSeverity, FileOperationFilter, FileOperationPattern,
+    FileOperationRegistrationOptions, InitializeParams, Location, MessageType, Position,
+    PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, Url,
+    WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -45,6 +48,48 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (config, config_error) =
         load_config(workspace_root.as_deref(), options.config_path.as_deref());
 
+    let file_operations = FileOperationRegistrationOptions {
+        filters: vec![FileOperationFilter {
+            scheme: Some("file".to_owned()),
+            pattern: FileOperationPattern {
+                glob: "**/*".to_owned(),
+                // Omit matches to subscribe to both file and folder operations.
+                matches: None,
+                options: None,
+            },
+        }],
+    };
+    let client_file_operations = initialize_params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.file_operations.as_ref());
+    let server_file_operations =
+        client_file_operations.map(|client| WorkspaceFileOperationsServerCapabilities {
+            did_create: client
+                .did_create
+                .unwrap_or(false)
+                .then(|| file_operations.clone()),
+            did_rename: client
+                .did_rename
+                .unwrap_or(false)
+                .then(|| file_operations.clone()),
+            did_delete: client
+                .did_delete
+                .unwrap_or(false)
+                .then(|| file_operations.clone()),
+            ..Default::default()
+        });
+    let workspace = server_file_operations
+        .filter(|operations| {
+            operations.did_create.is_some()
+                || operations.did_rename.is_some()
+                || operations.did_delete.is_some()
+        })
+        .map(|file_operations| WorkspaceServerCapabilities {
+            file_operations: Some(file_operations),
+            ..Default::default()
+        });
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -54,6 +99,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                 ..Default::default()
             },
         )),
+        workspace,
         ..Default::default()
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(capabilities)?)?;
@@ -73,6 +119,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
         dependencies_by_root: HashMap::new(),
+        dependency_tracking_incomplete_by_root: HashSet::new(),
         next_revision: 0,
     };
     let mut worker = AnalysisWorker::new()?;
@@ -170,6 +217,9 @@ struct ServerState {
     published_by_root: HashMap<Url, RootDiagnostics>,
     /// Source documents actually loaded by each root's most recent analysis.
     dependencies_by_root: HashMap<Url, HashSet<PathBuf>>,
+    /// Roots whose dependency index exceeded its path budget; changes to any
+    /// open local document conservatively reanalyze these roots.
+    dependency_tracking_incomplete_by_root: HashSet<Url>,
     next_revision: u64,
 }
 
@@ -184,6 +234,7 @@ struct AnalysisResult {
     root_uri: Url,
     root_version: i32,
     dependencies: HashSet<PathBuf>,
+    dependencies_complete: bool,
     dependency_revisions: HashMap<PathBuf, HashMap<Url, u64>>,
     diagnostics: Result<RootDiagnostics, String>,
 }
@@ -191,6 +242,7 @@ struct AnalysisResult {
 struct AnalyzedDocument {
     diagnostics: RootDiagnostics,
     dependencies: HashSet<PathBuf>,
+    dependencies_complete: bool,
 }
 
 struct RunningAnalysis {
@@ -331,10 +383,17 @@ fn affected_roots_for_document(state: &ServerState, changed_uri: &Url) -> Vec<Ur
         .ok()
         .map(|path| normalize_path(&path));
     for (root_uri, dependencies) in &state.dependencies_by_root {
-        if state.documents.contains_key(root_uri)
-            && changed_path
-                .as_ref()
-                .is_some_and(|path| dependencies.contains(path))
+        if !state.documents.contains_key(root_uri) || changed_path.is_none() {
+            continue;
+        }
+        if state
+            .dependency_tracking_incomplete_by_root
+            .contains(root_uri)
+            || changed_path.as_ref().is_some_and(|path| {
+                dependencies
+                    .iter()
+                    .any(|dependency| dependency == path || dependency.starts_with(path))
+            })
         {
             roots.insert(root_uri.clone());
         }
@@ -358,6 +417,7 @@ fn enqueue_pending(pending: &mut PendingAnalyses, task: AnalysisTask) -> bool {
 fn dependency_revision_snapshot(
     dependencies: &HashSet<PathBuf>,
     documents: &HashMap<Url, DocumentState>,
+    dependencies_complete: bool,
 ) -> HashMap<PathBuf, HashMap<Url, u64>> {
     let mut open_by_path = HashMap::<PathBuf, HashMap<Url, u64>>::new();
     for (uri, document) in documents {
@@ -367,6 +427,9 @@ fn dependency_revision_snapshot(
                 .or_default()
                 .insert(uri.clone(), document.revision);
         }
+    }
+    if !dependencies_complete {
+        return open_by_path;
     }
     dependencies
         .iter()
@@ -379,8 +442,11 @@ fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) ->
         .documents
         .get(&result.root_uri)
         .is_some_and(|document| document.version == result.root_version)
-        && dependency_revision_snapshot(&result.dependencies, &state.documents)
-            == result.dependency_revisions
+        && dependency_revision_snapshot(
+            &result.dependencies,
+            &state.documents,
+            result.dependencies_complete,
+        ) == result.dependency_revisions
 }
 
 fn analysis_worker_loop(
@@ -430,8 +496,12 @@ fn analysis_worker_loop(
         if was_cancelled {
             continue;
         }
-        let (dependencies, diagnostics) = match result {
-            Ok(analysis) => (analysis.dependencies, Ok(analysis.diagnostics)),
+        let (dependencies, dependencies_complete, diagnostics) = match result {
+            Ok(analysis) => (
+                analysis.dependencies,
+                analysis.dependencies_complete,
+                Ok(analysis.diagnostics),
+            ),
             Err(AnalyzeDocumentError::Failure(error)) => {
                 let dependencies = task
                     .root_uri
@@ -439,17 +509,21 @@ fn analysis_worker_loop(
                     .ok()
                     .map(|path| HashSet::from([normalize_path(&path)]))
                     .unwrap_or_default();
-                (dependencies, Err(error))
+                (dependencies, false, Err(error))
             }
             Err(AnalyzeDocumentError::Cancelled) => continue,
         };
-        let dependency_revisions =
-            dependency_revision_snapshot(&dependencies, task.documents.as_ref());
+        let dependency_revisions = dependency_revision_snapshot(
+            &dependencies,
+            task.documents.as_ref(),
+            dependencies_complete,
+        );
         if result_sender
             .send(AnalysisResult {
                 root_uri: task.root_uri,
                 root_version: task.root_version,
                 dependencies,
+                dependencies_complete,
                 dependency_revisions,
                 diagnostics,
             })
@@ -659,6 +733,34 @@ fn handle_notification(
                 schedule_affected_roots(connection, state, worker, &uri)?;
             }
         }
+        "workspace/didCreateFiles" => {
+            let params: CreateFilesParams = serde_json::from_value(notification.params)?;
+            let uris = params
+                .files
+                .into_iter()
+                .filter_map(|file| Url::parse(&file.uri).ok());
+            schedule_file_operation_roots(connection, state, worker, uris)?;
+        }
+        "workspace/didRenameFiles" => {
+            let params: RenameFilesParams = serde_json::from_value(notification.params)?;
+            let uris = params.files.into_iter().flat_map(|file| {
+                [
+                    Url::parse(&file.old_uri).ok(),
+                    Url::parse(&file.new_uri).ok(),
+                ]
+                .into_iter()
+                .flatten()
+            });
+            schedule_file_operation_roots(connection, state, worker, uris)?;
+        }
+        "workspace/didDeleteFiles" => {
+            let params: DeleteFilesParams = serde_json::from_value(notification.params)?;
+            let uris = params
+                .files
+                .into_iter()
+                .filter_map(|file| Url::parse(&file.uri).ok());
+            schedule_file_operation_roots(connection, state, worker, uris)?;
+        }
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params)?;
@@ -670,6 +772,9 @@ fn handle_notification(
                 affected.retain(|root| root != &closed_uri);
                 worker.close_root(&closed_uri);
                 state.dependencies_by_root.remove(&closed_uri);
+                state
+                    .dependency_tracking_incomplete_by_root
+                    .remove(&closed_uri);
                 schedule_roots(connection, state, worker, affected)?;
                 clear_root_diagnostics(connection, state, &closed_uri)?;
             } else {
@@ -679,6 +784,23 @@ fn handle_notification(
         _ => {}
     }
     Ok(())
+}
+
+fn schedule_file_operation_roots(
+    connection: &Connection,
+    state: &mut ServerState,
+    worker: &AnalysisWorker,
+    changed_uris: impl IntoIterator<Item = Url>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut roots = HashSet::new();
+    for uri in changed_uris {
+        if uri.scheme() == "file" {
+            roots.extend(affected_roots_for_document(state, &uri));
+        }
+    }
+    let mut roots: Vec<_> = roots.into_iter().collect();
+    roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    schedule_roots(connection, state, worker, roots)
 }
 
 fn remove_tracked_document(documents: &mut Arc<HashMap<Url, DocumentState>>, uri: &Url) -> bool {
@@ -738,6 +860,15 @@ fn handle_analysis_result(
             state
                 .dependencies_by_root
                 .insert(result.root_uri.clone(), result.dependencies);
+            if result.dependencies_complete {
+                state
+                    .dependency_tracking_incomplete_by_root
+                    .remove(&result.root_uri);
+            } else {
+                state
+                    .dependency_tracking_incomplete_by_root
+                    .insert(result.root_uri.clone());
+            }
             publish_for_root(connection, state, &result.root_uri, diagnostics)?;
         }
         Err(error) => {
@@ -755,6 +886,12 @@ fn handle_analysis_result(
                         .map(|path| HashSet::from([normalize_path(&path)]))
                         .unwrap_or_default()
                 });
+            // The failed attempt may not have completed include discovery.
+            // Preserve the last successful edges but fall back to watching all
+            // local file operations until a later analysis succeeds.
+            state
+                .dependency_tracking_incomplete_by_root
+                .insert(result.root_uri.clone());
             eprintln!("NeoLint analysis failed for {}: {error}", result.root_uri);
             publish_for_root(connection, state, &result.root_uri, HashMap::new())?;
             send_show_message(
@@ -858,6 +995,7 @@ fn analyze_document(
         unit.manager().files(),
         unit.manager().include_dependencies(),
     );
+    let dependencies_complete = unit.manager().include_dependencies_complete();
 
     let mut output = HashMap::<Url, Vec<LspDiagnostic>>::new();
     output.entry(root_uri.clone()).or_default();
@@ -942,6 +1080,7 @@ fn analyze_document(
     Ok(AnalyzedDocument {
         diagnostics: output,
         dependencies,
+        dependencies_complete,
     })
 }
 
@@ -983,15 +1122,7 @@ fn uri_for_open_source(
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
-        }
-    })
+    normalize_local_path(path)
 }
 
 fn span_to_range(text: &str, span: Span) -> Result<Range, String> {
@@ -1251,6 +1382,7 @@ mod tests {
             .into(),
             published_by_root: HashMap::new(),
             dependencies_by_root: HashMap::new(),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
         };
         let stale_version = 7;
@@ -1376,6 +1508,7 @@ mod tests {
             .into(),
             published_by_root: HashMap::new(),
             dependencies_by_root: HashMap::new(),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 12,
         };
         let result = AnalysisResult {
@@ -1385,6 +1518,7 @@ mod tests {
                 normalize_path(&root_uri.to_file_path().unwrap()),
                 normalize_path(&include_uri.to_file_path().unwrap()),
             ]),
+            dependencies_complete: true,
             dependency_revisions: HashMap::from([
                 (
                     normalize_path(&root_uri.to_file_path().unwrap()),
@@ -1468,6 +1602,76 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn incomplete_dependency_tracking_invalidates_on_any_local_document_change() {
+        let root_uri = Url::parse("file:///tmp/incomplete-root.lsl").unwrap();
+        let include_uri = Url::parse("file:///tmp/incomplete.inc").unwrap();
+        let unrelated_uri = Url::parse("file:///tmp/unrelated.inc").unwrap();
+        let mut state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: HashMap::from([
+                (
+                    root_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("root"),
+                        version: 1,
+                        revision: 1,
+                    },
+                ),
+                (
+                    include_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("include"),
+                        version: 1,
+                        revision: 2,
+                    },
+                ),
+                (
+                    unrelated_uri.clone(),
+                    DocumentState {
+                        text: Arc::from("unrelated"),
+                        version: 1,
+                        revision: 3,
+                    },
+                ),
+            ])
+            .into(),
+            published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::from([(
+                root_uri.clone(),
+                HashSet::from([normalize_path(&root_uri.to_file_path().unwrap())]),
+            )]),
+            dependency_tracking_incomplete_by_root: HashSet::from([root_uri.clone()]),
+            next_revision: 3,
+        };
+
+        assert_eq!(
+            affected_roots_for_document(&state, &unrelated_uri),
+            vec![root_uri.clone()]
+        );
+
+        let dependencies = state.dependencies_by_root[&root_uri].clone();
+        let snapshot = dependency_revision_snapshot(&dependencies, &state.documents, false);
+        let result = AnalysisResult {
+            root_uri: root_uri.clone(),
+            root_version: 1,
+            dependencies,
+            dependencies_complete: false,
+            dependency_revisions: snapshot,
+            diagnostics: Ok(HashMap::new()),
+        };
+        assert!(analysis_snapshot_is_current(&state, &result));
+
+        Arc::make_mut(&mut state.documents)
+            .get_mut(&unrelated_uri)
+            .unwrap()
+            .revision = 4;
+        assert!(
+            !analysis_snapshot_is_current(&state, &result),
+            "an incomplete dependency index must guard the full open-document snapshot"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn dependency_snapshot_tracks_all_open_uri_aliases_for_a_local_path() {
@@ -1505,7 +1709,7 @@ mod tests {
             ),
         ]);
         let dependencies = HashSet::from([path.clone()]);
-        let snapshot = dependency_revision_snapshot(&dependencies, &documents);
+        let snapshot = dependency_revision_snapshot(&dependencies, &documents, true);
         assert_eq!(snapshot[&path], HashMap::from([(canonical_uri.clone(), 2)]));
 
         let mut with_alias = documents;
@@ -1517,7 +1721,7 @@ mod tests {
                 revision: 3,
             },
         );
-        let alias_snapshot = dependency_revision_snapshot(&dependencies, &with_alias);
+        let alias_snapshot = dependency_revision_snapshot(&dependencies, &with_alias, true);
         assert_eq!(
             alias_snapshot[&path],
             HashMap::from([(canonical_uri, 2), (alias_uri, 3)])
@@ -1583,6 +1787,7 @@ mod tests {
                     HashSet::from([normalize_path(&root_c.to_file_path().unwrap())]),
                 ),
             ]),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 3,
         };
 
@@ -1595,6 +1800,39 @@ mod tests {
             vec![root_c.clone()]
         );
         assert_eq!(affected_roots_for_document(&state, &root_a), vec![root_a]);
+    }
+
+    #[test]
+    fn folder_operations_invalidate_include_dependencies_below_the_folder() {
+        let root_uri = Url::parse("file:///tmp/project/main.lsl").unwrap();
+        let folder_uri = Url::parse("file:///tmp/project/includes").unwrap();
+        let nested_include = PathBuf::from("/tmp/project/includes/nested/shared.inc");
+        let state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: Arc::new(HashMap::from([(
+                root_uri.clone(),
+                DocumentState {
+                    text: Arc::from("root"),
+                    version: 1,
+                    revision: 1,
+                },
+            )])),
+            published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::from([(
+                root_uri.clone(),
+                HashSet::from([
+                    normalize_path(&root_uri.to_file_path().unwrap()),
+                    normalize_path(&nested_include),
+                ]),
+            )]),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
+            next_revision: 1,
+        };
+
+        assert_eq!(
+            affected_roots_for_document(&state, &folder_uri),
+            vec![root_uri]
+        );
     }
 
     #[test]

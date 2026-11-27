@@ -224,14 +224,14 @@ pub(crate) fn is_remote_spelling(spelling: &str) -> bool {
         || spelling.starts_with("\\\\")
 }
 
-pub(crate) fn resolve_include(
+fn include_candidates(
     spelling: &str,
     angle: bool,
     current_directory: Option<&Path>,
     include_dirs: &[PathBuf],
-) -> Option<PathBuf> {
+) -> Vec<PathBuf> {
     if is_remote_spelling(spelling) {
-        return None;
+        return Vec::new();
     }
     let requested = Path::new(spelling);
     let mut candidates = Vec::new();
@@ -247,11 +247,148 @@ pub(crate) fn resolve_include(
             candidates.push(directory.join(requested));
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    candidates
+}
+
+/// Resolve an include and return every candidate that can affect the result.
+///
+/// Candidates are in search order and stop at the first existing regular file.
+/// If no candidate exists, all searched paths are returned so an editor can
+/// invalidate the including root when one of them is later created.
+#[cfg(feature = "lsp")]
+pub(crate) fn resolve_include_with_dependencies(
+    spelling: &str,
+    angle: bool,
+    current_directory: Option<&Path>,
+    include_dirs: &[PathBuf],
+) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut dependencies = Vec::new();
+    let candidates = include_candidates(spelling, angle, current_directory, include_dirs);
+    for candidate in candidates {
+        let found = candidate.is_file();
+        dependencies.push(candidate.clone());
+        if found {
+            return (Some(candidate), dependencies);
+        }
+    }
+    (None, dependencies)
+}
+
+/// Resolve an include using the original CLI search behavior.
+#[cfg(not(feature = "lsp"))]
+pub(crate) fn resolve_include(
+    spelling: &str,
+    angle: bool,
+    current_directory: Option<&Path>,
+    include_dirs: &[PathBuf],
+) -> Option<PathBuf> {
+    include_candidates(spelling, angle, current_directory, include_dirs)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 pub(crate) fn display_include_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(all(test, feature = "lsp"))]
+mod resolution_tests {
+    use super::resolve_include_with_dependencies;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("neolint-include-{label}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn missing_include_returns_every_search_candidate_in_order() {
+        let root = temp_dir("missing-candidates");
+        let source_dir = root.join("scripts");
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+
+        let (resolved, dependencies) = resolve_include_with_dependencies(
+            "shared.inc",
+            false,
+            Some(&source_dir),
+            &[first_dir.clone(), second_dir.clone()],
+        );
+
+        assert!(resolved.is_none());
+        assert_eq!(
+            dependencies,
+            vec![
+                source_dir.join("shared.inc"),
+                first_dir.join("shared.inc"),
+                second_dir.join("shared.inc"),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolved_include_tracks_only_higher_priority_candidates_and_the_hit() {
+        let root = temp_dir("precedence-candidates");
+        let source_dir = root.join("scripts");
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        let third_dir = root.join("third");
+        for directory in [&source_dir, &first_dir, &second_dir, &third_dir] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let selected = second_dir.join("shared.inc");
+        fs::write(&selected, "integer shared = 1;").unwrap();
+
+        let (resolved, dependencies) = resolve_include_with_dependencies(
+            "shared.inc",
+            false,
+            Some(&source_dir),
+            &[first_dir.clone(), second_dir.clone(), third_dir.clone()],
+        );
+
+        assert_eq!(resolved, Some(selected.clone()));
+        assert_eq!(
+            dependencies,
+            vec![
+                source_dir.join("shared.inc"),
+                first_dir.join("shared.inc"),
+                selected,
+            ]
+        );
+        assert!(!dependencies.contains(&third_dir.join("shared.inc")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn angle_include_does_not_watch_the_including_file_directory() {
+        let root = temp_dir("angle-candidates");
+        let source_dir = root.join("scripts");
+        let include_dir = root.join("include");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&include_dir).unwrap();
+
+        let (resolved, dependencies) = resolve_include_with_dependencies(
+            "shared.inc",
+            true,
+            Some(&source_dir),
+            std::slice::from_ref(&include_dir),
+        );
+
+        assert!(resolved.is_none());
+        assert_eq!(dependencies, vec![include_dir.join("shared.inc")]);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn tokenize_for_trivia(text: &str) -> Option<()> {

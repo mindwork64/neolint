@@ -20,9 +20,12 @@ use crate::preprocessor::expand::{
 };
 use crate::preprocessor::expr;
 use crate::preprocessor::identity;
+#[cfg(not(feature = "lsp"))]
+use crate::preprocessor::include::resolve_include;
+#[cfg(feature = "lsp")]
+use crate::preprocessor::include::resolve_include_with_dependencies;
 use crate::preprocessor::include::{
-    display_include_path, is_remote_spelling, parse_include, resolve_include, IncludeEdge,
-    IncludeGraph, IncludeNode,
+    display_include_path, is_remote_spelling, parse_include, IncludeEdge, IncludeGraph, IncludeNode,
 };
 use crate::preprocessor::macros::{DefineOutcome, MacroDefinition, MacroTable};
 use crate::preprocessor::token::{
@@ -553,6 +556,22 @@ impl<'a> Preprocessor<'a> {
             .last()
             .and_then(|frame| frame.directory.clone())
             .filter(|_| !parsed.angle);
+        #[cfg(feature = "lsp")]
+        let resolved = {
+            let (resolved, watched_candidates) = resolve_include_with_dependencies(
+                &parsed.spelling,
+                parsed.angle,
+                current_directory.as_deref(),
+                &self.include_dirs,
+            );
+            for candidate in &watched_candidates {
+                if !self.manager.record_include_dependency(candidate) {
+                    break;
+                }
+            }
+            resolved
+        };
+        #[cfg(not(feature = "lsp"))]
         let resolved = resolve_include(
             &parsed.spelling,
             parsed.angle,
@@ -571,10 +590,8 @@ impl<'a> Preprocessor<'a> {
             );
             return;
         };
-        // Track the resolved path before loading its contents. A failed load
-        // (notably an oversized unsaved editor buffer) must still be recoverable
-        // when the open include changes and dependent roots are rescheduled.
-        self.manager.record_include_dependency(&resolved);
+        // The resolver already recorded the path and any higher-priority
+        // missing candidates in the optional LSP dependency set.
         let canonical = std::fs::canonicalize(&resolved).ok();
         if let Some(canonical) = &canonical {
             if self.pragma_once.contains(canonical) {
