@@ -75,6 +75,7 @@ pub(crate) struct Preprocessor<'a> {
     root_source: SourceId,
     root_len: usize,
     include_dirs: Vec<PathBuf>,
+    include_overlays: HashMap<PathBuf, Arc<str>>,
     source_files: HashMap<SourceId, Arc<crate::source::file::SourceFile>>,
     frames: Vec<IncludeFrame>,
     include_context: Option<ProvId>,
@@ -104,7 +105,7 @@ impl<'a> Preprocessor<'a> {
         root: SourceId,
         options: &PreprocessSettings,
     ) -> Result<Self, SpanError> {
-        Self::new_controlled(manager, root, options, None)
+        Self::new_controlled(manager, root, options, None, HashMap::new())
     }
 
     #[allow(dead_code)] // Consumed by the optional LSP worker feature.
@@ -114,7 +115,18 @@ impl<'a> Preprocessor<'a> {
         options: &PreprocessSettings,
         cancellation: &'a AnalysisCancellationToken,
     ) -> Result<Self, SpanError> {
-        Self::new_controlled(manager, root, options, Some(cancellation))
+        Self::new_cancellable_with_overlays(manager, root, options, HashMap::new(), cancellation)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_cancellable_with_overlays(
+        manager: &'a mut SourceManager,
+        root: SourceId,
+        options: &PreprocessSettings,
+        include_overlays: HashMap<PathBuf, Arc<str>>,
+        cancellation: &'a AnalysisCancellationToken,
+    ) -> Result<Self, SpanError> {
+        Self::new_controlled(manager, root, options, Some(cancellation), include_overlays)
     }
 
     fn new_controlled(
@@ -122,6 +134,7 @@ impl<'a> Preprocessor<'a> {
         root: SourceId,
         options: &PreprocessSettings,
         cancellation: Option<&'a AnalysisCancellationToken>,
+        include_overlays: HashMap<PathBuf, Arc<str>>,
     ) -> Result<Self, SpanError> {
         let unit = manager.unit();
         if root.unit() != unit {
@@ -153,6 +166,7 @@ impl<'a> Preprocessor<'a> {
             root_source: root,
             root_len,
             include_dirs: options.include_dirs().to_vec(),
+            include_overlays,
             source_files,
             frames: vec![frame],
             include_context: None,
@@ -607,7 +621,16 @@ impl<'a> Preprocessor<'a> {
             return;
         }
         let display = display_include_path(&resolved);
-        let source = match self.manager.load_included_file(&resolved, &display) {
+        let overlay = canonical
+            .as_ref()
+            .and_then(|path| self.include_overlays.get(path));
+        let loaded = match overlay {
+            Some(text) => self
+                .manager
+                .load_included_text(&resolved, &display, text.as_ref()),
+            None => self.manager.load_included_file(&resolved, &display),
+        };
+        let source = match loaded {
             Ok(source) => source,
             Err(error) => {
                 let code = match error {
@@ -1438,11 +1461,21 @@ pub(crate) fn preprocess_full(
     Preprocessor::new(manager, root, options)?.run()
 }
 
-#[allow(dead_code)] // Consumed by the optional LSP worker feature.
+#[allow(dead_code)]
 pub(crate) fn preprocess_full_cancellable(
     manager: &mut SourceManager,
     root: SourceId,
     options: &PreprocessSettings,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Result<PreparedSource, SpanError>> {
+    preprocess_full_cancellable_with_overlays(manager, root, options, HashMap::new(), cancellation)
+}
+
+pub(crate) fn preprocess_full_cancellable_with_overlays(
+    manager: &mut SourceManager,
+    root: SourceId,
+    options: &PreprocessSettings,
+    include_overlays: HashMap<PathBuf, Arc<str>>,
     cancellation: &AnalysisCancellationToken,
 ) -> Option<Result<PreparedSource, SpanError>> {
     if cancellation.is_cancelled() {
@@ -1473,7 +1506,13 @@ pub(crate) fn preprocess_full_cancellable(
             return (!cancellation.is_cancelled()).then_some(result);
         }
     }
-    let processor = match Preprocessor::new_cancellable(manager, root, options, cancellation) {
+    let processor = match Preprocessor::new_cancellable_with_overlays(
+        manager,
+        root,
+        options,
+        include_overlays,
+        cancellation,
+    ) {
         Ok(processor) => processor,
         Err(error) => return Some(Err(error)),
     };

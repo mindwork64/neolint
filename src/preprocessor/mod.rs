@@ -17,6 +17,8 @@ pub(crate) mod include;
 pub(crate) mod macros;
 pub(crate) mod token;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::diagnostic::Span;
@@ -91,14 +93,34 @@ pub(crate) fn preprocess_with_includes_cancellable(
     settings: &PreprocessSettings,
     cancellation: &crate::cancellation::AnalysisCancellationToken,
 ) -> Option<Result<PreparedSource, SpanError>> {
+    preprocess_with_includes_cancellable_and_overlays(
+        manager,
+        root,
+        settings,
+        HashMap::new(),
+        cancellation,
+    )
+}
+
+pub(crate) fn preprocess_with_includes_cancellable_and_overlays(
+    manager: &mut crate::source::manager::SourceManager,
+    root: crate::source::SourceId,
+    settings: &PreprocessSettings,
+    include_overlays: HashMap<PathBuf, Arc<str>>,
+    cancellation: &crate::cancellation::AnalysisCancellationToken,
+) -> Option<Result<PreparedSource, SpanError>> {
     if cancellation.is_cancelled() {
         return None;
     }
     let result = match settings.mode() {
         PreprocessMode::Identity => identity::preprocess_identity(manager, root),
-        PreprocessMode::Full => {
-            directive::preprocess_full_cancellable(manager, root, settings, cancellation)?
-        }
+        PreprocessMode::Full => directive::preprocess_full_cancellable_with_overlays(
+            manager,
+            root,
+            settings,
+            include_overlays,
+            cancellation,
+        )?,
     };
     (!cancellation.is_cancelled()).then_some(result)
 }

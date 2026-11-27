@@ -5,10 +5,11 @@
 //! exclusive modes: plain-LSL Legacy (no prepared source or map) and prepared
 //! identity (exactly one prepared source/map pair).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::cancellation::AnalysisCancellationToken;
 use crate::diagnostic::resolve::RenderedDiagnostic;
@@ -17,7 +18,9 @@ use crate::engine::{
 };
 use crate::preprocessor::config::PreprocessSettings;
 use crate::preprocessor::identity::preprocess_identity;
-use crate::preprocessor::{preprocess_with_includes, preprocess_with_includes_cancellable};
+use crate::preprocessor::{
+    preprocess_with_includes, preprocess_with_includes_cancellable_and_overlays,
+};
 use crate::source::file::{AnalysisUnitId, RunId};
 use crate::source::manager::{SourceLoadError, SourceManager, MAX_ANALYSIS_UNITS_PER_INVOCATION};
 use crate::source::map::SpanError;
@@ -280,6 +283,24 @@ impl AnalysisRun {
         options: PreprocessSettings,
         cancellation: &AnalysisCancellationToken,
     ) -> Result<usize, CancellableSetupError> {
+        self.add_preprocessed_text_cancellable_with_overlays(
+            display_name,
+            text,
+            options,
+            HashMap::new(),
+            cancellation,
+        )
+    }
+
+    /// Internal LSP path using immutable local include-buffer snapshots.
+    pub(crate) fn add_preprocessed_text_cancellable_with_overlays(
+        &mut self,
+        display_name: &str,
+        text: &str,
+        options: PreprocessSettings,
+        include_overlays: HashMap<PathBuf, Arc<str>>,
+        cancellation: &AnalysisCancellationToken,
+    ) -> Result<usize, CancellableSetupError> {
         if cancellation.is_cancelled() {
             return Err(CancellableSetupError::Cancelled);
         }
@@ -287,10 +308,15 @@ impl AnalysisRun {
         let root = manager
             .load_root_text(display_name, text)
             .map_err(SetupError::from)?;
-        let prepared =
-            preprocess_with_includes_cancellable(&mut manager, root, &options, cancellation)
-                .ok_or(CancellableSetupError::Cancelled)?
-                .map_err(SetupError::from)?;
+        let prepared = preprocess_with_includes_cancellable_and_overlays(
+            &mut manager,
+            root,
+            &options,
+            include_overlays,
+            cancellation,
+        )
+        .ok_or(CancellableSetupError::Cancelled)?
+        .map_err(SetupError::from)?;
         if cancellation.is_cancelled() {
             return Err(CancellableSetupError::Cancelled);
         }

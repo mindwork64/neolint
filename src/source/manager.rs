@@ -258,6 +258,51 @@ impl SourceManager {
         )
     }
 
+    /// Register included text supplied by an immutable editor-buffer snapshot.
+    /// The path must still identify an existing regular local file.
+    pub(crate) fn load_included_text(
+        &mut self,
+        path: impl AsRef<Path>,
+        display_name: &str,
+        text: &str,
+    ) -> Result<SourceId, SourceLoadError> {
+        let path = path.as_ref();
+        reject_remote(display_name)?;
+        let display = path
+            .to_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        reject_remote(&display)?;
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(SourceLoadError::NotRegularFile {
+                path: display_name.to_owned(),
+            });
+        }
+        let canonical = fs::canonicalize(path).ok();
+        if let Some(canonical) = &canonical {
+            if let Some(file) = self
+                .files
+                .iter()
+                .find(|file| file.canonical_path() == Some(canonical))
+            {
+                return Ok(file.id());
+            }
+        }
+        if text.len() > MAX_INCLUDED_SOURCE_BYTES {
+            return Err(SourceLoadError::TooLarge {
+                limit: MAX_INCLUDED_SOURCE_BYTES,
+            });
+        }
+        self.check_capacity()?;
+        self.register(
+            display_name.to_owned(),
+            canonical,
+            SourceFileKind::Included,
+            Arc::from(text),
+        )
+    }
+
     fn check_capacity(&self) -> Result<(), SourceLoadError> {
         if self.files.len() >= MAX_SOURCE_FILES_PER_UNIT {
             return Err(SourceLoadError::TooManyFiles {
@@ -357,6 +402,42 @@ mod tests {
         assert_eq!(file.text(), "default {}");
         assert_eq!(file.display_name(), path.to_string_lossy());
         assert_eq!(file.canonical_path(), fs::canonicalize(&path).ok().as_ref());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loads_included_editor_text_without_replacing_disk_contents() {
+        let directory = temp_dir();
+        let path = directory.join("shared.inc");
+        fs::write(&path, "integer from_disk = 1;").unwrap();
+        let mut manager = SourceManager::new(unit(0));
+        let id = manager
+            .load_included_text(&path, "shared.inc", "integer from_buffer = 2;")
+            .unwrap();
+        let file = manager.file(id).unwrap();
+        assert_eq!(file.kind(), SourceFileKind::Included);
+        assert_eq!(file.text(), "integer from_buffer = 2;");
+        assert_eq!(file.canonical_path(), fs::canonicalize(&path).ok().as_ref());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "integer from_disk = 1;");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn included_editor_text_respects_the_source_size_limit() {
+        let directory = temp_dir();
+        let path = directory.join("shared.inc");
+        fs::write(&path, "").unwrap();
+        let mut manager = SourceManager::new(unit(0));
+        assert!(matches!(
+            manager.load_included_text(
+                &path,
+                "shared.inc",
+                &"x".repeat(MAX_INCLUDED_SOURCE_BYTES + 1),
+            ),
+            Err(SourceLoadError::TooLarge {
+                limit: MAX_INCLUDED_SOURCE_BYTES
+            })
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 
