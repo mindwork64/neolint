@@ -1021,7 +1021,7 @@ fn creating_include_candidate_after_symlink_parent_component_invalidates_root() 
     let alias = workspace.join("alias");
     let fallback_directory = workspace.join("fallback");
     fs::create_dir_all(&symlink_target).unwrap();
-    fs::create_dir_all(&fallback_directory.join("nested")).unwrap();
+    fs::create_dir_all(fallback_directory.join("nested")).unwrap();
     std::os::unix::fs::symlink(&symlink_target, &alias).unwrap();
     std::os::unix::fs::symlink(
         fallback_directory.join("nested"),
