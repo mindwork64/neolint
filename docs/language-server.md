@@ -60,11 +60,22 @@ The initial workspace model uses one workspace configuration. When
 preprocessing is enabled, configured include directories are searched first and
 the workspace root is appended as the final fallback. This is important for
 Firestorm, which opens a temporary copy outside the workspace directory. The
-server does not yet apply `neolint.project` per-script overlays, multi-root
-workspace-specific configuration, or unsaved buffers for `#include`
-dependencies. The preprocessor continues to read include files from disk. A
-diagnostic from an included file is published only when that file is open and
-its buffer matches the disk text at the time its parent script is analyzed.
+server does not yet apply per-script project overlays or multi-root
+workspace-specific configuration.
+
+For every analysis task, open local file buffers are captured in an immutable
+snapshot. When a resolved include path matches an open local document, the
+preprocessor uses that buffer's text instead of reading file contents from
+disk. Diagnostics and macro expansion therefore reflect unsaved include edits.
+The path must still resolve to an existing regular local file; new files that
+do not yet exist on disk are not discoverable as includes. When multiple open
+URI aliases point to one canonical path, the lexicographically first URI
+supplies the contents and source mapping, while all aliases remain part of
+stale-result validation. Resolved local include paths are recorded as
+dependencies before their buffer contents are loaded, so an include that
+temporarily exceeds the source-size limit remains watched and a later buffer
+edit can recover the dependent root. Included-file diagnostics are published
+only to the selected open URI whose buffer supplied the snapshot.
 
 ## Build and run
 

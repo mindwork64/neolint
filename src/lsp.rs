@@ -794,19 +794,41 @@ fn analyze_document(
     })?;
     let display_name = root_path.to_string_lossy().into_owned();
 
+    let mut open_documents_by_uri: Vec<_> = open_documents.iter().collect();
+    open_documents_by_uri.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    let mut open_paths = HashMap::<PathBuf, Url>::new();
+    let mut include_overlays = HashMap::<PathBuf, Arc<str>>::new();
+    for (uri, open_document) in open_documents_by_uri {
+        if cancellation.is_cancelled() {
+            return Err(AnalyzeDocumentError::Cancelled);
+        }
+        if let Ok(path) = uri.to_file_path() {
+            let path = normalize_path(&path);
+            // Resolve URI aliases deterministically for both buffer text and source mapping.
+            if !open_paths.contains_key(&path) {
+                open_paths.insert(path.clone(), uri.clone());
+                include_overlays.insert(path, Arc::clone(&open_document.text));
+            }
+        }
+    }
+
     let mut run =
         AnalysisRun::new().map_err(|error| AnalyzeDocumentError::Failure(error.to_string()))?;
     let unit_index = if config.preprocess_enabled() {
         let settings = PreprocessSettings::full()
             .with_dialect(config.dialect())
             .with_include_dirs(config.include_dirs().to_vec());
-        run.add_preprocessed_text_cancellable(&display_name, &document.text, settings, cancellation)
-            .map_err(|error| match error {
-                CancellableSetupError::Cancelled => AnalyzeDocumentError::Cancelled,
-                CancellableSetupError::Setup(error) => {
-                    AnalyzeDocumentError::Failure(error.to_string())
-                }
-            })?
+        run.add_preprocessed_text_cancellable_with_overlays(
+            &display_name,
+            &document.text,
+            settings,
+            include_overlays,
+            cancellation,
+        )
+        .map_err(|error| match error {
+            CancellableSetupError::Cancelled => AnalyzeDocumentError::Cancelled,
+            CancellableSetupError::Setup(error) => AnalyzeDocumentError::Failure(error.to_string()),
+        })?
     } else if config.engine() == AnalysisEngine::Legacy {
         run.add_legacy_text(&display_name, &document.text)
             .map_err(|error| AnalyzeDocumentError::Failure(error.to_string()))?
@@ -831,16 +853,11 @@ fn analyze_document(
             }
         })?;
 
-    let dependencies = source_dependencies(root_uri, unit.manager().files());
-    let mut open_paths = HashMap::<PathBuf, Url>::new();
-    for uri in open_documents.keys() {
-        if cancellation.is_cancelled() {
-            return Err(AnalyzeDocumentError::Cancelled);
-        }
-        if let Ok(path) = uri.to_file_path() {
-            open_paths.insert(normalize_path(&path), uri.clone());
-        }
-    }
+    let dependencies = source_dependencies(
+        root_uri,
+        unit.manager().files(),
+        unit.manager().include_dependencies(),
+    );
 
     let mut output = HashMap::<Url, Vec<LspDiagnostic>>::new();
     output.entry(root_uri.clone()).or_default();
@@ -865,9 +882,8 @@ fn analyze_document(
         let Some(open_source) = open_documents.get(&source_uri) else {
             continue;
         };
-        // Included files are currently read from disk by the preprocessor.
-        // Do not publish their diagnostics against a different, unsaved editor
-        // buffer. Open-document overlays are a later workspace milestone.
+        // The preprocessor uses the selected immutable open-buffer overlay.
+        // Keep this guard as a defensive check for sources not loaded via overlays.
         if source_file.text() != open_source.text.as_ref() {
             continue;
         }
@@ -929,11 +945,16 @@ fn analyze_document(
     })
 }
 
-fn source_dependencies(root_uri: &Url, files: &[Arc<SourceFile>]) -> HashSet<PathBuf> {
+fn source_dependencies(
+    root_uri: &Url,
+    files: &[Arc<SourceFile>],
+    include_dependencies: &HashSet<PathBuf>,
+) -> HashSet<PathBuf> {
     let mut dependencies = HashSet::new();
     if let Ok(root_path) = root_uri.to_file_path() {
         dependencies.insert(normalize_path(&root_path));
     }
+    dependencies.extend(include_dependencies.iter().map(|path| normalize_path(path)));
     for source in files {
         if source.kind() != SourceFileKind::Included {
             continue;
@@ -1731,7 +1752,11 @@ mod tests {
             )
             .unwrap();
         let unit = run.unit(unit_index).unwrap();
-        let dependencies = source_dependencies(&root_uri, unit.manager().files());
+        let dependencies = source_dependencies(
+            &root_uri,
+            unit.manager().files(),
+            unit.manager().include_dependencies(),
+        );
         assert!(dependencies.contains(&normalize_path(&root_uri.to_file_path().unwrap())));
         assert!(dependencies.contains(&normalize_path(&include_path)));
         fs::remove_dir_all(workspace).unwrap();
