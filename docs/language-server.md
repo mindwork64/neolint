@@ -172,6 +172,25 @@ literals or after vector/rotation component selectors such as `position.x`.
 Completion is scoped to the current root analysis and does not index
 unrelated open scripts elsewhere in the workspace.
 
+
+## Quick fixes
+
+The server provides the `quickfix` code-action kind for the AST `SEM041`
+warning (a plain assignment used as the root expression of an `if` condition).
+The **Mark assignment as intentional** action adds one pair of parentheses
+around that condition expression. Parentheses are the documented way to mark
+this exact construct as intentional, and the edit preserves the assignment
+operator and runtime behavior.
+
+The server deliberately does not offer to replace `=` with `==`: that changes
+program behavior and the diagnostic alone cannot establish that comparison was
+intended. A quick fix is emitted only when the complete expression and its
+operator map to one contiguous, byte-identical range of the open root buffer.
+Macro expansions, include-origin text, generated text and expressions crossing
+removed preprocessor gaps are excluded rather than guessed. The edit is tied to
+the document version from which the action was computed when the client supports
+versioned document changes.
+
 ## Build and run
 
 ```sh

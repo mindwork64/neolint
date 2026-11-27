@@ -353,6 +353,103 @@ impl SourceMap {
         self.find_file(id.file()).map(|file| file.as_ref())
     }
 
+    /// Resolve a prepared range only when it maps one-to-one to contiguous
+    /// bytes copied directly from the requested source file. Macro expansions,
+    /// includes, generated text and ranges crossing removed source gaps return
+    /// `Ok(None)`. This is intended for editor edits that must not guess.
+    #[cfg(feature = "lsp")]
+    pub(crate) fn resolve_direct_span(
+        &self,
+        prepared: PreparedSpan,
+        source: SourceId,
+    ) -> Result<Option<SourceSpan>, SpanError> {
+        if prepared.unit != self.unit {
+            return Err(SpanError::ForeignPreparedSource);
+        }
+        if source.unit() != self.unit {
+            return Err(SpanError::ForeignAnalysisUnit);
+        }
+        if prepared.start > prepared.end {
+            return Err(SpanError::InvertedRange);
+        }
+        if prepared.end > self.prepared_text.len() {
+            return Err(SpanError::OutOfBounds);
+        }
+        if !self.prepared_text.is_char_boundary(prepared.start)
+            || !self.prepared_text.is_char_boundary(prepared.end)
+        {
+            return Err(SpanError::NotCharBoundary);
+        }
+        if prepared.start == prepared.end {
+            return Ok(None);
+        }
+
+        let first = self
+            .segments
+            .partition_point(|segment| segment.prepared.end <= prepared.start);
+        let mut cursor = prepared.start;
+        let mut mapped_start = None;
+        let mut mapped_end = 0usize;
+
+        for segment in &self.segments[first..] {
+            if cursor >= prepared.end {
+                break;
+            }
+            if segment.prepared.start > cursor {
+                return Ok(None);
+            }
+            let run_start = cursor.max(segment.prepared.start);
+            let run_end = prepared.end.min(segment.prepared.end);
+            if run_start >= run_end {
+                continue;
+            }
+
+            let origin = self.origin(segment.origin)?;
+            if origin.kind != OriginKind::Direct
+                || origin.span.source() != source
+                || origin.parent.is_some()
+                || origin.invocation.is_some()
+                || origin.definition.is_some()
+            {
+                return Ok(None);
+            }
+            let prepared_len = segment.prepared.end - segment.prepared.start;
+            let source_len = origin.span.end() - origin.span.start();
+            if prepared_len != source_len {
+                return Ok(None);
+            }
+
+            let run_source_start = origin.span.start() + (run_start - segment.prepared.start);
+            let run_source_end = run_source_start + (run_end - run_start);
+            let source_file = self.file(source).ok_or(SpanError::UnknownSourceId)?;
+            let Some(source_text) = source_file.text().get(run_source_start..run_source_end) else {
+                return Ok(None);
+            };
+            if self.prepared_text.get(run_start..run_end) != Some(source_text) {
+                return Ok(None);
+            }
+            if mapped_start.is_some() {
+                if mapped_end != run_source_start {
+                    return Ok(None);
+                }
+            } else {
+                mapped_start = Some(run_source_start);
+            }
+            mapped_end = run_source_end;
+            cursor = run_end;
+        }
+
+        if cursor != prepared.end {
+            return Ok(None);
+        }
+        let Some(start) = mapped_start else {
+            return Ok(None);
+        };
+        let span = SourceSpan::new(source, start, mapped_end);
+        self.validate_span_owned(span)?;
+        Ok(Some(span))
+    }
+
     /// Resolve a prepared range to original locations.
     pub fn resolve_span(&self, prepared: PreparedSpan) -> Result<ResolvedSpan, SpanError> {
         if prepared.unit != self.unit {
@@ -1144,6 +1241,164 @@ mod tests {
         assert_eq!(map.resolve_point(point).unwrap(), map.eof_anchor());
         assert_eq!(map.eof_anchor(), map.source_span(root, 0, 0).unwrap());
         assert_eq!(map.resolve_span(point).unwrap().primary(), map.eof_anchor());
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn resolve_direct_span_accepts_only_contiguous_one_to_one_root_text() {
+        let (map, root, unit) = identity("if (value = 1) {}", 0);
+        let prepared = PreparedSpan::new(unit, 4, 13);
+        assert_eq!(
+            map.resolve_direct_span(prepared, root).unwrap(),
+            Some(map.source_span(root, 4, 13).unwrap())
+        );
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn resolve_direct_span_rejects_non_direct_and_gapped_ranges() {
+        let text = Arc::<str>::from("abcdefgh");
+        let (unit, root, files) = fixture("abcdefgh", 0);
+        let mut builder = SourceMapBuilder::new(unit, Arc::clone(&text), files).unwrap();
+        let direct = builder
+            .push_origin(
+                OriginKind::Direct,
+                builder.source_span(root, 0, 2).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let macro_definition = builder
+            .push_origin(
+                OriginKind::MacroDefinition,
+                builder.source_span(root, 2, 4).unwrap(),
+                Some(builder.source_span(root, 0, 0).unwrap()),
+                Some(builder.source_span(root, 2, 4).unwrap()),
+                None,
+                Some("macro body"),
+            )
+            .unwrap();
+        let included = builder
+            .push_origin(
+                OriginKind::Include,
+                builder.source_span(root, 4, 6).unwrap(),
+                Some(builder.source_span(root, 4, 4).unwrap()),
+                None,
+                None,
+                Some("included text"),
+            )
+            .unwrap();
+        let generated = builder
+            .push_origin(
+                OriginKind::Generated,
+                builder.source_span(root, 6, 8).unwrap(),
+                None,
+                None,
+                None,
+                Some("generated text"),
+            )
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 0, 2), direct)
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 2, 4), macro_definition)
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 4, 6), included)
+            .unwrap();
+        builder
+            .push_segment(PreparedSpan::new(unit, 6, 8), generated)
+            .unwrap();
+        builder
+            .set_eof_anchor(builder.source_span(root, 8, 8).unwrap())
+            .unwrap();
+        let map = builder.build().unwrap();
+
+        assert_eq!(
+            map.resolve_direct_span(PreparedSpan::new(unit, 0, 2), root)
+                .unwrap(),
+            Some(map.source_span(root, 0, 2).unwrap())
+        );
+        assert!(map
+            .resolve_direct_span(PreparedSpan::new(unit, 0, 4), root)
+            .unwrap()
+            .is_none());
+        for (start, end) in [(2, 4), (4, 6), (6, 8)] {
+            assert!(map
+                .resolve_direct_span(PreparedSpan::new(unit, start, end), root)
+                .unwrap()
+                .is_none());
+        }
+
+        // Both pieces are direct one-to-one mappings, but a removed source
+        // directive separates them in the root buffer. Do not span the gap.
+        let (gap_unit, gap_root, gap_files) = fixture("abcdef", 2);
+        let mut gap_builder =
+            SourceMapBuilder::new(gap_unit, Arc::from("abcd"), gap_files).unwrap();
+        let left = gap_builder
+            .push_origin(
+                OriginKind::Direct,
+                gap_builder.source_span(gap_root, 0, 2).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let right = gap_builder
+            .push_origin(
+                OriginKind::Direct,
+                gap_builder.source_span(gap_root, 4, 6).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        gap_builder
+            .push_segment(PreparedSpan::new(gap_unit, 0, 2), left)
+            .unwrap();
+        gap_builder
+            .push_segment(PreparedSpan::new(gap_unit, 2, 4), right)
+            .unwrap();
+        gap_builder
+            .set_eof_anchor(gap_builder.source_span(gap_root, 6, 6).unwrap())
+            .unwrap();
+        let gap_map = gap_builder.build().unwrap();
+        assert!(gap_map
+            .resolve_direct_span(PreparedSpan::new(gap_unit, 0, 4), gap_root)
+            .unwrap()
+            .is_none());
+
+        // A forged or malformed direct map with equal-length but different
+        // bytes is not sufficient proof for an editor text edit.
+        let (mismatch_unit, mismatch_root, mismatch_files) = fixture("abcd", 3);
+        let mut mismatch_builder =
+            SourceMapBuilder::new(mismatch_unit, Arc::from("ABcd"), mismatch_files).unwrap();
+        let mismatch_origin = mismatch_builder
+            .push_origin(
+                OriginKind::Direct,
+                mismatch_builder.source_span(mismatch_root, 0, 4).unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        mismatch_builder
+            .push_segment(PreparedSpan::new(mismatch_unit, 0, 4), mismatch_origin)
+            .unwrap();
+        mismatch_builder
+            .set_eof_anchor(mismatch_builder.source_span(mismatch_root, 4, 4).unwrap())
+            .unwrap();
+        let mismatch_map = mismatch_builder.build().unwrap();
+        assert!(mismatch_map
+            .resolve_direct_span(PreparedSpan::new(mismatch_unit, 0, 4), mismatch_root)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

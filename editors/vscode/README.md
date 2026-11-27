@@ -1,7 +1,8 @@
 # NeoLint for VS Code
 
 This extension starts `neolint-lsp` and provides NeoLint diagnostics, hover,
-definition navigation, and context-aware completion for local `.lsl` files.
+definition navigation, context-aware completion, and a safe `SEM041` quick fix
+for local `.lsl` files.
 Completion uses user-defined symbols and the selected Second Life or OpenSim
 API catalogue, including function-call snippets when supported by the editor.
 The extension does not provide syntax highlighting, compilation, or Viewer
