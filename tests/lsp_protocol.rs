@@ -726,6 +726,74 @@ fn oversized_unsaved_include_stays_tracked_until_the_buffer_is_fixed() {
 }
 
 #[test]
+fn file_operation_during_initial_analysis_requeues_the_root() {
+    let workspace = unique_workspace("neolint-lsp-file-operation-analysis-race");
+    let include_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let include_uri = url::Url::from_file_path(&include_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    // Do not wait for the first root publication. The file operation is sent
+    // immediately after didOpen, so it can overlap either the dependency scan
+    // or the worker-result handoff to the main LSP thread.
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    fs::write(&include_path, "integer shared = 42;\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": include_uri }] }
+    }));
+
+    let recovered = client.receive_until(|message| {
+        is_publish(message, &root_uri, Some(1))
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+    });
+    let publication = recovered
+        .iter()
+        .rev()
+        .find(|message| {
+            is_publish(message, &root_uri, Some(1))
+                && message["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(|diagnostics| diagnostics.is_empty())
+        })
+        .expect("the root must be reanalyzed against the created include");
+    assert!(publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn workspace_file_operations_invalidate_missing_include_dependencies() {
     let workspace = unique_workspace("neolint-lsp-file-operations");
     let include_path = workspace.join("shared.inc");

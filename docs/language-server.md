@@ -30,10 +30,10 @@ include. Local file documents are tracked even when their extension is .inc or
 or closing a document schedules the .lsl root itself (when applicable) and the
 currently open roots whose last successful dependency set contains it.
 Workspace file operations also invalidate roots for matching file or folder
-paths. The active worker is cancelled only when its root is among those
-affected; unrelated roots continue running.
-Pending work remains coalesced per root and keeps FIFO order. Closing a root
-removes its queued task, cancels it only when it is the active root, and
+paths. Since a first analysis may not have recorded its dependency set yet, a
+file-operation batch also refreshes roots already pending or running in the
+worker. Pending work remains coalesced per root and keeps FIFO order. Closing
+a root removes its queued task, cancels it only when it is the active root, and
 re-analyzes remaining dependents so diagnostics for a no-longer-open include are
 withdrawn. The server advertises LSP workspace file operations for local files:
 workspace/didCreateFiles, workspace/didRenameFiles, and
@@ -44,10 +44,15 @@ a text document. textDocument/didOpen remains a fallback for clients that do
 not send workspace file-operation notifications. Shutdown signals cancellation
 and does not wait for the worker thread.
 
-A completed result is accepted only while the root version and the revisions
-of the dependencies discovered by that task still match the live document
-snapshot. An unrelated open-document edit or close does not invalidate it. A
-dependency that opens or closes while analysis is running is also detected: the
+A completed result is accepted only while the root version, the revisions
+of the dependencies discovered by that task, and the workspace file-operation
+generation still match the live state. Each create/rename/delete batch advances
+a global generation before root selection. Results started before that batch
+are discarded and their roots are requeued, including the narrow interval after
+the worker finishes but before the LSP thread accepts its result. This generation
+is intentionally conservative: an unrelated file operation can also cause an
+in-flight result to be recomputed. An unrelated open-document edit or close does
+not invalidate a result. A dependency that opens or closes while analysis is running is also detected: the
 task records an empty open-URI revision set for a dependency not open at start,
 which no longer matches when a buffer for that path is opened. If analysis fails
 before dependency discovery completes,

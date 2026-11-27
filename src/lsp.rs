@@ -121,6 +121,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         dependencies_by_root: HashMap::new(),
         dependency_tracking_incomplete_by_root: HashSet::new(),
         next_revision: 0,
+        file_operation_revision: 0,
     };
     let mut worker = AnalysisWorker::new()?;
 
@@ -221,11 +222,16 @@ struct ServerState {
     /// open local document conservatively reanalyze these roots.
     dependency_tracking_incomplete_by_root: HashSet<Url>,
     next_revision: u64,
+    /// Global filesystem-operation generation. Any result started before a
+    /// create/rename/delete notification is stale, even if the worker has
+    /// already finished and its result is waiting for the LSP thread.
+    file_operation_revision: u64,
 }
 
 struct AnalysisTask {
     root_uri: Url,
     root_version: i32,
+    file_operation_revision: u64,
     documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
 }
@@ -233,6 +239,7 @@ struct AnalysisTask {
 struct AnalysisResult {
     root_uri: Url,
     root_version: i32,
+    file_operation_revision: u64,
     dependencies: HashSet<PathBuf>,
     dependencies_complete: bool,
     dependency_revisions: HashMap<PathBuf, HashMap<Url, u64>>,
@@ -293,10 +300,18 @@ impl AnalysisWorker {
         root_uris: impl IntoIterator<Item = Url>,
         documents: Arc<HashMap<Url, DocumentState>>,
         config: LintConfig,
+        file_operation_revision: u64,
     ) {
         let tasks: Vec<_> = root_uris
             .into_iter()
-            .filter_map(|uri| make_analysis_task(uri, Arc::clone(&documents), config.clone()))
+            .filter_map(|uri| {
+                make_analysis_task(
+                    uri,
+                    Arc::clone(&documents),
+                    config.clone(),
+                    file_operation_revision,
+                )
+            })
             .collect();
         if tasks.is_empty() {
             return;
@@ -306,6 +321,15 @@ impl AnalysisWorker {
         if schedule_pending_tasks(&mut pending, tasks) {
             ready.notify_one();
         }
+    }
+
+    /// Return roots that are queued or currently being analyzed. A workspace
+    /// file operation conservatively refreshes these roots because their
+    /// dependency snapshots may not yet describe the filesystem they observe.
+    fn roots_in_flight(&self) -> HashSet<Url> {
+        let (lock, _) = &*self.pending;
+        let pending = lock.lock().expect("analysis queue mutex poisoned");
+        pending_and_running_roots(&pending)
     }
 
     fn close_root(&self, root_uri: &Url) {
@@ -348,14 +372,24 @@ fn make_analysis_task(
     root_uri: Url,
     documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
+    file_operation_revision: u64,
 ) -> Option<AnalysisTask> {
     let root = documents.get(&root_uri)?;
     Some(AnalysisTask {
         root_uri,
         root_version: root.version,
+        file_operation_revision,
         documents,
         config,
     })
+}
+
+fn pending_and_running_roots(pending: &PendingAnalyses) -> HashSet<Url> {
+    let mut roots: HashSet<_> = pending.tasks.keys().cloned().collect();
+    if let Some(running) = &pending.running {
+        roots.insert(running.root_uri.clone());
+    }
+    roots
 }
 
 fn schedule_pending_tasks(pending: &mut PendingAnalyses, tasks: Vec<AnalysisTask>) -> bool {
@@ -442,10 +476,11 @@ fn dependency_revision_snapshot(
 }
 
 fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) -> bool {
-    state
-        .documents
-        .get(&result.root_uri)
-        .is_some_and(|document| document.version == result.root_version)
+    state.file_operation_revision == result.file_operation_revision
+        && state
+            .documents
+            .get(&result.root_uri)
+            .is_some_and(|document| document.version == result.root_version)
         && dependency_revision_snapshot(
             &result.dependencies,
             &state.documents,
@@ -526,6 +561,7 @@ fn analysis_worker_loop(
             .send(AnalysisResult {
                 root_uri: task.root_uri,
                 root_version: task.root_version,
+                file_operation_revision: task.file_operation_revision,
                 dependencies,
                 dependencies_complete,
                 dependency_revisions,
@@ -797,7 +833,15 @@ fn schedule_file_operation_roots(
     worker: &AnalysisWorker,
     changed_uris: impl IntoIterator<Item = Url>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut roots = HashSet::new();
+    // Advance before selecting roots. Results produced against the previous
+    // filesystem generation must be discarded even when their dependency
+    // scan has not populated dependencies_by_root yet (or the worker has
+    // cleared `running` but the main thread has not accepted its result).
+    state.file_operation_revision = state.file_operation_revision.saturating_add(1);
+
+    // Requeue pending and active roots immediately. The generation check below
+    // remains necessary for the narrow completed-but-not-yet-accepted window.
+    let mut roots = worker.roots_in_flight();
     for uri in changed_uris {
         if uri.scheme() == "file" {
             let affected = affected_roots_for_document(state, &uri);
@@ -844,7 +888,12 @@ fn schedule_roots(
         }
         return Ok(());
     };
-    worker.schedule_many(roots, Arc::clone(&state.documents), config.clone());
+    worker.schedule_many(
+        roots,
+        Arc::clone(&state.documents),
+        config.clone(),
+        state.file_operation_revision,
+    );
     Ok(())
 }
 
@@ -1393,6 +1442,7 @@ mod tests {
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
+            file_operation_revision: 0,
         };
         let stale_version = 7;
         let document = Arc::make_mut(&mut state.documents).get_mut(&uri).unwrap();
@@ -1453,6 +1503,7 @@ mod tests {
         let make_task = |uri: &Url, version, revision| AnalysisTask {
             root_uri: uri.clone(),
             root_version: version,
+            file_operation_revision: 0,
             documents: HashMap::from([(
                 uri.clone(),
                 DocumentState {
@@ -1519,10 +1570,12 @@ mod tests {
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 12,
+            file_operation_revision: 0,
         };
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 4,
+            file_operation_revision: 0,
             dependencies: HashSet::from([
                 normalize_path(&root_uri.to_file_path().unwrap()),
                 normalize_path(&include_uri.to_file_path().unwrap()),
@@ -1612,6 +1665,81 @@ mod tests {
     }
 
     #[test]
+    fn workspace_file_operation_revision_rejects_pre_operation_results() {
+        let root_uri = Url::parse("file:///tmp/file-operation-race.lsl").unwrap();
+        let mut state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: HashMap::from([(
+                root_uri.clone(),
+                DocumentState {
+                    text: Arc::from("default { state_entry() {} }"),
+                    version: 1,
+                    revision: 1,
+                },
+            )])
+            .into(),
+            published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::new(),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
+            next_revision: 1,
+            file_operation_revision: 7,
+        };
+        let result = AnalysisResult {
+            root_uri,
+            root_version: 1,
+            file_operation_revision: 7,
+            dependencies: HashSet::new(),
+            dependencies_complete: true,
+            dependency_revisions: HashMap::new(),
+            diagnostics: Ok(HashMap::new()),
+        };
+
+        assert!(analysis_snapshot_is_current(&state, &result));
+        // Document versions and dependency signatures stay exactly the same;
+        // only the workspace filesystem generation changes.
+        state.file_operation_revision += 1;
+        assert!(
+            !analysis_snapshot_is_current(&state, &result),
+            "a result created before a file operation must never be published"
+        );
+    }
+
+    #[test]
+    fn pending_and_running_roots_are_visible_for_file_operation_requeue() {
+        let pending_uri = Url::parse("file:///tmp/pending.lsl").unwrap();
+        let running_uri = Url::parse("file:///tmp/running.lsl").unwrap();
+        let make_task = |uri: &Url| AnalysisTask {
+            root_uri: uri.clone(),
+            root_version: 1,
+            file_operation_revision: 3,
+            documents: HashMap::from([(
+                uri.clone(),
+                DocumentState {
+                    text: Arc::from("default { state_entry() {} }"),
+                    version: 1,
+                    revision: 1,
+                },
+            )])
+            .into(),
+            config: LintConfig::default(),
+        };
+        let pending = PendingAnalyses {
+            tasks: HashMap::from([(pending_uri.clone(), make_task(&pending_uri))]),
+            order: VecDeque::from([pending_uri.clone()]),
+            running: Some(RunningAnalysis {
+                root_uri: running_uri.clone(),
+                cancellation: AnalysisCancellationToken::new(),
+            }),
+            stopped: false,
+        };
+
+        assert_eq!(
+            pending_and_running_roots(&pending),
+            HashSet::from([pending_uri, running_uri])
+        );
+    }
+
+    #[test]
     fn incomplete_dependency_tracking_invalidates_on_any_local_document_change() {
         let root_uri = Url::parse("file:///tmp/incomplete-root.lsl").unwrap();
         let include_uri = Url::parse("file:///tmp/incomplete.inc").unwrap();
@@ -1652,6 +1780,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::from([root_uri.clone()]),
             next_revision: 3,
+            file_operation_revision: 0,
         };
 
         assert_eq!(
@@ -1664,6 +1793,7 @@ mod tests {
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 1,
+            file_operation_revision: 0,
             dependencies,
             dependencies_complete: false,
             dependency_revisions: snapshot,
@@ -1798,6 +1928,7 @@ mod tests {
             ]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 3,
+            file_operation_revision: 0,
         };
 
         assert_eq!(
@@ -1836,6 +1967,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
+            file_operation_revision: 0,
         };
 
         assert_eq!(
@@ -1869,6 +2001,7 @@ mod tests {
             )]),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
+            file_operation_revision: 0,
         };
 
         assert_eq!(
@@ -1908,7 +2041,13 @@ mod tests {
             ..PendingAnalyses::default()
         };
         let make = |uri: &Url| {
-            make_analysis_task(uri.clone(), Arc::clone(&documents), LintConfig::default()).unwrap()
+            make_analysis_task(
+                uri.clone(),
+                Arc::clone(&documents),
+                LintConfig::default(),
+                0,
+            )
+            .unwrap()
         };
 
         // Editing an unrelated root does not interrupt the active analysis.
