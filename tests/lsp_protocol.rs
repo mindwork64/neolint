@@ -68,20 +68,59 @@ impl LspClient {
         supports_file_operations: bool,
         supports_snippets: bool,
     ) -> Self {
+        Self::with_workspace_edit_document_changes(
+            workspace_uri,
+            supports_file_operations,
+            supports_snippets,
+            true,
+        )
+    }
+
+    fn with_workspace_edit_document_changes(
+        workspace_uri: &str,
+        supports_file_operations: bool,
+        supports_snippets: bool,
+        supports_document_changes: bool,
+    ) -> Self {
+        Self::with_code_action_literal_support(
+            workspace_uri,
+            supports_file_operations,
+            supports_snippets,
+            supports_document_changes,
+            true,
+        )
+    }
+
+    fn with_code_action_literal_support(
+        workspace_uri: &str,
+        supports_file_operations: bool,
+        supports_snippets: bool,
+        supports_document_changes: bool,
+        supports_quickfix_literals: bool,
+    ) -> Self {
         let mut capabilities = json!({
             "textDocument": {
                 "completion": {
                     "completionItem": { "snippetSupport": supports_snippets }
                 }
+            },
+            "workspace": {
+                "workspaceEdit": { "documentChanges": supports_document_changes }
             }
         });
+        if supports_quickfix_literals {
+            capabilities["textDocument"]["codeAction"] = json!({
+                "codeActionLiteralSupport": {
+                    "codeActionKind": { "valueSet": ["quickfix"] }
+                },
+                "isPreferredSupport": true
+            });
+        }
         if supports_file_operations {
-            capabilities["workspace"] = json!({
-                "fileOperations": {
-                    "didCreate": true,
-                    "didRename": true,
-                    "didDelete": true
-                }
+            capabilities["workspace"]["fileOperations"] = json!({
+                "didCreate": true,
+                "didRename": true,
+                "didDelete": true
             });
         }
         let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
@@ -143,6 +182,18 @@ impl LspClient {
             initialize_result["result"]["completionProvider"].is_object(),
             "the server must advertise textDocument/completion"
         );
+        if supports_quickfix_literals {
+            assert_eq!(
+                initialize_result["result"]["codeActionProvider"]["codeActionKinds"],
+                json!(["quickfix"]),
+                "the server must advertise safe quick fixes"
+            );
+        } else {
+            assert!(
+                initialize_result["result"]["codeActionProvider"].is_null(),
+                "the server must not advertise code actions a client cannot receive"
+            );
+        }
         if supports_file_operations {
             assert_eq!(
                 initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]
@@ -2488,6 +2539,355 @@ fn completion_uses_macro_invocation_position_for_declaration_order() {
     assert!(
         after_labels.contains(&"macro_local"),
         "macro local should be visible after its invocation: {after_labels:?}"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn code_action_marks_sem041_assignment_as_intentional_without_changing_operator() {
+    let workspace = unique_workspace("neolint-lsp-sem041-code-action");
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) { llOwnerSay((string)value); } } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let opened = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let published = opened
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    let diagnostic = published["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .expect("SEM041 should be published")
+        .clone();
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "id": 50,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": root_uri },
+            "range": diagnostic["range"],
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }
+    }));
+    let response = client.receive_until(|message| message.get("id") == Some(&json!(50)));
+    let result = &response
+        .iter()
+        .find(|message| message.get("id") == Some(&json!(50)))
+        .unwrap()["result"];
+    let actions = result.as_array().expect("code action array");
+    assert_eq!(actions.len(), 1, "{result:#?}");
+    let action = &actions[0];
+    assert_eq!(action["title"], "Mark assignment as intentional");
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(action["isPreferred"], true);
+    assert_eq!(action["diagnostics"][0]["code"], "SEM041");
+    let document_edit = &action["edit"]["documentChanges"][0];
+    assert_eq!(document_edit["textDocument"]["uri"], root_uri);
+    assert_eq!(document_edit["textDocument"]["version"], 1);
+    let edit = &document_edit["edits"][0];
+    let expression_start = source.find("value = 1").unwrap();
+    let expression_end = expression_start + "value = 1".len();
+    assert_eq!(edit["newText"], "(value = 1)");
+    assert_eq!(
+        edit["range"]["start"]["line"],
+        position_of(source, expression_start).0
+    );
+    assert_eq!(
+        edit["range"]["start"]["character"],
+        position_of(source, expression_start).1
+    );
+    assert_eq!(
+        edit["range"]["end"]["line"],
+        position_of(source, expression_end).0
+    );
+    assert_eq!(
+        edit["range"]["end"]["character"],
+        position_of(source, expression_end).1
+    );
+
+    let updated = format!(
+        "{}({}){}",
+        &source[..expression_start],
+        &source[expression_start..expression_end],
+        &source[expression_end..]
+    );
+    assert!(updated.contains("if ((value = 1))"), "{updated}");
+    assert!(
+        updated.contains("value = 1"),
+        "the assignment operator must remain '=': {updated}"
+    );
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": root_uri, "version": 2 },
+            "contentChanges": [{ "text": updated }]
+        }
+    }));
+    let changed = client.receive_until(|message| is_publish(message, &root_uri, Some(2)));
+    let latest = changed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(2)))
+        .unwrap();
+    assert!(
+        latest["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["code"] != "SEM041"),
+        "parentheses should suppress SEM041: {latest:#?}"
+    );
+
+    // A code action is never inferred from an unrelated diagnostic code.
+    let unrelated = json!({
+        "range": diagnostic["range"],
+        "severity": 2,
+        "code": "SEM999",
+        "source": "NeoLint",
+        "message": "unrelated diagnostic"
+    });
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "id": 51,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": root_uri },
+            "range": unrelated["range"],
+            "context": { "diagnostics": [unrelated], "only": ["quickfix"] }
+        }
+    }));
+    let unrelated_response = client.receive_until(|message| message.get("id") == Some(&json!(51)));
+    assert_eq!(
+        unrelated_response
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(51)))
+            .unwrap()["result"],
+        json!([])
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn code_action_is_not_offered_for_macro_expanded_sem041_expression() {
+    let workspace = unique_workspace("neolint-lsp-sem041-macro-code-action");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "integer value = 0;\n",
+        "#define IF_ASSIGN if (value = 1)\n",
+        "default { state_entry() { IF_ASSIGN { llOwnerSay((string)value); } } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let opened = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let published = opened
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    let diagnostic = published["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .expect("macro-expanded if should retain the SEM041 diagnostic");
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "id": 60,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": root_uri },
+            "range": diagnostic["range"],
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }
+    }));
+    let response = client.receive_until(|message| message.get("id") == Some(&json!(60)));
+    assert_eq!(
+        response
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(60)))
+            .unwrap()["result"],
+        json!([]),
+        "the fix must not edit a macro definition or invocation when the mapping is ambiguous"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn code_action_uses_changes_for_clients_without_document_changes_support() {
+    let workspace = unique_workspace("neolint-lsp-sem041-code-action-legacy-edit");
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) {} } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client =
+        LspClient::with_workspace_edit_document_changes(&workspace_uri, true, true, false);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let opened = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let published = opened
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    let diagnostic = published["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .expect("SEM041 should be published");
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "id": 52,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": root_uri },
+            "range": diagnostic["range"],
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }
+    }));
+    let response = client.receive_until(|message| message.get("id") == Some(&json!(52)));
+    let actions = response
+        .iter()
+        .find(|message| message.get("id") == Some(&json!(52)))
+        .unwrap()["result"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 1);
+    let edit = &actions[0]["edit"];
+    assert!(edit["documentChanges"].is_null());
+    assert_eq!(edit["changes"][&root_uri][0]["newText"], "(value = 1)");
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn server_does_not_advertise_or_return_quickfixes_without_literal_support() {
+    let workspace = unique_workspace("neolint-lsp-sem041-no-code-action-literals");
+    let source = concat!(
+        "integer value = 0;\n",
+        "default { state_entry() { if (value = 1) {} } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client =
+        LspClient::with_code_action_literal_support(&workspace_uri, true, true, true, false);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let opened = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let published = opened
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    let diagnostic = published["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SEM041")
+        .expect("SEM041 should be published");
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "id": 53,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": root_uri },
+            "range": diagnostic["range"],
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }
+    }));
+    let response = client.receive_until(|message| message.get("id") == Some(&json!(53)));
+    assert_eq!(
+        response
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(53)))
+            .unwrap()["result"],
+        json!([])
     );
 
     client.shutdown();

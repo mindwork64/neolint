@@ -5,7 +5,7 @@
 //! [`crate::source::AnalysisUnit::analyze_with_config`], the same configured entry point used
 //! by library consumers.
 
-use crate::ast::TopLevel;
+use crate::ast::{AssignmentOperator, ExpressionKind, Statement, StatementKind, TopLevel};
 use crate::ast_semantic::scopes::{type_name, ScopeTree, Symbol, SymbolKind};
 use crate::builtins::{self, Signature};
 use crate::cancellation::AnalysisCancellationToken;
@@ -20,15 +20,17 @@ use crate::source::{SourceFile, SourceFileKind, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionResponse, CompletionTextEdit,
-    CreateFilesParams, DeleteFilesParams, Diagnostic as LspDiagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, FileOperationFilter, FileOperationPattern,
-    FileOperationRegistrationOptions, Hover, HoverContents, HoverProviderCapability,
-    InitializeParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionResponse, CompletionTextEdit, CreateFilesParams, DeleteFilesParams,
+    Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DocumentChanges,
+    FileOperationFilter, FileOperationPattern, FileOperationRegistrationOptions, Hover,
+    HoverContents, HoverProviderCapability, InitializeParams, InsertTextFormat, Location,
+    MarkupContent, MarkupKind, MessageType, OneOf, OptionalVersionedTextDocumentIdentifier,
     Position, PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Url, WorkspaceFileOperationsServerCapabilities,
-    WorkspaceServerCapabilities,
+    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextEdit, Url, WorkspaceEdit,
+    WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -39,6 +41,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 const SERVER_NAME: &str = "NeoLint";
+const MAX_CODE_ACTION_TARGET_WORK: usize = 65_536;
 
 /// Run the NeoLint language server over standard input/output.
 ///
@@ -72,6 +75,30 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         .and_then(|text_document| text_document.completion.as_ref())
         .and_then(|completion| completion.completion_item.as_ref())
         .and_then(|item| item.snippet_support)
+        .unwrap_or(false);
+    let code_action_capabilities = initialize_params
+        .capabilities
+        .text_document
+        .as_ref()
+        .and_then(|text_document| text_document.code_action.as_ref());
+    let code_action_quickfix_support = code_action_capabilities
+        .and_then(|capabilities| capabilities.code_action_literal_support.as_ref())
+        .is_some_and(|literal| {
+            literal
+                .code_action_kind
+                .value_set
+                .iter()
+                .any(|kind| kind == "quickfix")
+        });
+    let code_action_is_preferred_support = code_action_capabilities
+        .and_then(|capabilities| capabilities.is_preferred_support)
+        .unwrap_or(false);
+    let workspace_edit_document_changes = initialize_params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.workspace_edit.as_ref())
+        .and_then(|edit| edit.document_changes)
         .unwrap_or(false);
     let client_file_operations = initialize_params
         .capabilities
@@ -119,6 +146,13 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
             resolve_provider: Some(false),
             ..Default::default()
         }),
+        code_action_provider: code_action_quickfix_support.then_some(
+            CodeActionProviderCapability::Options(CodeActionOptions {
+                code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                resolve_provider: Some(false),
+                ..Default::default()
+            }),
+        ),
         workspace,
         ..Default::default()
     };
@@ -157,7 +191,14 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                         if connection.handle_shutdown(&request)? {
                             break;
                         }
-                        let response = handle_request(request, &state, completion_snippet_support);
+                        let response = handle_request(
+                            request,
+                            &state,
+                            completion_snippet_support,
+                            code_action_quickfix_support,
+                            code_action_is_preferred_support,
+                            workspace_edit_document_changes,
+                        );
                         connection.sender.send(Message::Response(response))?;
                     }
                     Message::Notification(notification) => {
@@ -298,6 +339,8 @@ struct ScriptSymbolIndex {
     function_snippets: HashMap<usize, String>,
     /// Plain-text calls used when the client does not support snippets.
     function_plain_calls: HashMap<usize, String>,
+    /// SEM041 operator ranges mapped to directly editable root expressions.
+    quick_fix_targets: HashMap<(usize, usize), Span>,
 }
 
 struct SymbolOccurrence {
@@ -1429,6 +1472,24 @@ fn build_script_symbol_index(
             scope_ranges.push(((mapped.start, mapped.end), scope));
         }
     }
+    let mut quick_fix_targets = HashMap::new();
+    for (operator_span, expression_span) in collect_sem041_assignment_spans(&ast, cancellation)? {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let Some(operator) = map_direct_edit_span(prepared, root_source, operator_span) else {
+            continue;
+        };
+        let Some(expression) = map_direct_edit_span(prepared, root_source, expression_span) else {
+            continue;
+        };
+        if expression.start <= operator.start
+            && operator.start < operator.end
+            && operator.end <= expression.end
+        {
+            quick_fix_targets.insert((operator.start, operator.end), expression);
+        }
+    }
     let mut symbol_declaration_starts = HashMap::new();
     for (scope_index, scope) in scopes.scopes().iter().enumerate() {
         for symbol in &scope.symbols {
@@ -1454,7 +1515,186 @@ fn build_script_symbol_index(
         function_signatures,
         function_snippets,
         function_plain_calls,
+        quick_fix_targets,
     })
+}
+
+/// Collect only the root `if`-condition assignments covered by SEM041.
+/// The returned spans are still in prepared-source coordinates.
+fn collect_sem041_assignment_spans(
+    ast: &crate::ast::Ast,
+    cancellation: &AnalysisCancellationToken,
+) -> Option<Vec<(Span, Span)>> {
+    let mut pending = Vec::<&Statement>::new();
+    let mut work = 0usize;
+    for item in &ast.items {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        work = work.saturating_add(1);
+        if work > MAX_CODE_ACTION_TARGET_WORK {
+            return Some(Vec::new());
+        }
+        match item {
+            TopLevel::Function(function) => {
+                if let Some(body) = &function.body {
+                    if !queue_code_action_statements(
+                        &mut pending,
+                        body.statements.iter().rev(),
+                        MAX_CODE_ACTION_TARGET_WORK,
+                    ) {
+                        return Some(Vec::new());
+                    }
+                }
+            }
+            TopLevel::State(state) => {
+                for event in state.events.iter().rev() {
+                    if let Some(body) = &event.body {
+                        if !queue_code_action_statements(
+                            &mut pending,
+                            body.statements.iter().rev(),
+                            MAX_CODE_ACTION_TARGET_WORK,
+                        ) {
+                            return Some(Vec::new());
+                        }
+                    }
+                }
+            }
+            TopLevel::Global(_) | TopLevel::Error(_) => {}
+        }
+    }
+
+    let mut fixes = Vec::new();
+    while let Some(statement) = pending.pop() {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        work = work.saturating_add(1);
+        if work > MAX_CODE_ACTION_TARGET_WORK {
+            return Some(Vec::new());
+        }
+        let remaining_budget = MAX_CODE_ACTION_TARGET_WORK.saturating_sub(work);
+        match &statement.kind {
+            StatementKind::Block(block) => {
+                if !queue_code_action_statements(
+                    &mut pending,
+                    block.statements.iter().rev(),
+                    remaining_budget,
+                ) {
+                    return Some(Vec::new());
+                }
+            }
+            StatementKind::If(if_statement) => {
+                if let ExpressionKind::Assignment(assignment) = &if_statement.condition.kind {
+                    if assignment.operator == AssignmentOperator::Assign {
+                        fixes.push((assignment.operator_span, if_statement.condition.span));
+                    }
+                }
+                if let Some(else_branch) = &if_statement.else_branch {
+                    if !queue_code_action_statements(
+                        &mut pending,
+                        std::iter::once(else_branch.as_ref()),
+                        remaining_budget,
+                    ) {
+                        return Some(Vec::new());
+                    }
+                }
+                if !queue_code_action_statements(
+                    &mut pending,
+                    std::iter::once(if_statement.then_branch.as_ref()),
+                    remaining_budget,
+                ) {
+                    return Some(Vec::new());
+                }
+            }
+            StatementKind::For(for_statement) => {
+                if !queue_code_action_statements(
+                    &mut pending,
+                    std::iter::once(for_statement.body.as_ref()),
+                    remaining_budget,
+                ) {
+                    return Some(Vec::new());
+                }
+            }
+            StatementKind::While(while_statement) => {
+                if !queue_code_action_statements(
+                    &mut pending,
+                    std::iter::once(while_statement.body.as_ref()),
+                    remaining_budget,
+                ) {
+                    return Some(Vec::new());
+                }
+            }
+            StatementKind::DoWhile(do_while) => {
+                if !queue_code_action_statements(
+                    &mut pending,
+                    std::iter::once(do_while.body.as_ref()),
+                    remaining_budget,
+                ) {
+                    return Some(Vec::new());
+                }
+            }
+            StatementKind::Switch(switch) => {
+                for arm in switch.arms.iter().rev() {
+                    if !queue_code_action_statements(
+                        &mut pending,
+                        arm.statements.iter().rev(),
+                        remaining_budget,
+                    ) {
+                        return Some(Vec::new());
+                    }
+                }
+            }
+            StatementKind::Empty
+            | StatementKind::Local(_)
+            | StatementKind::Return(_)
+            | StatementKind::Jump(_)
+            | StatementKind::StateChange(_)
+            | StatementKind::Label(_)
+            | StatementKind::Expression(_)
+            | StatementKind::Break(_)
+            | StatementKind::Error(_) => {}
+        }
+    }
+    Some(fixes)
+}
+
+/// Add nodes to the iterative AST walk only while its pending + processed work
+/// remains below the bound. On overflow the caller omits all fixes, not analysis.
+fn queue_code_action_statements<'a>(
+    pending: &mut Vec<&'a Statement>,
+    statements: impl Iterator<Item = &'a Statement>,
+    remaining_budget: usize,
+) -> bool {
+    for statement in statements {
+        if pending.len() >= remaining_budget {
+            return false;
+        }
+        pending.push(statement);
+    }
+    true
+}
+
+/// Map an AST span to the editor buffer only when the complete span consists
+/// of contiguous, byte-identical root text. Do not construct edits over macro
+/// expansions, includes, removed directive gaps or generated source.
+fn map_direct_edit_span(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Option<Span> {
+    match (prepared, root_source) {
+        (Some(prepared), Some(root_source)) => {
+            let prepared_span = prepared.prepared_span(span).ok()?;
+            let source_span = prepared
+                .map()
+                .resolve_direct_span(prepared_span, root_source)
+                .ok()??;
+            prepared.map().render_span(source_span).ok()
+        }
+        (None, _) => Some(span),
+        (Some(_), None) => None,
+    }
 }
 
 /// Resolve every root-source segment covered by an AST/prepared span.
@@ -1555,8 +1795,39 @@ fn handle_request(
     request: lsp_server::Request,
     state: &ServerState,
     completion_snippet_support: bool,
+    code_action_quickfix_support: bool,
+    code_action_is_preferred_support: bool,
+    workspace_edit_document_changes: bool,
 ) -> Response {
     let lsp_server::Request { id, method, params } = request;
+    if method == "textDocument/codeAction" {
+        let params = match serde_json::from_value::<CodeActionParams>(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response {
+                    id,
+                    result: None,
+                    error: Some(ResponseError {
+                        code: lsp_server::ErrorCode::InvalidParams as i32,
+                        message: format!("invalid code action parameters: {error}"),
+                        data: None,
+                    }),
+                };
+            }
+        };
+        let actions = code_actions_at(
+            state,
+            &params,
+            code_action_quickfix_support,
+            code_action_is_preferred_support,
+            workspace_edit_document_changes,
+        );
+        return Response {
+            id,
+            result: Some(serde_json::to_value(actions).unwrap_or(Value::Null)),
+            error: None,
+        };
+    }
     if method != "textDocument/hover"
         && method != "textDocument/definition"
         && method != "textDocument/completion"
@@ -1604,6 +1875,89 @@ fn handle_request(
         result: Some(result),
         error: None,
     }
+}
+
+fn code_actions_at(
+    state: &ServerState,
+    params: &CodeActionParams,
+    quickfix_support: bool,
+    is_preferred_support: bool,
+    document_changes_support: bool,
+) -> Vec<CodeActionOrCommand> {
+    if !quickfix_support
+        || params
+            .context
+            .only
+            .as_ref()
+            .is_some_and(|kinds| !kinds.contains(&CodeActionKind::QUICKFIX))
+    {
+        return Vec::new();
+    }
+    let uri = &params.text_document.uri;
+    let Some((document, index)) = current_symbol_index(state, uri) else {
+        return Vec::new();
+    };
+    let mut actions = Vec::new();
+    let mut emitted = HashSet::new();
+
+    for diagnostic in &params.context.diagnostics {
+        let Some(lsp_types::NumberOrString::String(code)) = diagnostic.code.as_ref() else {
+            continue;
+        };
+        if code != "SEM041" || diagnostic.source.as_deref() != Some(SERVER_NAME) {
+            continue;
+        }
+        let Ok(Some(start)) = position_to_offset(&document.text, diagnostic.range.start) else {
+            continue;
+        };
+        let Ok(Some(end)) = position_to_offset(&document.text, diagnostic.range.end) else {
+            continue;
+        };
+        if start >= end {
+            continue;
+        }
+        let Some(expression) = index.quick_fix_targets.get(&(start, end)).copied() else {
+            continue;
+        };
+        if !emitted.insert((expression.start, expression.end))
+            || expression.start >= expression.end
+            || !document.text.is_char_boundary(expression.start)
+            || !document.text.is_char_boundary(expression.end)
+        {
+            continue;
+        }
+        let Ok(edit_range) = span_to_range(&document.text, expression) else {
+            continue;
+        };
+        let original_expression = &document.text[expression.start..expression.end];
+        let edit = TextEdit::new(edit_range, format!("({original_expression})"));
+        let workspace_edit = if document_changes_support {
+            WorkspaceEdit {
+                document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier::new(
+                        uri.clone(),
+                        document.version,
+                    ),
+                    edits: vec![OneOf::Left(edit)],
+                }])),
+                ..Default::default()
+            }
+        } else {
+            WorkspaceEdit {
+                changes: Some(HashMap::from([(uri.clone(), vec![edit])])),
+                ..Default::default()
+            }
+        };
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Mark assignment as intentional".to_owned(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diagnostic.clone()]),
+            edit: Some(workspace_edit),
+            is_preferred: is_preferred_support.then_some(true),
+            ..Default::default()
+        }));
+    }
+    actions
 }
 
 fn current_symbol_index<'a>(
