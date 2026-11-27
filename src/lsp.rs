@@ -1418,17 +1418,21 @@ fn build_script_symbol_index(
     }
 
     occurrences.sort_by_key(|occurrence| (occurrence.span.start, occurrence.span.end));
-    let scope_ranges = scopes
-        .scope_ranges()
-        .flat_map(|((start, end), scope)| {
-            map_index_spans(prepared, root_source, byte_span(start, end))
-                .into_iter()
-                .map(move |mapped| ((mapped.start, mapped.end), scope))
-        })
-        .collect();
+    let mut scope_ranges = Vec::new();
+    for ((start, end), scope) in scopes.scope_ranges() {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        for mapped in map_index_spans(prepared, root_source, byte_span(start, end)) {
+            scope_ranges.push(((mapped.start, mapped.end), scope));
+        }
+    }
     let mut symbol_spans = HashMap::new();
     for (scope_index, scope) in scopes.scopes().iter().enumerate() {
         for symbol in &scope.symbols {
+            if cancellation.is_cancelled() {
+                return None;
+            }
             if let Some(mapped) = map_index_span(prepared, root_source, symbol.span) {
                 symbol_spans.insert((scope_index, symbol.span.start, symbol.span.end), mapped);
             }
