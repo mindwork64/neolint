@@ -2356,3 +2356,70 @@ fn completion_uses_plain_text_calls_when_client_does_not_support_snippets() {
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
 }
+
+#[test]
+fn completion_preserves_scope_ranges_across_preprocessor_source_gaps() {
+    let workspace = unique_workspace("neolint-lsp-completion-preprocessor-scope");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "integer helper(integer value) {\n",
+        "    integer before_directive = value;\n",
+        "#if 1\n",
+        "    integer inside_directive = value;\n",
+        "#endif\n",
+        "    integer after_directive = value;\n",
+        "    return after_directive;\n",
+        "}\n",
+        "default { state_entry() {} }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let cursor =
+        source.find("after_directive = value;").unwrap() + "after_directive = value;".len();
+    let (line, character) = position_of(source, cursor);
+    let completion =
+        client.request_position(41, "textDocument/completion", &root_uri, line, character);
+    assert!(
+        completion["error"].is_null(),
+        "completion error: {completion:#?}"
+    );
+    let labels: Vec<_> = completion["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for expected in [
+        "value",
+        "before_directive",
+        "inside_directive",
+        "after_directive",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "missing {expected} after a preprocessor source gap: {labels:?}"
+        );
+    }
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}

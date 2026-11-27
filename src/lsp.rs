@@ -285,7 +285,7 @@ struct ScriptSymbolIndex {
     occurrences: Vec<SymbolOccurrence>,
     /// The lexical tree used by semantic analysis, including target API metadata.
     scope_tree: ScopeTree,
-    /// Lexical scope ranges projected into the open root buffer.
+    /// Lexical scope ranges projected into one or more ranges in the open root buffer.
     scope_ranges: Vec<((usize, usize), crate::ast_semantic::scopes::ScopeId)>,
     /// Root-buffer declaration spans keyed by lexical scope and AST span.
     /// Included declarations have no root-buffer span and remain globally visible.
@@ -1420,9 +1420,10 @@ fn build_script_symbol_index(
     occurrences.sort_by_key(|occurrence| (occurrence.span.start, occurrence.span.end));
     let scope_ranges = scopes
         .scope_ranges()
-        .filter_map(|((start, end), scope)| {
-            map_index_span(prepared, root_source, byte_span(start, end))
-                .map(|mapped| ((mapped.start, mapped.end), scope))
+        .flat_map(|((start, end), scope)| {
+            map_index_spans(prepared, root_source, byte_span(start, end))
+                .into_iter()
+                .map(move |mapped| ((mapped.start, mapped.end), scope))
         })
         .collect();
     let mut symbol_spans = HashMap::new();
@@ -1443,6 +1444,41 @@ fn build_script_symbol_index(
         function_snippets,
         function_plain_calls,
     })
+}
+
+/// Resolve every root-source segment covered by an AST/prepared span.
+///
+/// Scope bodies can cross removed preprocessor directives or included source
+/// segments. `ResolvedSpan::primary()` alone is only one contiguous origin
+/// run; its related spans retain the other runs, which are needed to identify
+/// the active lexical scope at later cursor positions in the same body.
+fn map_index_spans(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Vec<Span> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return vec![span];
+    };
+    let Ok(prepared_span) = prepared.prepared_span(span) else {
+        return Vec::new();
+    };
+    let Ok(resolved) = prepared.map().resolve_span(prepared_span) else {
+        return Vec::new();
+    };
+    let mut mapped = Vec::new();
+    for source_span in std::iter::once(resolved.primary()).chain(resolved.related().iter().copied())
+    {
+        if source_span.source() != root_source {
+            continue;
+        }
+        if let Ok(rendered) = prepared.map().render_span(source_span) {
+            if !mapped.contains(&rendered) {
+                mapped.push(rendered);
+            }
+        }
+    }
+    mapped
 }
 
 /// Resolve an AST/prepared span to a span in the open root source. Without a
