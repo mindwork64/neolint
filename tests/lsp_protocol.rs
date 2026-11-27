@@ -463,6 +463,74 @@ fn hover_and_definition_resolve_current_script_symbols_and_standard_api() {
 }
 
 #[test]
+fn hover_and_definition_ignore_vector_component_selectors() {
+    let workspace = unique_workspace("neolint-lsp-component-selector");
+    let source = concat!(
+        "integer x = 7;\n",
+        "vector position;\n",
+        "default { state_entry() { float component = position.x; llOwnerSay((string)x); } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let component_offset = source.find("position.x").unwrap() + "position.".len();
+    let (line, character) = position_of(source, component_offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    assert!(
+        hover["result"].is_null(),
+        "component selectors are not variable bindings: {hover:#?}"
+    );
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    assert!(
+        definition["result"].is_null(),
+        "component selectors have no declaration target: {definition:#?}"
+    );
+
+    let scalar_use = source.rfind("x)").unwrap();
+    let (line, character) = position_of(source, scalar_use);
+    let hover = client.request_position(12, "textDocument/hover", &root_uri, line, character);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        value.contains("integer x"),
+        "ordinary variable hover must remain available: {value}"
+    );
+    let definition =
+        client.request_position(13, "textDocument/definition", &root_uri, line, character);
+    let declaration = source.find("x =").unwrap();
+    let (expected_line, expected_character) = position_of(source, declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn hover_uses_the_selected_opensim_runtime_api_catalogue() {
     let workspace = unique_workspace("neolint-lsp-hover-opensim");
     fs::write(

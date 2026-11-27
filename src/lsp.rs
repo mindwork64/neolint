@@ -267,6 +267,9 @@ struct CachedScriptSymbols {
 
 struct ScriptSymbolIndex {
     tokens: Vec<crate::lexer::Token>,
+    /// Identifier spans that are AST vector/rotation component selectors, not
+    /// variable references (for example the `x` in `position.x`).
+    component_spans: Vec<Span>,
     scopes: ScopeTree,
     function_signatures: HashMap<usize, String>,
 }
@@ -1213,6 +1216,14 @@ fn build_script_symbol_index(
         builtins::catalog_for_target(config.target()),
         config.target(),
     );
+    let component_spans = crate::ast_semantic::expressions::collect_facts(&ast, &scopes)
+        .expressions
+        .into_iter()
+        .filter_map(|site| match &site.expression.kind {
+            crate::ast::ExpressionKind::Component(component) => Some(component.component_span),
+            _ => None,
+        })
+        .collect();
     let mut function_signatures = HashMap::new();
     for item in &ast.items {
         if let TopLevel::Function(function) = item {
@@ -1246,6 +1257,7 @@ fn build_script_symbol_index(
     }
     (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex {
         tokens,
+        component_spans,
         scopes,
         function_signatures,
     })
@@ -1339,6 +1351,7 @@ fn identifier_token_at(index: &ScriptSymbolIndex, offset: usize) -> Option<&crat
         token.kind == crate::lexer::TokenKind::Identifier
             && token.span.start <= offset
             && offset < token.span.end
+            && !index.component_spans.contains(&token.span)
     })
 }
 
