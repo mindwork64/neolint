@@ -94,9 +94,12 @@ existing path prefixes are canonicalized, so a spelling such as
 alias/../shared.inc follows filesystem symlink traversal before applying the
 parent-directory component. Deleting either a file symlink or a directory
 symlink therefore still invalidates dependent roots even though the target
-and its contents remain present. Folder notifications are compared against
-both canonical and lexical paths so nested includes beneath a removed
-symlinked directory are also found. When multiple open URI aliases point to one canonical
+and its contents remain present. Open root documents also retain both their
+canonical and lexical path identities; deleting or renaming a symlinked
+parent directory therefore invalidates the root itself. Folder notifications
+are compared against both canonical and lexical paths so nested includes
+beneath a removed symlinked directory are also found.
+When multiple open URI aliases point to one canonical
 path, the lexicographically first URI supplies the contents and source mapping,
 while all aliases remain part of stale-result validation. Resolved include
 paths are recorded before their buffer contents are loaded, so an include that

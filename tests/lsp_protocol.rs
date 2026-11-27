@@ -1014,6 +1014,78 @@ fn deleting_a_symlinked_include_directory_reanalyzes_its_dependent_root() {
 
 #[cfg(unix)]
 #[test]
+fn deleting_symlinked_root_directory_reanalyzes_open_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-root-directory");
+    let real_directory = workspace.join("actual-scripts");
+    let alias_directory = workspace.join("script-alias");
+    fs::create_dir_all(&real_directory).unwrap();
+    std::os::unix::fs::symlink(&real_directory, &alias_directory).unwrap();
+
+    let real_root_path = real_directory.join("main.lsl");
+    let alias_root_path = alias_directory.join("main.lsl");
+    let root_uri = url::Url::from_file_path(&alias_root_path)
+        .unwrap()
+        .to_string();
+    let alias_uri = url::Url::from_directory_path(&alias_directory)
+        .unwrap()
+        .to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let root_text = "default { state_entry() {} }\n";
+    fs::write(&real_root_path, root_text).unwrap();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(initial_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The root itself stays open and the real directory remains present;
+    // only the symlink spelling used by its URI disappears.
+    fs::remove_file(&alias_directory).unwrap();
+    assert!(real_root_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let reanalyzed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let reanalyzed_publication = reanalyzed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        reanalyzed_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting the root's symlinked parent must still reanalyze the open root"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn creating_include_candidate_after_symlink_parent_component_invalidates_root() {
     let workspace = unique_workspace("neolint-lsp-symlink-parent-component");
     let target_directory = workspace.join("actual");

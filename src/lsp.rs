@@ -1098,6 +1098,7 @@ fn source_dependencies(
     let mut dependencies = HashSet::new();
     if let Ok(root_path) = root_uri.to_file_path() {
         dependencies.insert(normalize_path(&root_path));
+        dependencies.insert(normalize_lexical_path(&root_path));
     }
     // The manager stores both canonical targets and post-unlink path
     // identities for symlink aliases. Do not canonicalize these again here.
