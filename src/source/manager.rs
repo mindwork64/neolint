@@ -4,6 +4,7 @@
 //! [`SourceId`] values, enforces bounded reads and UTF-8, and rejects remote or
 //! non-regular roots. It never tokenizes LSL and never expands includes.
 
+#[cfg(feature = "lsp")]
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -19,8 +20,87 @@ pub const MAX_ROOT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_INCLUDED_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum original source files per AnalysisUnit.
 pub const MAX_SOURCE_FILES_PER_UNIT: usize = 256;
+
+/// Maximum distinct local include paths retained by one LSP analysis.
+#[cfg(feature = "lsp")]
+pub(crate) const MAX_TRACKED_INCLUDE_DEPENDENCIES: usize = 4096;
 /// Maximum root AnalysisUnits in one invocation.
 pub const MAX_ANALYSIS_UNITS_PER_INVOCATION: usize = 65_536;
+
+/// Convert a local path to an absolute lexical identity without resolving
+/// symlinks. This alias is retained so workspace folder operations still
+/// match include paths beneath a directory symlink after that link is removed.
+#[cfg(feature = "lsp")]
+pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    let mut lexical = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => lexical.push(prefix.as_os_str()),
+            Component::RootDir => lexical.push(component.as_os_str()),
+            Component::CurDir => {}
+            // Keep parent components until the existing prefix is
+            // canonicalized. Collapsing them lexically is wrong when the
+            // preceding component is a symlink.
+            Component::ParentDir => lexical.push(component.as_os_str()),
+            Component::Normal(part) => lexical.push(part),
+        }
+    }
+    lexical
+}
+
+/// Normalize a local path for dependency identity, including paths that do
+/// not exist yet. Existing ancestors are canonicalized so a missing leaf below
+/// a symlinked directory matches the URI used after the file is created.
+#[cfg(feature = "lsp")]
+pub(crate) fn normalize_local_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+
+    let lexical = normalize_lexical_path(path);
+    let mut ancestor = lexical.clone();
+    let mut suffix = Vec::<OsString>::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        if !ancestor.pop() {
+            break;
+        }
+    }
+
+    if let Ok(mut canonical) = fs::canonicalize(&ancestor) {
+        for component in suffix.iter().rev() {
+            canonical.push(component);
+        }
+        canonical
+    } else {
+        lexical
+    }
+}
+
+/// Identity of a path when its final component is missing, while resolving
+/// existing parent directories (including symlinks). This preserves the
+/// spelling used for a symlinked include after that file is unlinked.
+#[cfg(feature = "lsp")]
+pub(crate) fn normalize_missing_leaf_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return normalize_local_path(path);
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut normalized = normalize_local_path(parent);
+    normalized.push(file_name);
+    normalized
+}
 
 /// Failure to load an original source file.
 #[derive(Debug)]
@@ -100,7 +180,10 @@ pub struct SourceManager {
     unit: AnalysisUnitId,
     files: Vec<Arc<SourceFile>>,
     root: Option<SourceId>,
+    #[cfg(feature = "lsp")]
     include_dependencies: HashSet<PathBuf>,
+    #[cfg(feature = "lsp")]
+    include_dependencies_complete: bool,
 }
 
 impl SourceManager {
@@ -110,7 +193,10 @@ impl SourceManager {
             unit,
             files: Vec::new(),
             root: None,
+            #[cfg(feature = "lsp")]
             include_dependencies: HashSet::new(),
+            #[cfg(feature = "lsp")]
+            include_dependencies_complete: true,
         }
     }
 
@@ -124,28 +210,44 @@ impl SourceManager {
         &self.files
     }
 
-    /// Paths of resolved local includes, including paths whose content could
-    /// not be loaded (for example, an open buffer exceeded the size limit).
+    /// Paths that can affect include resolution, including missing candidates.
     #[cfg(feature = "lsp")]
     pub(crate) fn include_dependencies(&self) -> &HashSet<PathBuf> {
         &self.include_dependencies
     }
 
-    /// Record a resolved include path before attempting to load its contents.
+    /// Whether every dependency candidate could be retained within the budget.
+    #[cfg(feature = "lsp")]
+    pub(crate) fn include_dependencies_complete(&self) -> bool {
+        self.include_dependencies_complete
+    }
+
+    /// Record a path that can affect include resolution.
     ///
-    /// This keeps dependency invalidation working when an include fails to
-    /// load from its current editor buffer. Canonical paths unify symlink aliases.
-    pub(crate) fn record_include_dependency(&mut self, path: &Path) {
-        let normalized = fs::canonicalize(path).unwrap_or_else(|_| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(path)
+    /// Missing candidates are retained as absolute normalized paths. Once the
+    /// bounded set is full, mark the snapshot incomplete so the LSP can fall
+    /// back to conservative invalidation instead of silently missing an edge.
+    #[cfg(feature = "lsp")]
+    pub(crate) fn record_include_dependency(&mut self, path: &Path) -> bool {
+        if !self.include_dependencies_complete {
+            return false;
+        }
+        let normalized = [
+            normalize_local_path(path),
+            normalize_missing_leaf_path(path),
+            normalize_lexical_path(path),
+        ];
+        for dependency in normalized {
+            if self.include_dependencies.contains(&dependency) {
+                continue;
             }
-        });
-        self.include_dependencies.insert(normalized);
+            if self.include_dependencies.len() >= MAX_TRACKED_INCLUDE_DEPENDENCIES {
+                self.include_dependencies_complete = false;
+                return false;
+            }
+            self.include_dependencies.insert(dependency);
+        }
+        true
     }
 
     /// Root source, if one was loaded.
@@ -432,18 +534,144 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(feature = "lsp")]
     #[test]
-    fn records_include_dependencies_even_when_the_source_is_not_registered() {
+    fn records_missing_include_paths_and_keeps_identity_after_creation() {
         let directory = temp_dir();
-        let path = directory.join("shared.inc");
-        fs::write(&path, "integer shared = 1;").unwrap();
-        let canonical = fs::canonicalize(&path).unwrap();
+        let path = directory.join("not-created-yet").join("shared.inc");
         let mut manager = SourceManager::new(unit(0));
 
-        manager.record_include_dependency(&path);
-
-        assert!(manager.include_dependencies().contains(&canonical));
+        assert!(manager.record_include_dependency(&path));
+        let recorded = manager
+            .include_dependencies()
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(recorded.is_absolute());
         assert!(manager.files().is_empty());
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "integer shared = 1;").unwrap();
+        assert_eq!(normalize_local_path(&path), recorded);
+
+        #[cfg(unix)]
+        {
+            let real_parent = directory.join("real-parent");
+            let alias_parent = directory.join("alias-parent");
+            fs::create_dir_all(&real_parent).unwrap();
+            std::os::unix::fs::symlink(&real_parent, &alias_parent).unwrap();
+            let missing_via_alias = alias_parent.join("not-created.inc");
+            let normalized_before_creation = normalize_local_path(&missing_via_alias);
+            let missing_file = real_parent.join("not-created.inc");
+            fs::write(&missing_file, "integer shared = 1;").unwrap();
+            assert_eq!(
+                normalized_before_creation,
+                normalize_local_path(&missing_file)
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn records_symlink_include_identity_after_the_link_is_removed() {
+        let directory = temp_dir();
+        let target = directory.join("target.inc");
+        let alias = directory.join("shared.inc");
+        fs::write(&target, "integer shared = 1;").unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let mut manager = SourceManager::new(unit(0));
+
+        assert!(manager.record_include_dependency(&alias));
+        let canonical = normalize_local_path(&alias);
+        let missing_alias = normalize_missing_leaf_path(&alias);
+        assert_ne!(canonical, missing_alias);
+        assert!(manager.include_dependencies().contains(&canonical));
+        assert!(manager.include_dependencies().contains(&missing_alias));
+
+        fs::remove_file(&alias).unwrap();
+        assert_eq!(normalize_local_path(&alias), missing_alias);
+        assert!(manager
+            .include_dependencies()
+            .contains(&normalize_local_path(&alias)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn normalizes_parent_components_after_resolving_symlinks() {
+        let directory = temp_dir();
+        let target_directory = directory.join("real");
+        let symlink_target = target_directory.join("nested");
+        let alias = directory.join("alias");
+        fs::create_dir_all(&symlink_target).unwrap();
+        std::os::unix::fs::symlink(&symlink_target, &alias).unwrap();
+        let candidate = alias.join("../shared.inc");
+        let expected = target_directory.join("shared.inc");
+
+        assert_eq!(normalize_local_path(&candidate), expected);
+        assert_eq!(normalize_missing_leaf_path(&candidate), expected);
+        assert_eq!(
+            normalize_lexical_path(&candidate),
+            directory.join("alias/../shared.inc")
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn records_lexical_paths_below_symlinked_parent_directories() {
+        let directory = temp_dir();
+        let target_directory = directory.join("target-directory");
+        let alias_directory = directory.join("include-alias");
+        fs::create_dir_all(&target_directory).unwrap();
+        let target = target_directory.join("shared.inc");
+        fs::write(&target, "integer shared = 1;").unwrap();
+        std::os::unix::fs::symlink(&target_directory, &alias_directory).unwrap();
+        let alias = alias_directory.join("shared.inc");
+        let lexical_dependency = normalize_lexical_path(&alias);
+        let mut manager = SourceManager::new(unit(0));
+
+        assert!(manager.record_include_dependency(&alias));
+        assert!(manager
+            .include_dependencies()
+            .contains(&normalize_local_path(&target)));
+        assert!(manager.include_dependencies().contains(&lexical_dependency));
+
+        fs::remove_file(&alias_directory).unwrap();
+        let deleted_folder_identity = normalize_lexical_path(&alias_directory);
+        assert!(lexical_dependency.starts_with(&deleted_folder_identity));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn include_dependency_budget_marks_tracking_incomplete_without_growing_the_set() {
+        let directory = temp_dir();
+        let mut manager = SourceManager::new(unit(0));
+        for index in 0..MAX_TRACKED_INCLUDE_DEPENDENCIES {
+            assert!(
+                manager.record_include_dependency(&directory.join(format!("missing-{index}.inc")))
+            );
+        }
+        assert_eq!(
+            manager.include_dependencies().len(),
+            MAX_TRACKED_INCLUDE_DEPENDENCIES
+        );
+        assert!(manager.include_dependencies_complete());
+
+        assert!(!manager.record_include_dependency(&directory.join("overflow.inc")));
+        assert_eq!(
+            manager.include_dependencies().len(),
+            MAX_TRACKED_INCLUDE_DEPENDENCIES
+        );
+        assert!(!manager.include_dependencies_complete());
+        assert!(!manager.record_include_dependency(&directory.join("later.inc")));
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -52,6 +52,23 @@ struct LspClient {
 
 impl LspClient {
     fn new(workspace_uri: &str) -> Self {
+        Self::with_file_operations(workspace_uri, true)
+    }
+
+    fn with_file_operations(workspace_uri: &str, supports_file_operations: bool) -> Self {
+        let capabilities = if supports_file_operations {
+            json!({
+                "workspace": {
+                    "fileOperations": {
+                        "didCreate": true,
+                        "didRename": true,
+                        "didDelete": true
+                    }
+                }
+            })
+        } else {
+            json!({})
+        };
         let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -89,12 +106,35 @@ impl LspClient {
             "params": {
                 "processId": null,
                 "rootUri": workspace_uri,
-                "capabilities": {}
+                "capabilities": capabilities
             }
         }));
-        client.receive_until(|message| {
+        let initialized = client.receive_until(|message| {
             message.get("id") == Some(&json!(1)) && message.get("result").is_some()
         });
+        let initialize_result = initialized
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(1)))
+            .unwrap();
+        if supports_file_operations {
+            assert_eq!(
+                initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]
+                    ["filters"][0]["scheme"],
+                "file",
+                "the server must advertise local file create notifications; response: {initialize_result:#?}"
+            );
+            assert!(
+                initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]["filters"]
+                    [0]["pattern"]["matches"]
+                    .is_null(),
+                "file-operation filters must include files and folders"
+            );
+        } else {
+            assert!(
+                initialize_result["result"]["workspace"]["fileOperations"].is_null(),
+                "the server must not advertise file operations the client did not request"
+            );
+        }
         client.send(json!({
             "jsonrpc": "2.0",
             "method": "initialized",
@@ -207,6 +247,17 @@ fn unique_workspace(prefix: &str) -> std::path::PathBuf {
     let workspace = std::env::temp_dir().join(format!("{prefix}-{unique}"));
     fs::create_dir_all(&workspace).unwrap();
     workspace
+}
+
+#[test]
+fn server_only_advertises_workspace_file_operations_when_client_supports_them() {
+    let workspace = unique_workspace("neolint-lsp-file-op-negotiation");
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let client = LspClient::with_file_operations(&workspace_uri, false);
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]
@@ -669,6 +720,698 @@ fn oversized_unsaved_include_stays_tracked_until_the_buffer_is_fixed() {
         "fixing the oversized include must reanalyze the dependent root"
     );
     assert_eq!(fs::read_to_string(&shared_path).unwrap(), disk_text);
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn file_operation_during_initial_analysis_requeues_the_root() {
+    let workspace = unique_workspace("neolint-lsp-file-operation-analysis-race");
+    let include_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let include_uri = url::Url::from_file_path(&include_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    // Do not wait for the first root publication. The file operation is sent
+    // immediately after didOpen, so it can overlap either the dependency scan
+    // or the worker-result handoff to the main LSP thread.
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    fs::write(&include_path, "integer shared = 42;\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": include_uri }] }
+    }));
+
+    let recovered = client.receive_until(|message| {
+        is_publish(message, &root_uri, Some(1))
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+    });
+    let publication = recovered
+        .iter()
+        .rev()
+        .find(|message| {
+            is_publish(message, &root_uri, Some(1))
+                && message["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(|diagnostics| diagnostics.is_empty())
+        })
+        .expect("the root must be reanalyzed against the created include");
+    assert!(publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn workspace_file_operations_invalidate_missing_include_dependencies() {
+    let workspace = unique_workspace("neolint-lsp-file-operations");
+    let include_path = workspace.join("shared.inc");
+    let renamed_path = workspace.join("renamed.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    let include_text = "integer shared = 42;\n";
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let include_uri = url::Url::from_file_path(&include_path).unwrap().to_string();
+    let renamed_uri = url::Url::from_file_path(&renamed_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let missing = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let missing_publication = missing
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(!missing_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The file is created on disk but never opened as a text document.
+    fs::write(&include_path, include_text).unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": include_uri }] }
+    }));
+    let created = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let created_publication = created
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        created_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "didCreateFiles must reanalyze roots watching the missing candidate"
+    );
+
+    // Renaming away the selected include restores the missing-file diagnostic.
+    fs::rename(&include_path, &renamed_path).unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didRenameFiles",
+        "params": {
+            "files": [{ "oldUri": include_uri, "newUri": renamed_uri }]
+        }
+    }));
+    let renamed_away = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let renamed_away_publication = renamed_away
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !renamed_away_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "didRenameFiles must invalidate the old include path"
+    );
+
+    // Renaming a file back into the watched candidate path clears the error.
+    fs::rename(&renamed_path, &include_path).unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didRenameFiles",
+        "params": {
+            "files": [{ "oldUri": renamed_uri, "newUri": include_uri }]
+        }
+    }));
+    let renamed_back = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let renamed_back_publication = renamed_back
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        renamed_back_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "didRenameFiles must invalidate the new include candidate path"
+    );
+
+    fs::remove_file(&include_path).unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": include_uri }] }
+    }));
+    let deleted = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let deleted_publication = deleted
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !deleted_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "didDeleteFiles must invalidate the removed include"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_a_symlinked_include_reanalyzes_its_dependent_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-include");
+    let target_path = workspace.join("actual.inc");
+    let alias_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&target_path, "integer shared = 1;\n").unwrap();
+    std::os::unix::fs::symlink(&target_path, &alias_path).unwrap();
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let alias_uri = url::Url::from_file_path(&alias_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the symlinked include should initially resolve successfully"
+    );
+
+    // The target remains present; only the include alias is unlinked.
+    fs::remove_file(&alias_path).unwrap();
+    assert!(target_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let deleted = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let deleted_publication = deleted
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !deleted_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting a symlinked include must invalidate the root even while its target remains"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_a_symlinked_include_directory_reanalyzes_its_dependent_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-directory");
+    let target_directory = workspace.join("actual-includes");
+    let alias_directory = workspace.join("include-alias");
+    let include_path = target_directory.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    fs::create_dir_all(&target_directory).unwrap();
+    fs::write(&include_path, "integer shared = 1;\n").unwrap();
+    std::os::unix::fs::symlink(&target_directory, &alias_directory).unwrap();
+    let root_text = concat!(
+        "#include ",
+        "\"include-alias/shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let alias_uri = url::Url::from_directory_path(&alias_directory)
+        .unwrap()
+        .to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "include through a directory symlink should initially resolve"
+    );
+
+    // Remove only the alias directory symlink; the real include remains.
+    fs::remove_file(&alias_directory).unwrap();
+    assert!(include_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let deleted = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let deleted_publication = deleted
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !deleted_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting a symlinked include directory must invalidate nested includes"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_symlinked_root_directory_reanalyzes_open_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-root-directory");
+    let real_directory = workspace.join("actual-scripts");
+    let alias_directory = workspace.join("script-alias");
+    fs::create_dir_all(&real_directory).unwrap();
+    std::os::unix::fs::symlink(&real_directory, &alias_directory).unwrap();
+
+    let real_root_path = real_directory.join("main.lsl");
+    let alias_root_path = alias_directory.join("main.lsl");
+    let root_uri = url::Url::from_file_path(&alias_root_path)
+        .unwrap()
+        .to_string();
+    let alias_uri = url::Url::from_directory_path(&alias_directory)
+        .unwrap()
+        .to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let root_text = "default { state_entry() {} }\n";
+    fs::write(&real_root_path, root_text).unwrap();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(initial_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The root itself stays open and the real directory remains present;
+    // only the symlink spelling used by its URI disappears.
+    fs::remove_file(&alias_directory).unwrap();
+    assert!(real_root_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let reanalyzed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let reanalyzed_publication = reanalyzed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        reanalyzed_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting the root's symlinked parent must still reanalyze the open root"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn creating_include_candidate_after_symlink_parent_component_invalidates_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-parent-component");
+    let target_directory = workspace.join("actual");
+    let symlink_target = target_directory.join("nested");
+    let alias = workspace.join("alias");
+    let fallback_directory = workspace.join("fallback");
+    fs::create_dir_all(&symlink_target).unwrap();
+    fs::create_dir_all(fallback_directory.join("nested")).unwrap();
+    std::os::unix::fs::symlink(&symlink_target, &alias).unwrap();
+    std::os::unix::fs::symlink(
+        fallback_directory.join("nested"),
+        fallback_directory.join("alias"),
+    )
+    .unwrap();
+
+    let high_priority_path = target_directory.join("shared.inc");
+    let fallback_path = fallback_directory.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    fs::write(&fallback_path, "#define FALLBACK_INCLUDE\n").unwrap();
+    let root_text = concat!(
+        "#include ",
+        "\"alias/../shared.inc\"",
+        "\n",
+        "#ifdef HIGH_PRIORITY\n",
+        "integer broken = ;\n",
+        "#endif\n",
+        "default { state_entry() {} }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "preprocess = true\ninclude_dir = fallback\n",
+    )
+    .unwrap();
+
+    let high_priority_uri = url::Url::from_file_path(&high_priority_path)
+        .unwrap()
+        .to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the fallback include should initially be selected; diagnostics: {:#?}",
+        initial_publication["params"]["diagnostics"]
+    );
+    assert!(!high_priority_path.exists());
+
+    // The filesystem follows the symlink before applying the parent component.
+    fs::write(&high_priority_path, "#define HIGH_PRIORITY\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": high_priority_uri }] }
+    }));
+    let shadowed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let shadowed_publication = shadowed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !shadowed_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "creating the actual higher-priority candidate must invalidate the root"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn creating_a_higher_priority_include_candidate_changes_resolution() {
+    let workspace = unique_workspace("neolint-lsp-include-precedence");
+    let include_dir = workspace.join("fallback");
+    fs::create_dir_all(&include_dir).unwrap();
+    let selected_path = include_dir.join("shared.inc");
+    let higher_priority_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "#ifdef HIGH_PRIORITY\n",
+        "integer broken = ;\n",
+        "#endif\n",
+        "default { state_entry() {} }\n",
+    );
+    fs::write(&selected_path, "integer shared = 1;\n").unwrap();
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "preprocess = true\ninclude_dir = fallback\n",
+    )
+    .unwrap();
+
+    let new_include_uri = url::Url::from_file_path(&higher_priority_path)
+        .unwrap()
+        .to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let fallback = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let fallback_publication = fallback
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        fallback_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the valid lower-priority include should initially be selected"
+    );
+
+    // Adding a file in the source directory shadows the include-dir fallback.
+    fs::write(&higher_priority_path, "#define HIGH_PRIORITY\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": new_include_uri }] }
+    }));
+    let shadowed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let shadowed_publication = shadowed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !shadowed_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "creating a higher-priority candidate must invalidate and change the selected include"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn opening_a_previously_missing_include_reanalyzes_its_dependent_root() {
+    let workspace = unique_workspace("neolint-lsp-missing-include");
+    let include_dir = workspace.join("includes");
+    fs::create_dir_all(&include_dir).unwrap();
+    let include_path = include_dir.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let root_text = concat!(
+        "#include ",
+        "\"includes/shared.inc\"",
+        "\n",
+        "default { state_entry() {} }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let include_uri = url::Url::from_file_path(&include_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let missing = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let missing_publication = missing
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !missing_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a missing include must initially be diagnosed"
+    );
+    assert!(!include_path.exists());
+
+    // The file appears after analysis and is opened with unsaved editor text.
+    let include_text = "integer shared = 42;\n";
+    fs::write(&include_path, "integer shared = 1;\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": include_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": include_text
+            }
+        }
+    }));
+    let recovered = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let recovered_publication = recovered
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        recovered_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "opening a newly available include must reanalyze and clear the root error"
+    );
+    assert_eq!(
+        fs::read_to_string(&include_path).unwrap(),
+        "integer shared = 1;\n"
+    );
 
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();

@@ -22,22 +22,37 @@ not block the JSON-RPC event loop from receiving edits, close notifications or
 shutdown. Pending work is coalesced per root document: a newer snapshot replaces
 an older queued snapshot for that root.
 
-Each accepted root analysis records the local source files it actually loaded
-(root plus resolved `#include` files). Local file documents are tracked even when
-their extension is `.inc` or `.h`; only `.lsl` files are analyzed as independent
-roots. Opening, editing, saving or closing a document schedules the `.lsl` root
-itself (when applicable) and the currently open roots whose last successful
-dependency set contains it. The active worker is cancelled
-only when its root is among those affected; unrelated roots continue running.
-Pending work remains coalesced per root and keeps FIFO order. Closing a root
-removes its queued task, cancels it only when it is the active root, and
+Each accepted root analysis records the root, loaded local include files, and
+the searched local paths that can affect include resolution. This includes
+missing candidates and higher-priority candidates preceding an already selected
+include. Local file documents are tracked even when their extension is .inc or
+.h; only .lsl files are analyzed as independent roots. Opening, editing, saving
+or closing a document schedules the .lsl root itself (when applicable) and the
+currently open roots whose last successful dependency set contains it.
+Workspace file operations also invalidate roots for matching file or folder
+paths. Since a first analysis may not have recorded its dependency set yet, a
+file-operation batch also refreshes roots already pending or running in the
+worker. Pending work remains coalesced per root and keeps FIFO order. Closing
+a root removes its queued task, cancels it only when it is the active root, and
 re-analyzes remaining dependents so diagnostics for a no-longer-open include are
-withdrawn. Shutdown signals cancellation and does not wait for the worker thread.
+withdrawn. The server advertises LSP workspace file operations for local files:
+workspace/didCreateFiles, workspace/didRenameFiles, and
+workspace/didDeleteFiles. These notifications invalidate roots whose include
+search paths can be affected, including roots with a previously missing include.
+A newly created include can therefore be picked up before the file is opened as
+a text document. textDocument/didOpen remains a fallback for clients that do
+not send workspace file-operation notifications. Shutdown signals cancellation
+and does not wait for the worker thread.
 
-A completed result is accepted only while the root version and the revisions
-of the dependencies discovered by that task still match the live document
-snapshot. An unrelated open-document edit or close does not invalidate it. A
-dependency that opens or closes while analysis is running is also detected: the
+A completed result is accepted only while the root version, the revisions
+of the dependencies discovered by that task, and the workspace file-operation
+generation still match the live state. Each create/rename/delete batch advances
+a global generation before root selection. Results started before that batch
+are discarded and their roots are requeued, including the narrow interval after
+the worker finishes but before the LSP thread accepts its result. This generation
+is intentionally conservative: an unrelated file operation can also cause an
+in-flight result to be recomputed. An unrelated open-document edit or close does
+not invalidate a result. A dependency that opens or closes while analysis is running is also detected: the
 task records an empty open-URI revision set for a dependency not open at start,
 which no longer matches when a buffer for that path is opened. If analysis fails
 before dependency discovery completes,
@@ -67,15 +82,35 @@ For every analysis task, open local file buffers are captured in an immutable
 snapshot. When a resolved include path matches an open local document, the
 preprocessor uses that buffer's text instead of reading file contents from
 disk. Diagnostics and macro expansion therefore reflect unsaved include edits.
-The path must still resolve to an existing regular local file; new files that
-do not yet exist on disk are not discoverable as includes. When multiple open
-URI aliases point to one canonical path, the lexicographically first URI
-supplies the contents and source mapping, while all aliases remain part of
-stale-result validation. Resolved local include paths are recorded as
-dependencies before their buffer contents are loaded, so an include that
-temporarily exceeds the source-size limit remains watched and a later buffer
-edit can recover the dependent root. Included-file diagnostics are published
-only to the selected open URI whose buffer supplied the snapshot.
+An include must exist as a regular local file before its contents can be
+loaded. Include dependency tracking retains every searched candidate up to and
+including the selected file. For a missing include, all candidate paths are
+retained; for an include resolved in a later directory, missing higher-priority
+candidates are retained too, so creating one can correctly shadow the old
+selection. Workspace file-operation notifications trigger reanalysis for these
+paths even when the file is not open in the editor.
+
+The dependency index is bounded to 4096 distinct paths per analysis. If that
+limit is exceeded, the affected root switches to conservative invalidation on
+every local file operation, and stale-result validation covers the full open
+local-document snapshot rather than an incomplete path set. Symlinked include candidates retain their canonical target, a missing-leaf
+identity, and their full lexical path. Parent components remain intact until
+existing path prefixes are canonicalized, so a spelling such as
+alias/../shared.inc follows filesystem symlink traversal before applying the
+parent-directory component. Deleting either a file symlink or a directory
+symlink therefore still invalidates dependent roots even though the target
+and its contents remain present. Open root documents also retain both their
+canonical and lexical path identities; deleting or renaming a symlinked
+parent directory therefore invalidates the root itself. Folder notifications
+are compared against both canonical and lexical paths so nested includes
+beneath a removed symlinked directory are also found.
+When multiple open URI aliases point to one canonical
+path, the lexicographically first URI supplies the contents and source mapping,
+while all aliases remain part of stale-result validation. Resolved include
+paths are recorded before their buffer contents are loaded, so an include that
+temporarily exceeds the source-size limit remains watched and a later edit can
+recover the dependent root. Included-file diagnostics are published only to
+the selected open URI whose buffer supplied the snapshot.
 
 ## Build and run
 
