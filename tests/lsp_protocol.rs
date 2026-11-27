@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn frame(value: Value) -> String {
     let body = serde_json::to_string(&value).unwrap();
@@ -124,6 +124,30 @@ impl LspClient {
             received.push(message);
             if matched {
                 return received;
+            }
+        }
+    }
+
+    fn assert_no_matching_message_for(
+        &self,
+        duration: Duration,
+        mut predicate: impl FnMut(&Value) -> bool,
+    ) {
+        let deadline = Instant::now() + duration;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match self.messages.recv_timeout(remaining) {
+                Ok(message) => assert!(
+                    !predicate(&message),
+                    "received an unexpected LSP message: {message:#?}"
+                ),
+                Err(mpsc::RecvTimeoutError::Timeout) => return,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("LSP server disconnected while checking for unexpected messages")
+                }
             }
         }
     }
@@ -265,6 +289,23 @@ fn stdio_lsp_publishes_current_versions_and_clears_diagnostics_on_close() {
 
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
+}
+
+fn diagnostic_count_for_root(diagnostics: &[Value], root_suffix: &str) -> usize {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["relatedInformation"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|related| {
+                    related["location"]["uri"]
+                        .as_str()
+                        .is_some_and(|uri| uri.ends_with(root_suffix))
+                })
+        })
+        .count()
 }
 
 fn diagnostic_roots(diagnostics: &[Value]) -> (bool, bool) {
@@ -426,6 +467,177 @@ fn shared_include_diagnostics_survive_reanalysis_of_one_root() {
                 .as_array()
                 .is_some_and(|diagnostics| diagnostics.is_empty())
     }));
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn changing_a_shared_include_reanalyzes_only_dependent_roots() {
+    let workspace = unique_workspace("neolint-lsp-dependencies");
+    let shared_path = workspace.join("shared.inc");
+    let root_a_path = workspace.join("a.lsl");
+    let root_b_path = workspace.join("b.lsl");
+    let root_c_path = workspace.join("unrelated.lsl");
+    let shared_v1 = concat!(
+        "#ifdef ROOT_A\n",
+        "integer broken_a = ;\n",
+        "#else\n",
+        "#ifdef ROOT_B\n",
+        "integer broken_b = ;\n",
+        "#else\n",
+        "integer fine = 1;\n",
+        "#endif\n",
+        "#endif\n",
+        "default { state_entry() { llOwnerSay((string)fine); } }\n",
+    );
+    let shared_v2 = concat!(
+        "#ifdef ROOT_A\n",
+        "integer broken_a = ;\n",
+        "integer added_a = ;\n",
+        "#else\n",
+        "#ifdef ROOT_B\n",
+        "integer broken_b = ;\n",
+        "integer added_b = ;\n",
+        "#else\n",
+        "integer fine = 1;\n",
+        "#endif\n",
+        "#endif\n",
+        "default { state_entry() { llOwnerSay((string)fine); } }\n",
+    );
+    fs::write(&shared_path, shared_v1).unwrap();
+    fs::write(&root_a_path, "#define ROOT_A\n#include \"shared.inc\"\n").unwrap();
+    fs::write(&root_b_path, "#define ROOT_B\n#include \"shared.inc\"\n").unwrap();
+    fs::write(
+        &root_c_path,
+        "default { state_entry() { integer unrelated = ; } }\n",
+    )
+    .unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let shared_uri = url::Url::from_file_path(&shared_path).unwrap().to_string();
+    let root_a_uri = url::Url::from_file_path(&root_a_path).unwrap().to_string();
+    let root_b_uri = url::Url::from_file_path(&root_b_path).unwrap().to_string();
+    let root_c_uri = url::Url::from_file_path(&root_c_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    for (uri, text) in [
+        (shared_uri.as_str(), shared_v1),
+        (
+            root_a_uri.as_str(),
+            "#define ROOT_A\n#include \"shared.inc\"\n",
+        ),
+        (
+            root_b_uri.as_str(),
+            "#define ROOT_B\n#include \"shared.inc\"\n",
+        ),
+        (
+            root_c_uri.as_str(),
+            "default { state_entry() { integer unrelated = ; } }\n",
+        ),
+    ] {
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "lsl",
+                    "version": 1,
+                    "text": text
+                }
+            }
+        }));
+    }
+
+    let initial_shared = client.receive_until(|message| {
+        if !is_publish(message, &shared_uri, Some(1)) {
+            return false;
+        }
+        let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+        diagnostic_roots(diagnostics) == (true, true)
+    });
+    let initial_publication = initial_shared
+        .iter()
+        .rev()
+        .find(|message| {
+            if !is_publish(message, &shared_uri, Some(1)) {
+                return false;
+            }
+            diagnostic_roots(message["params"]["diagnostics"].as_array().unwrap()) == (true, true)
+        })
+        .unwrap();
+    let initial_diagnostics = initial_publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(initial_diagnostics > 0);
+
+    // Wait until the unrelated root has published its own findings before the
+    // shared include changes, so any later publication proves reanalysis.
+    client.receive_until(|message| {
+        is_publish(message, &root_c_uri, Some(1))
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| !diagnostics.is_empty())
+    });
+
+    // The preprocessor reads includes from disk. Keep the open buffer in sync
+    // with disk for this test; unsaved include overlays are a separate feature.
+    fs::write(&shared_path, shared_v2).unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": shared_uri, "version": 2 },
+            "contentChanges": [{ "text": shared_v2 }]
+        }
+    }));
+
+    let after_change = client.receive_until(|message| {
+        if !is_publish(message, &shared_uri, Some(2)) {
+            return false;
+        }
+        let Some(diagnostics) = message["params"]["diagnostics"].as_array() else {
+            return false;
+        };
+        diagnostic_roots(diagnostics) == (true, true)
+            && diagnostics.len() > initial_diagnostics
+            && diagnostic_count_for_root(diagnostics, "/a.lsl") > 0
+            && diagnostic_count_for_root(diagnostics, "/b.lsl") > 0
+    });
+    assert!(!after_change
+        .iter()
+        .any(|message| is_publish(message, &root_c_uri, Some(1))));
+
+    // The unrelated root is not in the dependency index for shared.inc and
+    // must not receive a second diagnostics publication.
+    client.assert_no_matching_message_for(Duration::from_millis(300), |message| {
+        is_publish(message, &root_c_uri, Some(1))
+    });
+
+    // Closing the shared include invalidates every root that depends on it.
+    // Once both parents have been reanalyzed, diagnostics for the closed URI
+    // must be withdrawn even though the include still exists on disk.
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didClose",
+        "params": { "textDocument": { "uri": shared_uri } }
+    }));
+    client.receive_until(|message| is_publish(message, &root_a_uri, Some(1)));
+    client.receive_until(|message| is_publish(message, &root_b_uri, Some(1)));
+    client.receive_until(|message| {
+        is_publish(message, &shared_uri, None)
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+    });
+    client.assert_no_matching_message_for(Duration::from_millis(300), |message| {
+        is_publish(message, &root_c_uri, Some(1))
+    });
 
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();
