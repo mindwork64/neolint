@@ -4,7 +4,7 @@ NeoLint provides a small LSP server through the `neolint-lsp` executable. The
 server is an adapter over the existing Rust analysis API; it does not contain a
 second lexer, parser, semantic engine, or set of lint rules.
 
-## Scope of the first milestone
+## Current capabilities
 
 - JSON-RPC over standard input/output using LSP framing.
 - Initialize/shutdown/exit and open/change/save/close document lifecycle.
@@ -16,6 +16,8 @@ second lexer, parser, semantic engine, or set of lint rules.
 - Configured engine, target, disabled rules, severity overrides, and preprocessor
   settings through `LintConfig`.
 - Workspace `.neolint.conf` discovery or an explicit `neolint.configPath`.
+- `textDocument/hover`, `textDocument/definition`, and
+  `textDocument/completion` for the current root analysis and target API.
 
 Analysis runs on a single background worker so parsing a large script does
 not block the JSON-RPC event loop from receiving edits, close notifications or
@@ -137,6 +139,38 @@ Unicode scalar values or CRLF pairs.
 The current navigation scope is intentionally limited to the open script.
 Cross-file include navigation and workspace-wide symbol indexing are not yet
 implemented.
+
+
+## Completion
+
+The server advertises `textDocument/completion` using the same background-built
+symbol snapshot as hover and definition. Completion is available only while the
+snapshot still matches the open document version and revision; scheduling a
+new analysis or closing the document invalidates it. The index is built from
+the effective prepared source, so declarations in inactive preprocessor
+branches are excluded and macro-expanded declarations participate with their
+source locations mapped back to the editor buffer.
+
+Suggestions include user-defined functions, globals, parameters and locals
+visible in the selected lexical scope, plus built-in functions, event names,
+constants and language keywords. Built-in entries come from the selected
+Second Life or OpenSim runtime catalogue. Each function overload is represented
+separately and carries its signature. Selecting a function inserts a call
+snippet with parameter placeholders when the client advertises snippet support;
+otherwise it inserts a plain-text call populated with parameter names. When an
+opening parenthesis already follows the current identifier, completion inserts
+only the name to avoid duplicating the call delimiter. Variables, events,
+constants and keywords use plain-text edits over the whole identifier under
+the cursor.
+
+OpenSim OSSL functions are included from the selected pinned catalogue but are
+marked as OSSL and note that availability depends on region policy. This is
+catalogue metadata, not a claim that the active region permits a particular
+function.
+Completion does not offer identifier suggestions inside comments, string
+literals or after vector/rotation component selectors such as `position.x`.
+Completion is scoped to the current root analysis and does not index
+unrelated open scripts elsewhere in the workspace.
 
 ## Build and run
 

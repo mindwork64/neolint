@@ -1,10 +1,13 @@
 # NeoLint for VS Code
 
-This extension starts `neolint-lsp` and displays NeoLint diagnostics for local
-`.lsl` files. It does not provide syntax highlighting, snippets, viewer
-synchronization, compilation, or an LSL built-in catalogue. Keep the official
-Second Life VSCode Plugin installed for Firestorm's external-editor and
-live-sync workflow; NeoLint runs beside it as an independent language server.
+This extension starts `neolint-lsp` and provides NeoLint diagnostics, hover,
+definition navigation, and context-aware completion for local `.lsl` files.
+Completion uses user-defined symbols and the selected Second Life or OpenSim
+API catalogue, including function-call snippets when supported by the editor.
+The extension does not provide syntax highlighting, compilation, or Viewer
+synchronization. Keep the official Second Life VSCode Plugin installed for
+Firestorm's external-editor and live-sync workflow; NeoLint runs beside it as
+an independent language server.
 
 ## Requirements
 
@@ -57,12 +60,13 @@ If no config file is found, NeoLint's normal defaults apply. The extension's
    for the Viewer WebSocket session and live synchronization; NeoLint analyses
    the `.lsl` file VS Code opens.
 
-The initial server supports local `file:` `.lsl` documents. When preprocessing
-is enabled, configured include directories are searched first and the VS Code
+The server supports local `file:` `.lsl` documents. When preprocessing is
+enabled, configured include directories are searched first and the VS Code
 workspace root is added as the final fallback; this avoids treating Firestorm's
-temporary script directory as the project root. Included files are read from
-disk by the existing preprocessor. Diagnostics originating in an included file
-are published only when that file is also open in VS Code and its buffer matches
-the disk content at the time its parent is analyzed. Unsaved include overlays,
-`neolint.project` per-script overlays, multiple workspace roots, and incremental
-dependency invalidation are not part of this first milestone.
+temporary script directory as the project root. Open include buffers are used
+as unsaved overlays, and include changes invalidate only the open roots that
+depend on them. Each affected root is currently reanalyzed in full; incremental
+parsing is not implemented. Per-script `neolint.project` overlays and
+multi-root workspace-specific configuration remain future work. Diagnostics
+originating in an included file are published only to the selected open URI
+whose buffer supplied the analysis snapshot.
