@@ -48,11 +48,10 @@ pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
             Component::Prefix(prefix) => lexical.push(prefix.as_os_str()),
             Component::RootDir => lexical.push(component.as_os_str()),
             Component::CurDir => {}
-            Component::ParentDir => {
-                if lexical.file_name().is_some() {
-                    lexical.pop();
-                }
-            }
+            // Keep parent components until the existing prefix is
+            // canonicalized. Collapsing them lexically is wrong when the
+            // preceding component is a symlink.
+            Component::ParentDir => lexical.push(component.as_os_str()),
             Component::Normal(part) => lexical.push(part),
         }
     }
@@ -597,6 +596,29 @@ mod tests {
         assert!(manager
             .include_dependencies()
             .contains(&normalize_local_path(&alias)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn normalizes_parent_components_after_resolving_symlinks() {
+        let directory = temp_dir();
+        let target_directory = directory.join("real");
+        let symlink_target = target_directory.join("nested");
+        let alias = directory.join("alias");
+        fs::create_dir_all(&symlink_target).unwrap();
+        std::os::unix::fs::symlink(&symlink_target, &alias).unwrap();
+        let candidate = alias.join("../shared.inc");
+        let expected = target_directory.join("shared.inc");
+
+        assert_eq!(normalize_local_path(&candidate), expected);
+        assert_eq!(normalize_missing_leaf_path(&candidate), expected);
+        assert_eq!(
+            normalize_lexical_path(&candidate),
+            directory.join("alias/../shared.inc")
+        );
+
         fs::remove_dir_all(directory).unwrap();
     }
 

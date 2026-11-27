@@ -88,13 +88,15 @@ paths even when the file is not open in the editor.
 The dependency index is bounded to 4096 distinct paths per analysis. If that
 limit is exceeded, the affected root switches to conservative invalidation on
 every local file operation, and stale-result validation covers the full open
-local-document snapshot rather than an incomplete path set. Symlinked include
-candidates retain their canonical target, a missing-leaf identity, and their
-full lexical path. Deleting either a file symlink or a directory symlink
-therefore still invalidates dependent roots even though the target and its
-contents remain present. Folder notifications are compared against both
-canonical and lexical paths so nested includes beneath a removed symlinked
-directory are also found. When multiple open URI aliases point to one canonical
+local-document snapshot rather than an incomplete path set. Symlinked include candidates retain their canonical target, a missing-leaf
+identity, and their full lexical path. Parent components remain intact until
+existing path prefixes are canonicalized, so a spelling such as
+alias/../shared.inc follows filesystem symlink traversal before applying the
+parent-directory component. Deleting either a file symlink or a directory
+symlink therefore still invalidates dependent roots even though the target
+and its contents remain present. Folder notifications are compared against
+both canonical and lexical paths so nested includes beneath a removed
+symlinked directory are also found. When multiple open URI aliases point to one canonical
 path, the lexicographically first URI supplies the contents and source mapping,
 while all aliases remain part of stale-result validation. Resolved include
 paths are recorded before their buffer contents are loaded, so an include that

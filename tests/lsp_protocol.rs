@@ -1012,6 +1012,103 @@ fn deleting_a_symlinked_include_directory_reanalyzes_its_dependent_root() {
     fs::remove_dir_all(workspace).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn creating_include_candidate_after_symlink_parent_component_invalidates_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-parent-component");
+    let target_directory = workspace.join("actual");
+    let symlink_target = target_directory.join("nested");
+    let alias = workspace.join("alias");
+    let fallback_directory = workspace.join("fallback");
+    fs::create_dir_all(&symlink_target).unwrap();
+    fs::create_dir_all(&fallback_directory.join("nested")).unwrap();
+    std::os::unix::fs::symlink(&symlink_target, &alias).unwrap();
+    std::os::unix::fs::symlink(
+        fallback_directory.join("nested"),
+        fallback_directory.join("alias"),
+    )
+    .unwrap();
+
+    let high_priority_path = target_directory.join("shared.inc");
+    let fallback_path = fallback_directory.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    fs::write(&fallback_path, "#define FALLBACK_INCLUDE\n").unwrap();
+    let root_text = concat!(
+        "#include ",
+        "\"alias/../shared.inc\"",
+        "\n",
+        "#ifdef HIGH_PRIORITY\n",
+        "integer broken = ;\n",
+        "#endif\n",
+        "default { state_entry() {} }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "preprocess = true\ninclude_dir = fallback\n",
+    )
+    .unwrap();
+
+    let high_priority_uri = url::Url::from_file_path(&high_priority_path)
+        .unwrap()
+        .to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the fallback include should initially be selected; diagnostics: {:#?}",
+        initial_publication["params"]["diagnostics"]
+    );
+    assert!(!high_priority_path.exists());
+
+    // The filesystem follows the symlink before applying the parent component.
+    fs::write(&high_priority_path, "#define HIGH_PRIORITY\n").unwrap();
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didCreateFiles",
+        "params": { "files": [{ "uri": high_priority_uri }] }
+    }));
+    let shadowed = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let shadowed_publication = shadowed
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !shadowed_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "creating the actual higher-priority candidate must invalidate the root"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
 #[test]
 fn creating_a_higher_priority_include_candidate_changes_resolution() {
     let workspace = unique_workspace("neolint-lsp-include-precedence");
