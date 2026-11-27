@@ -116,6 +116,14 @@ impl LspClient {
             .iter()
             .find(|message| message.get("id") == Some(&json!(1)))
             .unwrap();
+        assert_eq!(
+            initialize_result["result"]["hoverProvider"], true,
+            "the server must advertise textDocument/hover"
+        );
+        assert_eq!(
+            initialize_result["result"]["definitionProvider"], true,
+            "the server must advertise textDocument/definition"
+        );
         if supports_file_operations {
             assert_eq!(
                 initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]
@@ -166,6 +174,30 @@ impl LspClient {
                 return received;
             }
         }
+    }
+
+    fn request_position(
+        &mut self,
+        id: u64,
+        method: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Value {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }
+        }));
+        let messages = self.receive_until(|message| message.get("id") == Some(&json!(id)));
+        messages
+            .into_iter()
+            .find(|message| message.get("id") == Some(&json!(id)))
+            .expect("LSP request response")
     }
 
     fn assert_no_matching_message_for(
@@ -239,6 +271,14 @@ fn is_publish(message: &Value, uri: &str, version: Option<i32>) -> bool {
     }
 }
 
+fn position_of(source: &str, offset: usize) -> (u32, u32) {
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let column_text = prefix.rsplit('\n').next().unwrap_or_default();
+    let character = column_text.encode_utf16().count() as u32;
+    (line, character)
+}
+
 fn unique_workspace(prefix: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -247,6 +287,417 @@ fn unique_workspace(prefix: &str) -> std::path::PathBuf {
     let workspace = std::env::temp_dir().join(format!("{prefix}-{unique}"));
     fs::create_dir_all(&workspace).unwrap();
     workspace
+}
+
+#[test]
+fn hover_and_definition_resolve_current_script_symbols_and_standard_api() {
+    let workspace = unique_workspace("neolint-lsp-hover-definition");
+    let source = concat!(
+        "// llOwnerSay is documented below\n",
+        "integer counter = 1;\n",
+        "integer add(integer left, integer right) { return left + right; }\n",
+        "default { state_entry() { integer local = add(counter, 2); llOwnerSay((string)local); } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let add_call = source.match_indices("add(").nth(1).unwrap().0;
+    let (line, character) = position_of(source, add_call);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    assert!(hover["error"].is_null(), "hover error: {hover:#?}");
+    let hover_text = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        hover_text.contains("integer add(integer left, integer right)"),
+        "{hover_text}"
+    );
+
+    let (line, character) = position_of(source, add_call);
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    assert!(
+        definition["error"].is_null(),
+        "definition error: {definition:#?}"
+    );
+    let declaration = source.find("add(").unwrap();
+    let (expected_line, expected_character) = position_of(source, declaration);
+    assert_eq!(definition["result"]["uri"], root_uri);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    let parameter_use = source.find("left +").unwrap();
+    let (line, character) = position_of(source, parameter_use);
+    let hover = client.request_position(16, "textDocument/hover", &root_uri, line, character);
+    let parameter_hover = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        parameter_hover.contains("integer left"),
+        "{parameter_hover}"
+    );
+    let definition =
+        client.request_position(17, "textDocument/definition", &root_uri, line, character);
+    let parameter_declaration = source.find("left,").unwrap();
+    let (expected_line, expected_character) = position_of(source, parameter_declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    let counter_use = source.match_indices("counter").nth(1).unwrap().0;
+    let (line, character) = position_of(source, counter_use);
+    let definition =
+        client.request_position(12, "textDocument/definition", &root_uri, line, character);
+    let counter_declaration = source.find("counter").unwrap();
+    let (expected_line, expected_character) = position_of(source, counter_declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    let (line, character) = position_of(source, counter_use);
+    let hover = client.request_position(18, "textDocument/hover", &root_uri, line, character);
+    let counter_hover = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(counter_hover.contains("integer counter"), "{counter_hover}");
+
+    let local_use = source.match_indices("local").nth(1).unwrap().0;
+    let (line, character) = position_of(source, local_use);
+    let definition =
+        client.request_position(13, "textDocument/definition", &root_uri, line, character);
+    let local_declaration = source.find("local").unwrap();
+    let (expected_line, expected_character) = position_of(source, local_declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    let (line, character) = position_of(source, local_use);
+    let hover = client.request_position(19, "textDocument/hover", &root_uri, line, character);
+    let local_hover = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(local_hover.contains("integer local"), "{local_hover}");
+
+    let api_use = source.match_indices("llOwnerSay").nth(1).unwrap().0;
+    let (line, character) = position_of(source, api_use);
+    let hover = client.request_position(14, "textDocument/hover", &root_uri, line, character);
+    let api_text = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        api_text.contains("void llOwnerSay(string msg)"),
+        "{api_text}"
+    );
+
+    let comment_use = source.find("llOwnerSay").unwrap();
+    let (line, character) = position_of(source, comment_use);
+    let hover = client.request_position(15, "textDocument/hover", &root_uri, line, character);
+    assert!(
+        hover["result"].is_null(),
+        "comments must not produce symbol hover: {hover:#?}"
+    );
+    let (line, character) = position_of(source, api_use);
+    let definition =
+        client.request_position(20, "textDocument/definition", &root_uri, line, character);
+    assert!(
+        definition["result"].is_null(),
+        "built-in functions do not have source definitions: {definition:#?}"
+    );
+
+    // A new document revision must atomically replace the old index.
+    let updated_source = concat!(
+        "integer counter = 1;\n",
+        "float add(float left, float right) { return left + right; }\n",
+        "default { state_entry() { float local = add((float)counter, 2.0); llOwnerSay((string)local); } }\n",
+    );
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": root_uri, "version": 2 },
+            "contentChanges": [{ "text": updated_source }]
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(2)));
+    let updated_call = updated_source.match_indices("add(").nth(1).unwrap().0;
+    let (line, character) = position_of(updated_source, updated_call);
+    let hover = client.request_position(21, "textDocument/hover", &root_uri, line, character);
+    let updated_hover = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        updated_hover.contains("float add(float left, float right)"),
+        "{updated_hover}"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn hover_and_definition_ignore_vector_component_selectors() {
+    let workspace = unique_workspace("neolint-lsp-component-selector");
+    let source = concat!(
+        "integer x = 7;\n",
+        "vector position;\n",
+        "default { state_entry() { float component = position.x; llOwnerSay((string)x); } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let component_offset = source.find("position.x").unwrap() + "position.".len();
+    let (line, character) = position_of(source, component_offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    assert!(
+        hover["result"].is_null(),
+        "component selectors are not variable bindings: {hover:#?}"
+    );
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    assert!(
+        definition["result"].is_null(),
+        "component selectors have no declaration target: {definition:#?}"
+    );
+
+    let scalar_use = source.rfind("x)").unwrap();
+    let (line, character) = position_of(source, scalar_use);
+    let hover = client.request_position(12, "textDocument/hover", &root_uri, line, character);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        value.contains("integer x"),
+        "ordinary variable hover must remain available: {value}"
+    );
+    let definition =
+        client.request_position(13, "textDocument/definition", &root_uri, line, character);
+    let declaration = source.find("x =").unwrap();
+    let (expected_line, expected_character) = position_of(source, declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn hover_and_definition_follow_the_active_preprocessed_script() {
+    let workspace = unique_workspace("neolint-lsp-hover-preprocessed-symbols");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "#if 0\n",
+        "integer hidden = 1;\n",
+        "#endif\n",
+        "#define DECLARE_COUNTER integer expanded = 7;\n",
+        "DECLARE_COUNTER\n",
+        "default { state_entry() { llOwnerSay((string)expanded); } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let hidden_offset = source.find("hidden").unwrap();
+    let (line, character) = position_of(source, hidden_offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    assert!(
+        hover["result"].is_null(),
+        "declarations removed by #if must not be indexed: {hover:#?}"
+    );
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    assert!(definition["result"].is_null());
+
+    let use_offset = source.rfind("expanded").unwrap();
+    let (line, character) = position_of(source, use_offset);
+    let hover = client.request_position(12, "textDocument/hover", &root_uri, line, character);
+    let hover_text = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        hover_text.contains("integer expanded"),
+        "macro-expanded declaration must participate in symbol resolution: {hover_text}"
+    );
+    let definition =
+        client.request_position(13, "textDocument/definition", &root_uri, line, character);
+    assert_eq!(definition["result"]["uri"], root_uri);
+    assert!(
+        definition["result"]["range"]["start"]["line"].is_number(),
+        "macro-expanded declaration should map to an original root location: {definition:#?}"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn hover_uses_the_selected_opensim_runtime_api_catalogue() {
+    let workspace = unique_workspace("neolint-lsp-hover-opensim");
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "target = opensim-xengine\n",
+    )
+    .unwrap();
+    let source = "default { state_entry() { osGetAvatarList(); } }\n";
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let offset = source.find("osGetAvatarList").unwrap();
+    let (line, character) = position_of(source, offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("list osGetAvatarList()"), "{value}");
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn hover_and_definition_use_effective_firestorm_switch_parser_options() {
+    let workspace = unique_workspace("neolint-lsp-hover-firestorm-switch");
+    let include_path = workspace.join("switches.inc");
+    fs::write(&include_path, "#define USE_SWITCHES\n").unwrap();
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "preprocess = true\ndialect = firestorm\n",
+    )
+    .unwrap();
+    let source = concat!(
+        "#include \"switches.inc\"\n",
+        "integer selector; default { state_entry() { switch (selector) { case 1: integer inside = 42; llOwnerSay((string)inside); break; default: break; } } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    let messages = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    assert!(
+        messages.iter().any(|message| {
+            is_publish(message, &root_uri, Some(1))
+                && message["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+        }),
+        "Firestorm fixture should analyze without diagnostics: {messages:#?}"
+    );
+
+    let use_offset = source.match_indices("inside").nth(1).unwrap().0;
+    let (line, character) = position_of(source, use_offset);
+    let hover = client.request_position(10, "textDocument/hover", &root_uri, line, character);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("integer inside"), "{value}");
+    let definition =
+        client.request_position(11, "textDocument/definition", &root_uri, line, character);
+    let declaration = source.find("inside").unwrap();
+    let (expected_line, expected_character) = position_of(source, declaration);
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["character"],
+        expected_character
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]

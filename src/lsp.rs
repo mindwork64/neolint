@@ -5,6 +5,9 @@
 //! [`crate::source::AnalysisUnit::analyze_with_config`], the same configured entry point used
 //! by library consumers.
 
+use crate::ast::TopLevel;
+use crate::ast_semantic::scopes::{type_name, ScopeTree, Symbol, SymbolKind};
+use crate::builtins::{self, Signature};
 use crate::cancellation::AnalysisCancellationToken;
 use crate::config::LintConfig;
 use crate::diagnostic::{Severity, Span};
@@ -19,10 +22,12 @@ use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
     CreateFilesParams, DeleteFilesParams, Diagnostic as LspDiagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, FileOperationFilter, FileOperationPattern,
-    FileOperationRegistrationOptions, InitializeParams, Location, MessageType, Position,
+    FileOperationRegistrationOptions, Hover, HoverContents, HoverProviderCapability,
+    InitializeParams, Location, MarkupContent, MarkupKind, MessageType, OneOf, Position,
     PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, Url,
-    WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, Url, WorkspaceFileOperationsServerCapabilities,
+    WorkspaceServerCapabilities,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -99,6 +104,8 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                 ..Default::default()
             },
         )),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         workspace,
         ..Default::default()
     };
@@ -118,6 +125,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         config,
         documents: Arc::new(HashMap::new()),
         published_by_root: HashMap::new(),
+        symbols_by_root: HashMap::new(),
         dependencies_by_root: HashMap::new(),
         dependency_tracking_incomplete_by_root: HashSet::new(),
         next_revision: 0,
@@ -136,15 +144,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                         if connection.handle_shutdown(&request)? {
                             break;
                         }
-                        let response = Response {
-                            id: request.id,
-                            result: None,
-                            error: Some(ResponseError {
-                                code: lsp_server::ErrorCode::MethodNotFound as i32,
-                                message: format!("unsupported request: {}", request.method),
-                                data: None,
-                            }),
-                        };
+                        let response = handle_request(request, &state);
                         connection.sender.send(Message::Response(response))?;
                     }
                     Message::Notification(notification) => {
@@ -216,6 +216,9 @@ struct ServerState {
     /// Per-root diagnostic snapshots, keyed by the URI they belong to.
     /// A single included URI may be present in several root snapshots.
     published_by_root: HashMap<Url, RootDiagnostics>,
+    /// Parsed symbol metadata is replaced atomically with each accepted root
+    /// analysis and discarded as soon as a newer analysis is scheduled.
+    symbols_by_root: HashMap<Url, CachedScriptSymbols>,
     /// Source documents actually loaded by each root's most recent analysis.
     dependencies_by_root: HashMap<Url, HashSet<PathBuf>>,
     /// Roots whose dependency index exceeded its path budget; changes to any
@@ -231,6 +234,7 @@ struct ServerState {
 struct AnalysisTask {
     root_uri: Url,
     root_version: i32,
+    root_revision: u64,
     file_operation_revision: u64,
     documents: Arc<HashMap<Url, DocumentState>>,
     config: LintConfig,
@@ -239,17 +243,39 @@ struct AnalysisTask {
 struct AnalysisResult {
     root_uri: Url,
     root_version: i32,
+    root_revision: u64,
     file_operation_revision: u64,
     dependencies: HashSet<PathBuf>,
     dependencies_complete: bool,
     dependency_revisions: HashMap<PathBuf, HashMap<Url, u64>>,
     diagnostics: Result<RootDiagnostics, String>,
+    symbols: Option<Arc<ScriptSymbolIndex>>,
 }
 
 struct AnalyzedDocument {
     diagnostics: RootDiagnostics,
     dependencies: HashSet<PathBuf>,
     dependencies_complete: bool,
+    symbols: Arc<ScriptSymbolIndex>,
+}
+
+struct CachedScriptSymbols {
+    version: i32,
+    revision: u64,
+    index: Arc<ScriptSymbolIndex>,
+}
+
+struct ScriptSymbolIndex {
+    /// Identifier occurrences mapped back to the open root buffer. Building
+    /// these from the prepared AST keeps inactive preprocessor branches out of
+    /// editor lookup and gives each occurrence its effective source mapping.
+    occurrences: Vec<SymbolOccurrence>,
+}
+
+struct SymbolOccurrence {
+    span: Span,
+    hover: String,
+    definition: Option<Span>,
 }
 
 struct RunningAnalysis {
@@ -378,6 +404,7 @@ fn make_analysis_task(
     Some(AnalysisTask {
         root_uri,
         root_version: root.version,
+        root_revision: root.revision,
         file_operation_revision,
         documents,
         config,
@@ -480,7 +507,9 @@ fn analysis_snapshot_is_current(state: &ServerState, result: &AnalysisResult) ->
         && state
             .documents
             .get(&result.root_uri)
-            .is_some_and(|document| document.version == result.root_version)
+            .is_some_and(|document| {
+                document.version == result.root_version && document.revision == result.root_revision
+            })
         && dependency_revision_snapshot(
             &result.dependencies,
             &state.documents,
@@ -535,11 +564,12 @@ fn analysis_worker_loop(
         if was_cancelled {
             continue;
         }
-        let (dependencies, dependencies_complete, diagnostics) = match result {
+        let (dependencies, dependencies_complete, diagnostics, symbols) = match result {
             Ok(analysis) => (
                 analysis.dependencies,
                 analysis.dependencies_complete,
                 Ok(analysis.diagnostics),
+                Some(analysis.symbols),
             ),
             Err(AnalyzeDocumentError::Failure(error)) => {
                 let dependencies = task
@@ -548,7 +578,7 @@ fn analysis_worker_loop(
                     .ok()
                     .map(|path| HashSet::from([normalize_path(&path)]))
                     .unwrap_or_default();
-                (dependencies, false, Err(error))
+                (dependencies, false, Err(error), None)
             }
             Err(AnalyzeDocumentError::Cancelled) => continue,
         };
@@ -561,11 +591,13 @@ fn analysis_worker_loop(
             .send(AnalysisResult {
                 root_uri: task.root_uri,
                 root_version: task.root_version,
+                root_revision: task.root_revision,
                 file_operation_revision: task.file_operation_revision,
                 dependencies,
                 dependencies_complete,
                 dependency_revisions,
                 diagnostics,
+                symbols,
             })
             .is_err()
         {
@@ -812,6 +844,7 @@ fn handle_notification(
                 let mut affected = affected_roots_for_document(state, &closed_uri);
                 affected.retain(|root| root != &closed_uri);
                 worker.close_root(&closed_uri);
+                state.symbols_by_root.remove(&closed_uri);
                 state.dependencies_by_root.remove(&closed_uri);
                 state
                     .dependency_tracking_incomplete_by_root
@@ -880,6 +913,9 @@ fn schedule_roots(
     if roots.is_empty() {
         return Ok(());
     }
+    for root_uri in &roots {
+        state.symbols_by_root.remove(root_uri);
+    }
     let Some(config) = &state.config else {
         for root_uri in roots {
             if state.documents.contains_key(&root_uri) {
@@ -912,6 +948,16 @@ fn handle_analysis_result(
 
     match result.diagnostics {
         Ok(diagnostics) => {
+            if let Some(index) = result.symbols {
+                state.symbols_by_root.insert(
+                    result.root_uri.clone(),
+                    CachedScriptSymbols {
+                        version: result.root_version,
+                        revision: result.root_revision,
+                        index,
+                    },
+                );
+            }
             state
                 .dependencies_by_root
                 .insert(result.root_uri.clone(), result.dependencies);
@@ -1132,11 +1178,410 @@ fn analyze_document(
     if cancellation.is_cancelled() {
         return Err(AnalyzeDocumentError::Cancelled);
     }
+    let prepared = unit.prepared_source();
+    let (symbol_source, parser_options) = prepared.map_or(
+        (document.text.as_ref(), crate::ast::AstParseOptions::lsl()),
+        |prepared| {
+            (
+                prepared.text(),
+                crate::ast::AstParseOptions::from_flags(
+                    prepared.switches_enabled(),
+                    prepared.lazy_lists_enabled(),
+                ),
+            )
+        },
+    );
+    let symbols = Arc::new(
+        build_script_symbol_index(
+            symbol_source,
+            config,
+            parser_options,
+            cancellation,
+            prepared,
+            root_source,
+        )
+        .ok_or(AnalyzeDocumentError::Cancelled)?,
+    );
+    if cancellation.is_cancelled() {
+        return Err(AnalyzeDocumentError::Cancelled);
+    }
     Ok(AnalyzedDocument {
         diagnostics: output,
         dependencies,
         dependencies_complete,
+        symbols,
     })
+}
+
+fn build_script_symbol_index(
+    source: &str,
+    config: &LintConfig,
+    parser_options: crate::ast::AstParseOptions,
+    cancellation: &AnalysisCancellationToken,
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+) -> Option<ScriptSymbolIndex> {
+    // The primary analysis and editor index must share one effective source:
+    // inactive conditional branches are absent and macro expansions are
+    // represented in the AST. SourceMap projects each indexed occurrence back
+    // onto the exact open root buffer before it is exposed to the editor.
+    let (tokens, _) = crate::lexer::lex_cancellable(source, cancellation)?;
+    let (ast, _) =
+        crate::ast::parse_ast_with_options_cancellable(&tokens, parser_options, cancellation)?;
+    let scopes = ScopeTree::build_with_catalog(
+        &ast,
+        builtins::catalog_for_target(config.target()),
+        config.target(),
+    );
+    let facts = crate::ast_semantic::expressions::collect_facts(&ast, &scopes);
+    let mut function_signatures = HashMap::new();
+    for item in &ast.items {
+        if let TopLevel::Function(function) = item {
+            let return_type = function
+                .return_type
+                .map(|ty| type_name(ty.kind))
+                .unwrap_or("void");
+            let parameters = function
+                .parameters
+                .iter()
+                .map(|parameter| format!("{} {}", type_name(parameter.ty.kind), parameter.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            function_signatures.insert(
+                function.name_span.start,
+                format!("{return_type} {}({parameters})", function.name),
+            );
+        }
+    }
+    for recovered in &ast.recovered_functions {
+        function_signatures
+            .entry(recovered.name_span.start)
+            .or_insert_with(|| {
+                format!(
+                    "{} {}({})",
+                    recovered.return_type,
+                    recovered.name,
+                    recovered.parameter_types.join(", ")
+                )
+            });
+    }
+
+    let mut occurrences = Vec::new();
+    let mut occurrence_indices = HashMap::new();
+
+    // Declarations themselves are valid hover/definition locations. A
+    // declaration originating in an include can still provide contextual
+    // hover text, but definition is deliberately limited to the open root.
+    for scope in scopes.scopes() {
+        for symbol in &scope.symbols {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            // Declarations in included files have no location in the currently
+            // open root buffer, so keep navigation scoped to this script.
+            if let Some(span) = map_index_span(prepared, root_source, symbol.span) {
+                push_symbol_occurrence(
+                    &mut occurrences,
+                    &mut occurrence_indices,
+                    SymbolOccurrence {
+                        span,
+                        hover: hover_for_user_symbol(&function_signatures, symbol),
+                        definition: Some(span),
+                    },
+                );
+            }
+        }
+    }
+
+    // Resolve each parsed identifier reference using the same lexical scope
+    // and declaration-order rules as semantic analysis. Component selectors
+    // are not IdentifierUse nodes in the AST, so `position.x` cannot bind to an
+    // unrelated variable named `x`.
+    for usage in &facts.uses {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let identifier = usage.identifier;
+        let user_symbol = scopes
+            .lookup_value_at(usage.scope, &identifier.name, identifier.span.start)
+            .or_else(|| {
+                scopes
+                    .lookup(usage.scope, &identifier.name)
+                    .filter(|symbol| symbol.kind == SymbolKind::Function)
+            });
+        let (hover, definition) = if let Some(symbol) = user_symbol {
+            let definition = map_index_span(prepared, root_source, symbol.span);
+            (
+                hover_for_user_symbol(&function_signatures, symbol),
+                definition,
+            )
+        } else {
+            let Some(hover) = hover_for_builtin(&scopes, &identifier.name) else {
+                continue;
+            };
+            (hover, None)
+        };
+        let Some(span) = map_index_span(prepared, root_source, identifier.span) else {
+            continue;
+        };
+        push_symbol_occurrence(
+            &mut occurrences,
+            &mut occurrence_indices,
+            SymbolOccurrence {
+                span,
+                hover,
+                definition,
+            },
+        );
+    }
+
+    // Event names are declaration-like built-in uses, rather than expression
+    // Identifier nodes, so index them explicitly from the parsed active AST.
+    for item in &ast.items {
+        let TopLevel::State(state) = item else {
+            continue;
+        };
+        for event in &state.events {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            let Some(signature) = scopes.builtin_events().get(&event.name) else {
+                continue;
+            };
+            let Some(span) = map_index_span(prepared, root_source, event.name_span) else {
+                continue;
+            };
+            push_symbol_occurrence(
+                &mut occurrences,
+                &mut occurrence_indices,
+                SymbolOccurrence {
+                    span,
+                    hover: format_builtin_signature(signature),
+                    definition: None,
+                },
+            );
+        }
+    }
+
+    occurrences.sort_by_key(|occurrence| (occurrence.span.start, occurrence.span.end));
+
+    (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex { occurrences })
+}
+
+/// Resolve an AST/prepared span to a span in the open root source. Without a
+/// prepared map (the Legacy-only path), AST offsets already address the root.
+fn map_index_span(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Option<Span> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return Some(span);
+    };
+    let prepared_span = prepared.prepared_span(span).ok()?;
+    let resolved = prepared.map().resolve_span(prepared_span).ok()?;
+    let source_span = resolved.primary();
+    (source_span.source() == root_source)
+        .then(|| prepared.map().render_span(source_span).ok())
+        .flatten()
+}
+
+fn push_symbol_occurrence(
+    occurrences: &mut Vec<SymbolOccurrence>,
+    occurrence_indices: &mut HashMap<(usize, usize), usize>,
+    occurrence: SymbolOccurrence,
+) {
+    let key = (occurrence.span.start, occurrence.span.end);
+    if let Some(index) = occurrence_indices.get(&key).copied() {
+        let existing = &mut occurrences[index];
+        if existing.definition.is_none() && occurrence.definition.is_some() {
+            *existing = occurrence;
+        }
+        return;
+    }
+    occurrence_indices.insert(key, occurrences.len());
+    occurrences.push(occurrence);
+}
+
+fn handle_request(request: lsp_server::Request, state: &ServerState) -> Response {
+    let lsp_server::Request { id, method, params } = request;
+    if method != "textDocument/hover" && method != "textDocument/definition" {
+        return Response {
+            id,
+            result: None,
+            error: Some(ResponseError {
+                code: lsp_server::ErrorCode::MethodNotFound as i32,
+                message: format!("unsupported request: {method}"),
+                data: None,
+            }),
+        };
+    }
+    let params = match serde_json::from_value::<TextDocumentPositionParams>(params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ResponseError {
+                    code: lsp_server::ErrorCode::InvalidParams as i32,
+                    message: format!("invalid text document position: {error}"),
+                    data: None,
+                }),
+            };
+        }
+    };
+
+    let result = if method == "textDocument/hover" {
+        serde_json::to_value(hover_at(state, &params)).unwrap_or(Value::Null)
+    } else {
+        serde_json::to_value(definition_at(state, &params)).unwrap_or(Value::Null)
+    };
+    Response {
+        id,
+        result: Some(result),
+        error: None,
+    }
+}
+
+fn current_symbol_index<'a>(
+    state: &'a ServerState,
+    uri: &Url,
+) -> Option<(&'a DocumentState, &'a ScriptSymbolIndex)> {
+    let document = state.documents.get(uri)?;
+    let cached = state.symbols_by_root.get(uri)?;
+    (cached.version == document.version && cached.revision == document.revision)
+        .then_some((document, cached.index.as_ref()))
+}
+
+fn hover_at(state: &ServerState, params: &TextDocumentPositionParams) -> Option<Hover> {
+    let uri = &params.text_document.uri;
+    let (document, index) = current_symbol_index(state, uri)?;
+    let offset = position_to_offset(&document.text, params.position).ok()??;
+    let occurrence = symbol_occurrence_at(index, offset)?;
+    let range = span_to_range(&document.text, occurrence.span).ok()?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: occurrence.hover.clone(),
+        }),
+        range: Some(range),
+    })
+}
+
+fn definition_at(state: &ServerState, params: &TextDocumentPositionParams) -> Option<Location> {
+    let uri = &params.text_document.uri;
+    let (document, index) = current_symbol_index(state, uri)?;
+    let offset = position_to_offset(&document.text, params.position).ok()??;
+    let definition = symbol_occurrence_at(index, offset)?.definition?;
+    Some(Location {
+        uri: uri.clone(),
+        range: span_to_range(&document.text, definition).ok()?,
+    })
+}
+
+fn symbol_occurrence_at(index: &ScriptSymbolIndex, offset: usize) -> Option<&SymbolOccurrence> {
+    index
+        .occurrences
+        .iter()
+        .find(|occurrence| occurrence.span.start <= offset && offset < occurrence.span.end)
+}
+
+fn hover_for_user_symbol(function_signatures: &HashMap<usize, String>, symbol: &Symbol) -> String {
+    let declaration = if symbol.kind == SymbolKind::Function {
+        function_signatures
+            .get(&symbol.span.start)
+            .cloned()
+            .unwrap_or_else(|| format!("function {}", symbol.name))
+    } else {
+        format!(
+            "{} {}",
+            symbol.type_name.as_deref().unwrap_or("value"),
+            symbol.name
+        )
+    };
+    format!("```lsl\n{declaration}\n```")
+}
+
+fn hover_for_builtin(scopes: &ScopeTree, name: &str) -> Option<String> {
+    if let Some(signatures) = scopes.builtin_functions().get(name) {
+        let rendered = signatures
+            .iter()
+            .map(format_builtin_signature)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !rendered.is_empty() {
+            return Some(rendered);
+        }
+    }
+    if let Some(signature) = scopes.builtin_events().get(name) {
+        return Some(format_builtin_signature(signature));
+    }
+    scopes.builtin_constants().get(name).map(|constant| {
+        format!(
+            "```lsl\n{} {} = {}\n```",
+            constant.type_name, constant.name, constant.value
+        )
+    })
+}
+
+fn format_builtin_signature(signature: &Signature) -> String {
+    let parameters = signature
+        .parameters
+        .iter()
+        .map(|parameter| format!("{} {}", parameter.type_name, parameter.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "```lsl\n{} {}({})\n```",
+        signature.return_type, signature.name, parameters
+    )
+}
+
+/// Convert an LSP UTF-16 line/character pair into a UTF-8 byte offset.
+///
+/// A position inside a surrogate pair or beyond the source is not a valid
+/// token location and returns `None`. CR, LF and CRLF mirror the forward
+/// conversion used for diagnostics.
+fn position_to_offset(text: &str, position: Position) -> Result<Option<usize>, String> {
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut previous_was_cr = false;
+    for (offset, current) in text.char_indices() {
+        if !(previous_was_cr && current == '\n')
+            && line == position.line
+            && character == position.character
+        {
+            return Ok(Some(offset));
+        }
+        match current {
+            '\r' => {
+                line = line.saturating_add(1);
+                character = 0;
+                previous_was_cr = true;
+            }
+            '\n' => {
+                if !previous_was_cr {
+                    line = line.saturating_add(1);
+                    character = 0;
+                }
+                previous_was_cr = false;
+            }
+            _ => {
+                if line == position.line {
+                    let next = character.saturating_add(current.len_utf16() as u32);
+                    if position.character < next {
+                        return Ok(None);
+                    }
+                    character = next;
+                }
+                previous_was_cr = false;
+            }
+        }
+        if line > position.line {
+            return Ok(None);
+        }
+    }
+    Ok((line == position.line && character == position.character).then_some(text.len()))
 }
 
 fn source_dependencies(
@@ -1419,6 +1864,46 @@ mod tests {
     }
 
     #[test]
+    fn utf16_positions_convert_back_to_utf8_offsets() {
+        let text = "aé🙂\r\nб";
+        assert_eq!(
+            position_to_offset(text, Position::new(0, 0)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            position_to_offset(text, Position::new(0, 1)).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            position_to_offset(text, Position::new(0, 2)).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            position_to_offset(text, Position::new(0, 4)).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            position_to_offset(text, Position::new(1, 0)).unwrap(),
+            Some(9)
+        );
+        assert_eq!(
+            position_to_offset(text, Position::new(1, 1)).unwrap(),
+            Some(11)
+        );
+        // UTF-16 column 3 is between the two code units of the emoji.
+        assert_eq!(position_to_offset(text, Position::new(0, 3)).unwrap(), None);
+        assert_eq!(position_to_offset(text, Position::new(2, 0)).unwrap(), None);
+        assert_eq!(
+            position_to_offset("first\rsecond\nthird", Position::new(1, 0)).unwrap(),
+            Some(6)
+        );
+        assert_eq!(
+            position_to_offset("first\rsecond\nthird", Position::new(2, 0)).unwrap(),
+            Some(13)
+        );
+    }
+
+    #[test]
     fn rejects_offsets_outside_source_or_inside_utf8_scalar() {
         assert!(offset_to_position("é", 1).is_err());
         assert!(offset_to_position("é", 3).is_err());
@@ -1439,6 +1924,7 @@ mod tests {
             )])
             .into(),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
@@ -1503,6 +1989,7 @@ mod tests {
         let make_task = |uri: &Url, version, revision| AnalysisTask {
             root_uri: uri.clone(),
             root_version: version,
+            root_revision: revision,
             file_operation_revision: 0,
             documents: HashMap::from([(
                 uri.clone(),
@@ -1567,6 +2054,7 @@ mod tests {
             ])
             .into(),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 12,
@@ -1575,6 +2063,7 @@ mod tests {
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 4,
+            root_revision: 10,
             file_operation_revision: 0,
             dependencies: HashSet::from([
                 normalize_path(&root_uri.to_file_path().unwrap()),
@@ -1592,6 +2081,7 @@ mod tests {
                 ),
             ]),
             diagnostics: Ok(HashMap::new()),
+            symbols: None,
         };
 
         assert!(analysis_snapshot_is_current(&state, &result));
@@ -1679,6 +2169,7 @@ mod tests {
             )])
             .into(),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::new(),
             dependency_tracking_incomplete_by_root: HashSet::new(),
             next_revision: 1,
@@ -1687,11 +2178,13 @@ mod tests {
         let result = AnalysisResult {
             root_uri,
             root_version: 1,
+            root_revision: 1,
             file_operation_revision: 7,
             dependencies: HashSet::new(),
             dependencies_complete: true,
             dependency_revisions: HashMap::new(),
             diagnostics: Ok(HashMap::new()),
+            symbols: None,
         };
 
         assert!(analysis_snapshot_is_current(&state, &result));
@@ -1711,6 +2204,7 @@ mod tests {
         let make_task = |uri: &Url| AnalysisTask {
             root_uri: uri.clone(),
             root_version: 1,
+            root_revision: 1,
             file_operation_revision: 3,
             documents: HashMap::from([(
                 uri.clone(),
@@ -1774,6 +2268,7 @@ mod tests {
             ])
             .into(),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::from([(
                 root_uri.clone(),
                 HashSet::from([normalize_path(&root_uri.to_file_path().unwrap())]),
@@ -1793,11 +2288,13 @@ mod tests {
         let result = AnalysisResult {
             root_uri: root_uri.clone(),
             root_version: 1,
+            root_revision: 1,
             file_operation_revision: 0,
             dependencies,
             dependencies_complete: false,
             dependency_revisions: snapshot,
             diagnostics: Ok(HashMap::new()),
+            symbols: None,
         };
         assert!(analysis_snapshot_is_current(&state, &result));
 
@@ -1905,6 +2402,7 @@ mod tests {
             config: Some(LintConfig::default()),
             documents: Arc::new(documents),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::from([
                 (
                     root_a.clone(),
@@ -1958,6 +2456,7 @@ mod tests {
                 },
             )])),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::from([(
                 root_uri.clone(),
                 HashSet::from([
@@ -1992,6 +2491,7 @@ mod tests {
                 },
             )])),
             published_by_root: HashMap::new(),
+            symbols_by_root: HashMap::new(),
             dependencies_by_root: HashMap::from([(
                 root_uri.clone(),
                 HashSet::from([
