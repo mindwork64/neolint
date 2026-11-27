@@ -4,6 +4,7 @@
 //! [`SourceId`] values, enforces bounded reads and UTF-8, and rejects remote or
 //! non-regular roots. It never tokenizes LSL and never expands includes.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -99,6 +100,7 @@ pub struct SourceManager {
     unit: AnalysisUnitId,
     files: Vec<Arc<SourceFile>>,
     root: Option<SourceId>,
+    include_dependencies: HashSet<PathBuf>,
 }
 
 impl SourceManager {
@@ -108,6 +110,7 @@ impl SourceManager {
             unit,
             files: Vec::new(),
             root: None,
+            include_dependencies: HashSet::new(),
         }
     }
 
@@ -119,6 +122,30 @@ impl SourceManager {
     /// All loaded files, in deterministic file-index order.
     pub fn files(&self) -> &[Arc<SourceFile>] {
         &self.files
+    }
+
+    /// Paths of resolved local includes, including paths whose content could
+    /// not be loaded (for example, an open buffer exceeded the size limit).
+    #[cfg(feature = "lsp")]
+    pub(crate) fn include_dependencies(&self) -> &HashSet<PathBuf> {
+        &self.include_dependencies
+    }
+
+    /// Record a resolved include path before attempting to load its contents.
+    ///
+    /// This keeps dependency invalidation working when an include fails to
+    /// load from its current editor buffer. Canonical paths unify symlink aliases.
+    pub(crate) fn record_include_dependency(&mut self, path: &Path) {
+        let normalized = fs::canonicalize(path).unwrap_or_else(|_| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            }
+        });
+        self.include_dependencies.insert(normalized);
     }
 
     /// Root source, if one was loaded.
@@ -402,6 +429,21 @@ mod tests {
         assert_eq!(file.text(), "default {}");
         assert_eq!(file.display_name(), path.to_string_lossy());
         assert_eq!(file.canonical_path(), fs::canonicalize(&path).ok().as_ref());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn records_include_dependencies_even_when_the_source_is_not_registered() {
+        let directory = temp_dir();
+        let path = directory.join("shared.inc");
+        fs::write(&path, "integer shared = 1;").unwrap();
+        let canonical = fs::canonicalize(&path).unwrap();
+        let mut manager = SourceManager::new(unit(0));
+
+        manager.record_include_dependency(&path);
+
+        assert!(manager.include_dependencies().contains(&canonical));
+        assert!(manager.files().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 

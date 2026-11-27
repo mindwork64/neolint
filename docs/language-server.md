@@ -71,8 +71,11 @@ The path must still resolve to an existing regular local file; new files that
 do not yet exist on disk are not discoverable as includes. When multiple open
 URI aliases point to one canonical path, the lexicographically first URI
 supplies the contents and source mapping, while all aliases remain part of
-stale-result validation. Included-file diagnostics are published only to the
-selected open URI whose buffer supplied the snapshot.
+stale-result validation. Resolved local include paths are recorded as
+dependencies before their buffer contents are loaded, so an include that
+temporarily exceeds the source-size limit remains watched and a later buffer
+edit can recover the dependent root. Included-file diagnostics are published
+only to the selected open URI whose buffer supplied the snapshot.
 
 ## Build and run
 

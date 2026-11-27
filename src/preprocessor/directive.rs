@@ -571,6 +571,10 @@ impl<'a> Preprocessor<'a> {
             );
             return;
         };
+        // Track the resolved path before loading its contents. A failed load
+        // (notably an oversized unsaved editor buffer) must still be recoverable
+        // when the open include changes and dependent roots are rescheduled.
+        self.manager.record_include_dependency(&resolved);
         let canonical = std::fs::canonicalize(&resolved).ok();
         if let Some(canonical) = &canonical {
             if self.pragma_once.contains(canonical) {

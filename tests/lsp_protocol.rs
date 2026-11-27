@@ -581,6 +581,100 @@ fn unsaved_include_buffers_drive_preprocessing_and_diagnostics() {
 }
 
 #[test]
+fn oversized_unsaved_include_stays_tracked_until_the_buffer_is_fixed() {
+    let workspace = unique_workspace("neolint-lsp-oversized-include");
+    let shared_path = workspace.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    let disk_text = "integer stable = 1;\n";
+    let oversized_buffer = format!(
+        "{}{}",
+        disk_text,
+        " ".repeat(neolint::source::MAX_INCLUDED_SOURCE_BYTES + 1 - disk_text.len())
+    );
+    let root_text = concat!(
+        "#include ",
+        "\"shared.inc\"",
+        "\n",
+        "default { state_entry() {} }\n",
+    );
+    fs::write(&shared_path, disk_text).unwrap();
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let shared_uri = url::Url::from_file_path(&shared_path).unwrap().to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": shared_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": oversized_buffer
+            }
+        }
+    }));
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "an oversized unsaved include must produce a preprocessing diagnostic"
+    );
+    assert_eq!(fs::read_to_string(&shared_path).unwrap(), disk_text);
+
+    // The same dependency must remain indexed even though its oversized buffer
+    // was rejected before SourceManager registered it as an included source.
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": shared_uri, "version": 2 },
+            "contentChanges": [{ "text": disk_text }]
+        }
+    }));
+    let recovered = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let recovered_publication = recovered
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        recovered_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "fixing the oversized include must reanalyze the dependent root"
+    );
+    assert_eq!(fs::read_to_string(&shared_path).unwrap(), disk_text);
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn changing_a_shared_include_reanalyzes_only_dependent_roots() {
     let workspace = unique_workspace("neolint-lsp-dependencies");
     let shared_path = workspace.join("shared.inc");

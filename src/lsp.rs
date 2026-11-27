@@ -853,7 +853,11 @@ fn analyze_document(
             }
         })?;
 
-    let dependencies = source_dependencies(root_uri, unit.manager().files());
+    let dependencies = source_dependencies(
+        root_uri,
+        unit.manager().files(),
+        unit.manager().include_dependencies(),
+    );
 
     let mut output = HashMap::<Url, Vec<LspDiagnostic>>::new();
     output.entry(root_uri.clone()).or_default();
@@ -941,11 +945,16 @@ fn analyze_document(
     })
 }
 
-fn source_dependencies(root_uri: &Url, files: &[Arc<SourceFile>]) -> HashSet<PathBuf> {
+fn source_dependencies(
+    root_uri: &Url,
+    files: &[Arc<SourceFile>],
+    include_dependencies: &HashSet<PathBuf>,
+) -> HashSet<PathBuf> {
     let mut dependencies = HashSet::new();
     if let Ok(root_path) = root_uri.to_file_path() {
         dependencies.insert(normalize_path(&root_path));
     }
+    dependencies.extend(include_dependencies.iter().map(|path| normalize_path(path)));
     for source in files {
         if source.kind() != SourceFileKind::Included {
             continue;
@@ -1743,7 +1752,11 @@ mod tests {
             )
             .unwrap();
         let unit = run.unit(unit_index).unwrap();
-        let dependencies = source_dependencies(&root_uri, unit.manager().files());
+        let dependencies = source_dependencies(
+            &root_uri,
+            unit.manager().files(),
+            unit.manager().include_dependencies(),
+        );
         assert!(dependencies.contains(&normalize_path(&root_uri.to_file_path().unwrap())));
         assert!(dependencies.contains(&normalize_path(&include_path)));
         fs::remove_dir_all(workspace).unwrap();
