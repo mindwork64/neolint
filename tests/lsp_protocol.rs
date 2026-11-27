@@ -56,19 +56,34 @@ impl LspClient {
     }
 
     fn with_file_operations(workspace_uri: &str, supports_file_operations: bool) -> Self {
-        let capabilities = if supports_file_operations {
-            json!({
-                "workspace": {
-                    "fileOperations": {
-                        "didCreate": true,
-                        "didRename": true,
-                        "didDelete": true
-                    }
+        Self::with_capabilities(workspace_uri, supports_file_operations, true)
+    }
+
+    fn with_completion_snippets(workspace_uri: &str, supports_snippets: bool) -> Self {
+        Self::with_capabilities(workspace_uri, true, supports_snippets)
+    }
+
+    fn with_capabilities(
+        workspace_uri: &str,
+        supports_file_operations: bool,
+        supports_snippets: bool,
+    ) -> Self {
+        let mut capabilities = json!({
+            "textDocument": {
+                "completion": {
+                    "completionItem": { "snippetSupport": supports_snippets }
                 }
-            })
-        } else {
-            json!({})
-        };
+            }
+        });
+        if supports_file_operations {
+            capabilities["workspace"] = json!({
+                "fileOperations": {
+                    "didCreate": true,
+                    "didRename": true,
+                    "didDelete": true
+                }
+            });
+        }
         let mut child = Command::new(env!("CARGO_BIN_EXE_neolint-lsp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -123,6 +138,10 @@ impl LspClient {
         assert_eq!(
             initialize_result["result"]["definitionProvider"], true,
             "the server must advertise textDocument/definition"
+        );
+        assert!(
+            initialize_result["result"]["completionProvider"].is_object(),
+            "the server must advertise textDocument/completion"
         );
         if supports_file_operations {
             assert_eq!(
@@ -588,6 +607,22 @@ fn hover_and_definition_follow_the_active_preprocessed_script() {
     assert!(
         definition["result"]["range"]["start"]["line"].is_number(),
         "macro-expanded declaration should map to an original root location: {definition:#?}"
+    );
+
+    let completion =
+        client.request_position(14, "textDocument/completion", &root_uri, line, character);
+    let completion_items = completion["result"].as_array().unwrap();
+    assert!(
+        completion_items
+            .iter()
+            .any(|item| item["label"] == "expanded"),
+        "macro-expanded declaration should be available to completion: {completion:#?}"
+    );
+    assert!(
+        !completion_items
+            .iter()
+            .any(|item| item["label"] == "hidden"),
+        "declarations in inactive #if branches must not be suggested: {completion:#?}"
     );
 
     client.shutdown();
@@ -2034,6 +2069,426 @@ fn changing_a_shared_include_reanalyzes_only_dependent_roots() {
     client.assert_no_matching_message_for(Duration::from_millis(300), |message| {
         is_publish(message, &root_c_uri, Some(1))
     });
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn completion_offers_visible_symbols_target_builtins_and_replacement_edits() {
+    let workspace = unique_workspace("neolint-lsp-completion");
+    let source = concat!(
+        "// llGetTime is not a completion context\n",
+        "/* llGetTime is not a completion context either */\n",
+        "string note = \"llGetTime\";\n",
+        "integer global_count = 1;\n",
+        "integer x = 1;\n",
+        "vector position = ZERO_VECTOR;\n",
+        "integer helper(integer value) { integer helper_local = value; return helper_local; }\n",
+        "default {\n",
+        "    state_entry() {\n",
+        "        integer local_count = 0;\n",
+        "        llGetTime();\n",
+        "        integer future_local = 2;\n",
+        "        position.x;\n",
+        "    }\n",
+        "}\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let local_declaration = source.find("local_count").unwrap();
+    let local_statement_end = local_declaration + "local_count = 0;".len();
+    let (line, character) = position_of(source, local_statement_end);
+    let completion =
+        client.request_position(30, "textDocument/completion", &root_uri, line, character);
+    assert!(
+        completion["error"].is_null(),
+        "completion error: {completion:#?}"
+    );
+    let items = completion["result"]
+        .as_array()
+        .expect("completion item array");
+    let labels: Vec<_> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for expected in [
+        "local_count",
+        "global_count",
+        "helper",
+        "llGetTime",
+        "TRUE",
+        "state_entry",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "missing {expected} in {labels:?}"
+        );
+    }
+    assert!(
+        !labels.contains(&"helper_local"),
+        "a local from another function must not leak into this scope: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"future_local"),
+        "a local declared after the cursor must not be suggested: {labels:?}"
+    );
+
+    let helper = items
+        .iter()
+        .find(|item| item["label"] == "helper")
+        .expect("user function completion");
+    assert_eq!(helper["kind"], 3, "helper should be a function completion");
+    assert_eq!(helper["detail"], "integer helper(integer value)");
+    assert_eq!(helper["textEdit"]["newText"], "helper(${1:value})");
+    assert_eq!(helper["insertTextFormat"], 2, "function calls use snippets");
+
+    let builtin = items
+        .iter()
+        .find(|item| item["label"] == "llGetTime")
+        .expect("built-in function completion");
+    assert_eq!(builtin["textEdit"]["newText"], "llGetTime()");
+
+    // Function parameters and locals are visible inside their own body, but
+    // do not leak into another event's scope.
+    let helper_body_cursor =
+        source.find("helper_local = value;").unwrap() + "helper_local = value;".len();
+    let (line, character) = position_of(source, helper_body_cursor);
+    let helper_scope =
+        client.request_position(37, "textDocument/completion", &root_uri, line, character);
+    let helper_labels: Vec<_> = helper_scope["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        helper_labels.contains(&"value"),
+        "parameter missing: {helper_labels:?}"
+    );
+    assert!(
+        helper_labels.contains(&"helper_local"),
+        "local missing: {helper_labels:?}"
+    );
+    assert!(
+        !helper_labels.contains(&"local_count"),
+        "another event's local leaked: {helper_labels:?}"
+    );
+
+    // A completion in the middle of a word replaces the entire identifier,
+    // not only the prefix before the cursor.
+    let cursor = local_declaration + "local".len();
+    let (line, character) = position_of(source, cursor);
+    let partial =
+        client.request_position(31, "textDocument/completion", &root_uri, line, character);
+    let local_item = partial["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "local_count")
+        .expect("prefix-matched local variable");
+    let (expected_line, expected_character) = position_of(source, local_declaration);
+    assert_eq!(
+        local_item["textEdit"]["range"]["start"]["line"],
+        expected_line
+    );
+    assert_eq!(
+        local_item["textEdit"]["range"]["start"]["character"],
+        expected_character
+    );
+    assert_eq!(local_item["textEdit"]["newText"], "local_count");
+
+    // Strings and both comment forms are deliberately not completion contexts.
+    let comment_offset = source.find("// llGetTime").unwrap() + 3;
+    let (line, character) = position_of(source, comment_offset);
+    let comment =
+        client.request_position(32, "textDocument/completion", &root_uri, line, character);
+    assert_eq!(comment["result"], json!([]));
+
+    let string_offset = source.match_indices("llGetTime").nth(2).unwrap().0 + 2;
+    let (line, character) = position_of(source, string_offset);
+    let string = client.request_position(33, "textDocument/completion", &root_uri, line, character);
+    assert_eq!(string["result"], json!([]));
+
+    let block_comment_offset = source.find("/* llGetTime").unwrap() + 4;
+    let (line, character) = position_of(source, block_comment_offset);
+    let block_comment =
+        client.request_position(35, "textDocument/completion", &root_uri, line, character);
+    assert_eq!(block_comment["result"], json!([]));
+
+    // `position.x` is a vector component selector, not a reference to the
+    // unrelated global integer named `x`.
+    let selector_offset = source.find("position.x").unwrap() + "position.x".len();
+    let (line, character) = position_of(source, selector_offset);
+    let selector =
+        client.request_position(36, "textDocument/completion", &root_uri, line, character);
+    assert_eq!(selector["result"], json!([]));
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn completion_uses_the_selected_opensim_catalogue_and_marks_ossl_permissions() {
+    let workspace = unique_workspace("neolint-lsp-completion-opensim");
+    fs::write(
+        workspace.join(".neolint.conf"),
+        "target = opensim-xengine\n",
+    )
+    .unwrap();
+    let source = "default { state_entry() { osGetAvatarList(); } }\n";
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let cursor = source.find("osGetAvatarList").unwrap() + "osGetA".len();
+    let (line, character) = position_of(source, cursor);
+    let completion =
+        client.request_position(34, "textDocument/completion", &root_uri, line, character);
+    assert!(
+        completion["error"].is_null(),
+        "completion error: {completion:#?}"
+    );
+    let item = completion["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "osGetAvatarList")
+        .expect("OpenSim OSSL completion");
+    assert!(item["detail"].as_str().unwrap().contains("OSSL"));
+    assert!(item["detail"]
+        .as_str()
+        .unwrap()
+        .contains("availability depends on region policy"));
+    // The source already has an opening parenthesis after the cursor word,
+    // so completion must not duplicate it.
+    assert_eq!(item["textEdit"]["newText"], "osGetAvatarList");
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn completion_uses_plain_text_calls_when_client_does_not_support_snippets() {
+    let workspace = unique_workspace("neolint-lsp-completion-no-snippets");
+    let source = concat!(
+        "integer helper(integer value) { return value; }\n",
+        "default { state_entry() { integer local_value = 1; } }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::with_completion_snippets(&workspace_uri, false);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let cursor = source.find("local_value").unwrap() + "local_value = 1;".len();
+    let (line, character) = position_of(source, cursor);
+    let completion =
+        client.request_position(40, "textDocument/completion", &root_uri, line, character);
+    let item = completion["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "helper")
+        .expect("user function completion");
+    assert_eq!(item["textEdit"]["newText"], "helper(value)");
+    assert_eq!(item["insertTextFormat"], 1, "plain-text completion format");
+    let builtin = completion["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "llGetTime")
+        .expect("built-in completion");
+    assert_eq!(builtin["textEdit"]["newText"], "llGetTime()");
+    assert_eq!(builtin["insertTextFormat"], 1);
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn completion_preserves_scope_ranges_across_preprocessor_source_gaps() {
+    let workspace = unique_workspace("neolint-lsp-completion-preprocessor-scope");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "integer helper(integer value) {\n",
+        "    integer before_directive = value;\n",
+        "#if 1\n",
+        "    integer inside_directive = value;\n",
+        "#endif\n",
+        "    integer after_directive = value;\n",
+        "    return after_directive;\n",
+        "}\n",
+        "default { state_entry() {} }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let cursor =
+        source.find("after_directive = value;").unwrap() + "after_directive = value;".len();
+    let (line, character) = position_of(source, cursor);
+    let completion =
+        client.request_position(41, "textDocument/completion", &root_uri, line, character);
+    assert!(
+        completion["error"].is_null(),
+        "completion error: {completion:#?}"
+    );
+    let labels: Vec<_> = completion["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for expected in [
+        "value",
+        "before_directive",
+        "inside_directive",
+        "after_directive",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "missing {expected} after a preprocessor source gap: {labels:?}"
+        );
+    }
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn completion_uses_macro_invocation_position_for_declaration_order() {
+    let workspace = unique_workspace("neolint-lsp-completion-macro-local-order");
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+    let source = concat!(
+        "#define DECLARE_LOCAL integer macro_local = 1;\n",
+        "integer helper(integer value) {\n",
+        "    integer before_macro = value;\n",
+        "    llGetTime();\n",
+        "    DECLARE_LOCAL\n",
+        "    integer after_macro = macro_local;\n",
+        "    return after_macro;\n",
+        "}\n",
+        "default { state_entry() {} }\n",
+    );
+    let root_path = workspace.join("main.lsl");
+    fs::write(&root_path, source).unwrap();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+
+    let before_cursor =
+        source.find("before_macro = value;").unwrap() + "before_macro = value;".len();
+    let (line, character) = position_of(source, before_cursor);
+    let before = client.request_position(42, "textDocument/completion", &root_uri, line, character);
+    let before_labels: Vec<_> = before["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        !before_labels.contains(&"macro_local"),
+        "macro local must not be suggested before its invocation: {before_labels:?}"
+    );
+
+    let after_cursor =
+        source.find("after_macro = macro_local;").unwrap() + "after_macro = macro_local;".len();
+    let (line, character) = position_of(source, after_cursor);
+    let after = client.request_position(43, "textDocument/completion", &root_uri, line, character);
+    let after_labels: Vec<_> = after["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        after_labels.contains(&"macro_local"),
+        "macro local should be visible after its invocation: {after_labels:?}"
+    );
 
     client.shutdown();
     fs::remove_dir_all(workspace).unwrap();

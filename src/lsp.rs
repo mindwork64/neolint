@@ -20,13 +20,14 @@ use crate::source::{SourceFile, SourceFileKind, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Response, ResponseError};
 use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionResponse, CompletionTextEdit,
     CreateFilesParams, DeleteFilesParams, Diagnostic as LspDiagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, FileOperationFilter, FileOperationPattern,
     FileOperationRegistrationOptions, Hover, HoverContents, HoverProviderCapability,
-    InitializeParams, Location, MarkupContent, MarkupKind, MessageType, OneOf, Position,
-    PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
+    InitializeParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    Position, PublishDiagnosticsParams, Range, RenameFilesParams, ServerCapabilities,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, Url, WorkspaceFileOperationsServerCapabilities,
+    TextDocumentSyncOptions, TextEdit, Url, WorkspaceFileOperationsServerCapabilities,
     WorkspaceServerCapabilities,
 };
 use serde_json::{json, Value};
@@ -64,6 +65,14 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
             },
         }],
     };
+    let completion_snippet_support = initialize_params
+        .capabilities
+        .text_document
+        .as_ref()
+        .and_then(|text_document| text_document.completion.as_ref())
+        .and_then(|completion| completion.completion_item.as_ref())
+        .and_then(|item| item.snippet_support)
+        .unwrap_or(false);
     let client_file_operations = initialize_params
         .capabilities
         .workspace
@@ -106,6 +115,10 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            ..Default::default()
+        }),
         workspace,
         ..Default::default()
     };
@@ -144,7 +157,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
                         if connection.handle_shutdown(&request)? {
                             break;
                         }
-                        let response = handle_request(request, &state);
+                        let response = handle_request(request, &state, completion_snippet_support);
                         connection.sender.send(Message::Response(response))?;
                     }
                     Message::Notification(notification) => {
@@ -270,6 +283,21 @@ struct ScriptSymbolIndex {
     /// these from the prepared AST keeps inactive preprocessor branches out of
     /// editor lookup and gives each occurrence its effective source mapping.
     occurrences: Vec<SymbolOccurrence>,
+    /// The lexical tree used by semantic analysis, including target API metadata.
+    scope_tree: ScopeTree,
+    /// Lexical scope ranges projected into one or more ranges in the open root buffer.
+    scope_ranges: Vec<((usize, usize), crate::ast_semantic::scopes::ScopeId)>,
+    /// Root-buffer declaration start offsets keyed by lexical scope and AST span.
+    /// Macro expansions use the latest root provenance start (the invocation),
+    /// not the macro definition site. Included declarations have no root offset
+    /// and remain globally visible throughout the including root.
+    symbol_declaration_starts: HashMap<(usize, usize, usize), usize>,
+    /// Rendered signatures for user-defined functions keyed by name offset.
+    function_signatures: HashMap<usize, String>,
+    /// Snippet-form calls for user-defined functions keyed by name offset.
+    function_snippets: HashMap<usize, String>,
+    /// Plain-text calls used when the client does not support snippets.
+    function_plain_calls: HashMap<usize, String>,
 }
 
 struct SymbolOccurrence {
@@ -1235,6 +1263,8 @@ fn build_script_symbol_index(
     );
     let facts = crate::ast_semantic::expressions::collect_facts(&ast, &scopes);
     let mut function_signatures = HashMap::new();
+    let mut function_snippets = HashMap::new();
+    let mut function_plain_calls = HashMap::new();
     for item in &ast.items {
         if let TopLevel::Function(function) = item {
             let return_type = function
@@ -1251,6 +1281,19 @@ fn build_script_symbol_index(
                 function.name_span.start,
                 format!("{return_type} {}({parameters})", function.name),
             );
+            let parameter_names = function
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>();
+            function_snippets.insert(
+                function.name_span.start,
+                function_call_snippet(&function.name, parameter_names.iter().copied()),
+            );
+            function_plain_calls.insert(
+                function.name_span.start,
+                function_call_plain(&function.name, parameter_names.iter().copied()),
+            );
         }
     }
     for recovered in &ast.recovered_functions {
@@ -1263,6 +1306,19 @@ fn build_script_symbol_index(
                     recovered.name,
                     recovered.parameter_types.join(", ")
                 )
+            });
+        let parameters = (0..recovered.parameter_types.len())
+            .map(|index| format!("arg{}", index + 1))
+            .collect::<Vec<_>>();
+        function_snippets
+            .entry(recovered.name_span.start)
+            .or_insert_with(|| {
+                function_call_snippet(&recovered.name, parameters.iter().map(String::as_str))
+            });
+        function_plain_calls
+            .entry(recovered.name_span.start)
+            .or_insert_with(|| {
+                function_call_plain(&recovered.name, parameters.iter().map(String::as_str))
             });
     }
 
@@ -1364,8 +1420,100 @@ fn build_script_symbol_index(
     }
 
     occurrences.sort_by_key(|occurrence| (occurrence.span.start, occurrence.span.end));
+    let mut scope_ranges = Vec::new();
+    for ((start, end), scope) in scopes.scope_ranges() {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        for mapped in map_index_spans(prepared, root_source, byte_span(start, end)) {
+            scope_ranges.push(((mapped.start, mapped.end), scope));
+        }
+    }
+    let mut symbol_declaration_starts = HashMap::new();
+    for (scope_index, scope) in scopes.scopes().iter().enumerate() {
+        for symbol in &scope.symbols {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            if let Some(declaration_start) =
+                map_index_declaration_start(prepared, root_source, symbol.span)
+            {
+                symbol_declaration_starts.insert(
+                    (scope_index, symbol.span.start, symbol.span.end),
+                    declaration_start,
+                );
+            }
+        }
+    }
 
-    (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex { occurrences })
+    (!cancellation.is_cancelled()).then_some(ScriptSymbolIndex {
+        occurrences,
+        scope_tree: scopes,
+        scope_ranges,
+        symbol_declaration_starts,
+        function_signatures,
+        function_snippets,
+        function_plain_calls,
+    })
+}
+
+/// Resolve every root-source segment covered by an AST/prepared span.
+///
+/// Scope bodies can cross removed preprocessor directives or included source
+/// segments. `ResolvedSpan::primary()` alone is only one contiguous origin
+/// run; its related spans retain the other runs, which are needed to identify
+/// the active lexical scope at later cursor positions in the same body.
+fn map_index_spans(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Vec<Span> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return vec![span];
+    };
+    let Ok(prepared_span) = prepared.prepared_span(span) else {
+        return Vec::new();
+    };
+    let Ok(resolved) = prepared.map().resolve_span(prepared_span) else {
+        return Vec::new();
+    };
+    let mut mapped = Vec::new();
+    for source_span in std::iter::once(resolved.primary()).chain(resolved.related().iter().copied())
+    {
+        if source_span.source() != root_source {
+            continue;
+        }
+        if let Ok(rendered) = prepared.map().render_span(source_span) {
+            if !mapped.contains(&rendered) {
+                mapped.push(rendered);
+            }
+        }
+    }
+    mapped
+}
+
+/// Return the declaration's visibility start in the open root buffer.
+///
+/// For a macro-expanded declaration the primary source location can be the
+/// macro definition. The root invocation is retained in the provenance chain,
+/// so the latest root location marks when the declaration becomes visible.
+/// Included-file declarations have no root location and return `None`; they
+/// are visible throughout the including root.
+fn map_index_declaration_start(
+    prepared: Option<&crate::preprocessor::PreparedSource>,
+    root_source: Option<crate::source::SourceId>,
+    span: Span,
+) -> Option<usize> {
+    let (Some(prepared), Some(root_source)) = (prepared, root_source) else {
+        return Some(span.start);
+    };
+    let prepared_span = prepared.prepared_span(span).ok()?;
+    let resolved = prepared.map().resolve_span(prepared_span).ok()?;
+    std::iter::once(resolved.primary())
+        .chain(resolved.related().iter().copied())
+        .filter(|source_span| source_span.source() == root_source)
+        .map(|source_span| source_span.start())
+        .max()
 }
 
 /// Resolve an AST/prepared span to a span in the open root source. Without a
@@ -1403,9 +1551,16 @@ fn push_symbol_occurrence(
     occurrences.push(occurrence);
 }
 
-fn handle_request(request: lsp_server::Request, state: &ServerState) -> Response {
+fn handle_request(
+    request: lsp_server::Request,
+    state: &ServerState,
+    completion_snippet_support: bool,
+) -> Response {
     let lsp_server::Request { id, method, params } = request;
-    if method != "textDocument/hover" && method != "textDocument/definition" {
+    if method != "textDocument/hover"
+        && method != "textDocument/definition"
+        && method != "textDocument/completion"
+    {
         return Response {
             id,
             result: None,
@@ -1431,10 +1586,18 @@ fn handle_request(request: lsp_server::Request, state: &ServerState) -> Response
         }
     };
 
-    let result = if method == "textDocument/hover" {
-        serde_json::to_value(hover_at(state, &params)).unwrap_or(Value::Null)
-    } else {
-        serde_json::to_value(definition_at(state, &params)).unwrap_or(Value::Null)
+    let result = match method.as_str() {
+        "textDocument/hover" => {
+            serde_json::to_value(hover_at(state, &params)).unwrap_or(Value::Null)
+        }
+        "textDocument/definition" => {
+            serde_json::to_value(definition_at(state, &params)).unwrap_or(Value::Null)
+        }
+        "textDocument/completion" => {
+            serde_json::to_value(completion_at(state, &params, completion_snippet_support))
+                .unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
     };
     Response {
         id,
@@ -1477,6 +1640,367 @@ fn definition_at(state: &ServerState, params: &TextDocumentPositionParams) -> Op
         uri: uri.clone(),
         range: span_to_range(&document.text, definition).ok()?,
     })
+}
+
+fn completion_at(
+    state: &ServerState,
+    params: &TextDocumentPositionParams,
+    snippet_support: bool,
+) -> Option<CompletionResponse> {
+    let uri = &params.text_document.uri;
+    let (document, index) = current_symbol_index(state, uri)?;
+    let offset = position_to_offset(&document.text, params.position).ok()??;
+    if !is_code_position(&document.text, offset) {
+        return Some(CompletionResponse::Array(Vec::new()));
+    }
+
+    let replacement = identifier_replacement_span(&document.text, offset);
+    let prefix = &document.text[replacement.start..offset];
+    let range = span_to_range(&document.text, replacement).ok()?;
+    if is_after_component_separator(&document.text, replacement.start) {
+        return Some(CompletionResponse::Array(Vec::new()));
+    }
+    let has_open_paren = document.text[replacement.end..]
+        .trim_start()
+        .starts_with('(');
+    let mut items = Vec::new();
+    let mut seen_user_names = HashSet::new();
+
+    // Pick the innermost scope whose range maps to the currently open root
+    // buffer. If preprocessing makes a range non-contiguous or maps it to an
+    // include, fall back to the root scope rather than guessing.
+    let current_scope = index
+        .scope_ranges
+        .iter()
+        .filter(|((start, end), _)| *start <= offset && offset < *end)
+        .min_by_key(|((start, end), scope)| (end.saturating_sub(*start), scope.index()))
+        .map(|(_, scope)| *scope)
+        .unwrap_or_else(|| index.scope_tree.root());
+
+    // Walk the active lexical scope and its parents. The nearest declaration
+    // wins for a duplicate name, matching the analyzer's lexical scope model.
+    let mut scope_id = current_scope;
+    while let Some(scope) = index.scope_tree.scope(scope_id) {
+        for symbol in scope.symbols.iter().rev() {
+            if !symbol.name.starts_with(prefix) {
+                continue;
+            }
+            if symbol.kind != SymbolKind::Function
+                && index
+                    .symbol_declaration_starts
+                    .get(&(scope_id.index(), symbol.span.start, symbol.span.end))
+                    .is_some_and(|declaration_start| *declaration_start > offset)
+            {
+                continue;
+            }
+            if !seen_user_names.insert(symbol.name.clone()) {
+                continue;
+            }
+            if symbol.kind == SymbolKind::Function {
+                let detail = index
+                    .function_signatures
+                    .get(&symbol.span.start)
+                    .cloned()
+                    .unwrap_or_else(|| format!("function {}", symbol.name));
+                let (insert_text, insert_text_format) = if has_open_paren {
+                    (symbol.name.clone(), InsertTextFormat::PLAIN_TEXT)
+                } else if snippet_support {
+                    (
+                        index
+                            .function_snippets
+                            .get(&symbol.span.start)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}()", symbol.name)),
+                        InsertTextFormat::SNIPPET,
+                    )
+                } else {
+                    (
+                        index
+                            .function_plain_calls
+                            .get(&symbol.span.start)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}()", symbol.name)),
+                        InsertTextFormat::PLAIN_TEXT,
+                    )
+                };
+                items.push(make_completion_item(
+                    &symbol.name,
+                    CompletionItemKind::FUNCTION,
+                    detail,
+                    insert_text,
+                    range,
+                    insert_text_format,
+                    0,
+                ));
+            } else {
+                let detail = format!(
+                    "{} {}",
+                    symbol.type_name.as_deref().unwrap_or("value"),
+                    symbol.name
+                );
+                items.push(make_completion_item(
+                    &symbol.name,
+                    CompletionItemKind::VARIABLE,
+                    detail,
+                    symbol.name.clone(),
+                    range,
+                    InsertTextFormat::PLAIN_TEXT,
+                    1,
+                ));
+            }
+        }
+        let Some(parent) = scope.parent else {
+            break;
+        };
+        scope_id = parent;
+    }
+
+    // Built-in metadata is selected by the same TargetProfile as analysis.
+    // OSSL functions are included for OpenSim targets, but are labeled because
+    // simulator availability still depends on region permissions.
+    let target_catalog = builtins::catalog_for_target(index.scope_tree.target());
+    for (name, signatures) in index.scope_tree.builtin_functions() {
+        if !name.starts_with(prefix) || seen_user_names.contains(name) {
+            continue;
+        }
+        let is_ossl = target_catalog.ossl_functions.contains_key(name);
+        for (overload, signature) in signatures.iter().enumerate() {
+            let signature_text = format_builtin_signature_plain(signature);
+            let detail = if is_ossl {
+                format!("OSSL · {signature_text} · availability depends on region policy")
+            } else {
+                signature_text
+            };
+            let (insert_text, insert_text_format) = if has_open_paren {
+                (name.clone(), InsertTextFormat::PLAIN_TEXT)
+            } else if snippet_support {
+                (
+                    function_call_snippet(
+                        name,
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.name.as_str()),
+                    ),
+                    InsertTextFormat::SNIPPET,
+                )
+            } else {
+                (
+                    function_call_plain(
+                        name,
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.name.as_str()),
+                    ),
+                    InsertTextFormat::PLAIN_TEXT,
+                )
+            };
+            let mut item = make_completion_item(
+                name,
+                CompletionItemKind::FUNCTION,
+                detail,
+                insert_text,
+                range,
+                insert_text_format,
+                if is_ossl { 3 } else { 2 },
+            );
+            item.sort_text = Some(format!(
+                "{:02}_{}_{}",
+                if is_ossl { 3 } else { 2 },
+                name,
+                overload
+            ));
+            items.push(item);
+        }
+    }
+
+    for (name, signature) in index.scope_tree.builtin_events() {
+        if name.starts_with(prefix) {
+            items.push(make_completion_item(
+                name,
+                CompletionItemKind::EVENT,
+                format!("event {}", format_builtin_signature_plain(signature)),
+                name.clone(),
+                range,
+                InsertTextFormat::PLAIN_TEXT,
+                4,
+            ));
+        }
+    }
+
+    for (name, constant) in index.scope_tree.builtin_constants() {
+        if name.starts_with(prefix) {
+            items.push(make_completion_item(
+                name,
+                CompletionItemKind::CONSTANT,
+                format!(
+                    "{} {} = {}",
+                    constant.type_name, constant.name, constant.value
+                ),
+                name.clone(),
+                range,
+                InsertTextFormat::PLAIN_TEXT,
+                5,
+            ));
+        }
+    }
+
+    for keyword in [
+        "default", "state", "if", "else", "for", "while", "do", "jump", "return", "integer",
+        "float", "string", "key", "list", "vector", "rotation", "void",
+    ] {
+        if keyword.starts_with(prefix) {
+            items.push(make_completion_item(
+                keyword,
+                CompletionItemKind::KEYWORD,
+                "LSL keyword or type".to_owned(),
+                keyword.to_owned(),
+                range,
+                InsertTextFormat::PLAIN_TEXT,
+                6,
+            ));
+        }
+    }
+
+    items.sort_by(|left, right| {
+        left.sort_text
+            .cmp(&right.sort_text)
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.detail.cmp(&right.detail))
+    });
+    Some(CompletionResponse::Array(items))
+}
+
+fn make_completion_item(
+    label: &str,
+    kind: CompletionItemKind,
+    detail: String,
+    new_text: String,
+    range: Range,
+    insert_text_format: InsertTextFormat,
+    priority: u8,
+) -> CompletionItem {
+    let mut item = CompletionItem::new_simple(label.to_owned(), detail);
+    item.kind = Some(kind);
+    item.filter_text = Some(label.to_owned());
+    item.sort_text = Some(format!("{priority:02}_{label}"));
+    item.text_edit = Some(CompletionTextEdit::Edit(TextEdit { range, new_text }));
+    item.insert_text_format = Some(insert_text_format);
+    item
+}
+
+fn function_call_snippet<'a>(name: &str, parameters: impl Iterator<Item = &'a str>) -> String {
+    let arguments = parameters
+        .enumerate()
+        .map(|(index, parameter)| format!("${{{}:{}}}", index + 1, parameter))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({arguments})")
+}
+
+fn function_call_plain<'a>(name: &str, parameters: impl Iterator<Item = &'a str>) -> String {
+    format!("{name}({})", parameters.collect::<Vec<_>>().join(", "))
+}
+
+fn byte_span(start: usize, end: usize) -> Span {
+    // The span is used only for its byte offsets by SourceMap. LSP range
+    // rendering recalculates coordinates from the open document text.
+    Span {
+        start,
+        end,
+        line: 1,
+        column: 1,
+        end_line: 1,
+        end_column: 1,
+    }
+}
+
+fn identifier_replacement_span(text: &str, offset: usize) -> Span {
+    let bytes = text.as_bytes();
+    let mut start = offset;
+    while start > 0 && is_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len() && is_identifier_byte(bytes[end]) {
+        end += 1;
+    }
+    byte_span(start, end)
+}
+
+fn is_after_component_separator(text: &str, offset: usize) -> bool {
+    text[..offset]
+        .chars()
+        .rev()
+        .find(|character| !character.is_whitespace())
+        == Some('.')
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Return whether the cursor is in source code rather than a comment or string.
+/// This deliberately scans only to the requested byte offset.
+fn is_code_position(text: &str, offset: usize) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Code,
+        String,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = text.as_bytes();
+    let mut mode = Mode::Code;
+    let mut index = 0;
+    while index < offset {
+        match mode {
+            Mode::Code if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') => {
+                mode = Mode::LineComment;
+                index += 2;
+            }
+            Mode::Code if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') => {
+                mode = Mode::BlockComment;
+                index += 2;
+            }
+            Mode::Code if bytes[index] == b'"' => {
+                mode = Mode::String;
+                index += 1;
+            }
+            Mode::Code => index += 1,
+            Mode::String if bytes[index] == b'\\' => {
+                index = (index + 2).min(offset);
+            }
+            Mode::String if bytes[index] == b'"' => {
+                mode = Mode::Code;
+                index += 1;
+            }
+            Mode::String => index += 1,
+            Mode::LineComment if bytes[index] == b'\n' || bytes[index] == b'\r' => {
+                mode = Mode::Code;
+                index += 1;
+            }
+            Mode::LineComment => index += 1,
+            Mode::BlockComment if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') => {
+                mode = Mode::Code;
+                index += 2;
+            }
+            Mode::BlockComment => index += 1,
+        }
+    }
+    mode == Mode::Code
+}
+
+fn format_builtin_signature_plain(signature: &Signature) -> String {
+    let parameters = signature
+        .parameters
+        .iter()
+        .map(|parameter| format!("{} {}", parameter.type_name, parameter.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} {}({parameters})", signature.return_type, signature.name)
 }
 
 fn symbol_occurrence_at(index: &ScriptSymbolIndex, offset: usize) -> Option<&SymbolOccurrence> {

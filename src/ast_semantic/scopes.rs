@@ -243,6 +243,18 @@ impl ScopeTree {
             .copied()
     }
 
+    /// Source ranges for lexical scopes, in the coordinate space of the parsed AST.
+    ///
+    /// The LSP adapter maps these ranges through the prepared-source map before
+    /// using them against an editor buffer.
+    #[cfg(feature = "lsp")]
+    pub(crate) fn scope_ranges(&self) -> impl Iterator<Item = ((usize, usize), ScopeId)> + '_ {
+        self.block_scopes
+            .iter()
+            .chain(self.switch_scopes.iter())
+            .map(|(range, scope)| (*range, *scope))
+    }
+
     /// Whether `ancestor` is the same scope as `descendant` or encloses it.
     pub fn is_ancestor(&self, ancestor: ScopeId, mut descendant: ScopeId) -> bool {
         loop {
