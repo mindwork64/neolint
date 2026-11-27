@@ -27,12 +27,11 @@ pub(crate) const MAX_TRACKED_INCLUDE_DEPENDENCIES: usize = 4096;
 /// Maximum root AnalysisUnits in one invocation.
 pub const MAX_ANALYSIS_UNITS_PER_INVOCATION: usize = 65_536;
 
-/// Normalize a local path for dependency identity, including paths that do
-/// not exist yet. Existing ancestors are canonicalized so a missing leaf below
-/// a symlinked directory matches the URI used after the file is created.
+/// Convert a local path to an absolute lexical identity without resolving
+/// symlinks. This alias is retained so workspace folder operations still
+/// match include paths beneath a directory symlink after that link is removed.
 #[cfg(feature = "lsp")]
-pub(crate) fn normalize_local_path(path: &Path) -> PathBuf {
-    use std::ffi::OsString;
+pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
     use std::path::Component;
 
     let absolute = if path.is_absolute() {
@@ -57,7 +56,17 @@ pub(crate) fn normalize_local_path(path: &Path) -> PathBuf {
             Component::Normal(part) => lexical.push(part),
         }
     }
+    lexical
+}
 
+/// Normalize a local path for dependency identity, including paths that do
+/// not exist yet. Existing ancestors are canonicalized so a missing leaf below
+/// a symlinked directory matches the URI used after the file is created.
+#[cfg(feature = "lsp")]
+pub(crate) fn normalize_local_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+
+    let lexical = normalize_lexical_path(path);
     let mut ancestor = lexical.clone();
     let mut suffix = Vec::<OsString>::new();
     while !ancestor.exists() {
@@ -227,6 +236,7 @@ impl SourceManager {
         let normalized = [
             normalize_local_path(path),
             normalize_missing_leaf_path(path),
+            normalize_lexical_path(path),
         ];
         for dependency in normalized {
             if self.include_dependencies.contains(&dependency) {
@@ -587,6 +597,33 @@ mod tests {
         assert!(manager
             .include_dependencies()
             .contains(&normalize_local_path(&alias)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn records_lexical_paths_below_symlinked_parent_directories() {
+        let directory = temp_dir();
+        let target_directory = directory.join("target-directory");
+        let alias_directory = directory.join("include-alias");
+        fs::create_dir_all(&target_directory).unwrap();
+        let target = target_directory.join("shared.inc");
+        fs::write(&target, "integer shared = 1;").unwrap();
+        std::os::unix::fs::symlink(&target_directory, &alias_directory).unwrap();
+        let alias = alias_directory.join("shared.inc");
+        let lexical_dependency = normalize_lexical_path(&alias);
+        let mut manager = SourceManager::new(unit(0));
+
+        assert!(manager.record_include_dependency(&alias));
+        assert!(manager
+            .include_dependencies()
+            .contains(&normalize_local_path(&target)));
+        assert!(manager.include_dependencies().contains(&lexical_dependency));
+
+        fs::remove_file(&alias_directory).unwrap();
+        let deleted_folder_identity = normalize_lexical_path(&alias_directory);
+        assert!(lexical_dependency.starts_with(&deleted_folder_identity));
         fs::remove_dir_all(directory).unwrap();
     }
 

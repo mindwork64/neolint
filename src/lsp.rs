@@ -11,7 +11,7 @@ use crate::diagnostic::{Severity, Span};
 use crate::engine::{AnalysisEngine, EngineAnalysisOptions};
 use crate::pipeline::{AnalysisRun, CancellableSetupError};
 use crate::preprocessor::PreprocessSettings;
-use crate::source::manager::normalize_local_path;
+use crate::source::manager::{normalize_lexical_path, normalize_local_path};
 use crate::source::unit::CancellableAnalysisError;
 use crate::source::{SourceFile, SourceFileKind, SourceSpan};
 use crossbeam_channel::{select, Receiver, Sender};
@@ -378,21 +378,23 @@ fn affected_roots_for_document(state: &ServerState, changed_uri: &Url) -> Vec<Ur
     if is_lsl_document(changed_uri) && state.documents.contains_key(changed_uri) {
         roots.insert(changed_uri.clone());
     }
-    let changed_path = changed_uri
+    let changed_paths = changed_uri
         .to_file_path()
         .ok()
-        .map(|path| normalize_path(&path));
+        .map(|path| [normalize_path(&path), normalize_lexical_path(&path)]);
     for (root_uri, dependencies) in &state.dependencies_by_root {
-        if !state.documents.contains_key(root_uri) || changed_path.is_none() {
+        if !state.documents.contains_key(root_uri) || changed_paths.is_none() {
             continue;
         }
         if state
             .dependency_tracking_incomplete_by_root
             .contains(root_uri)
-            || changed_path.as_ref().is_some_and(|path| {
-                dependencies
-                    .iter()
-                    .any(|dependency| dependency == path || dependency.starts_with(path))
+            || changed_paths.as_ref().is_some_and(|paths| {
+                dependencies.iter().any(|dependency| {
+                    paths
+                        .iter()
+                        .any(|path| dependency == path || dependency.starts_with(path))
+                })
             })
         {
             roots.insert(root_uri.clone());
@@ -422,10 +424,12 @@ fn dependency_revision_snapshot(
     let mut open_by_path = HashMap::<PathBuf, HashMap<Url, u64>>::new();
     for (uri, document) in documents {
         if let Ok(path) = uri.to_file_path() {
-            open_by_path
-                .entry(normalize_path(&path))
-                .or_default()
-                .insert(uri.clone(), document.revision);
+            for identity in [normalize_path(&path), normalize_lexical_path(&path)] {
+                open_by_path
+                    .entry(identity)
+                    .or_default()
+                    .insert(uri.clone(), document.revision);
+            }
         }
     }
     if !dependencies_complete {
@@ -1827,6 +1831,39 @@ mod tests {
                 HashSet::from([
                     normalize_path(&root_uri.to_file_path().unwrap()),
                     normalize_path(&nested_include),
+                ]),
+            )]),
+            dependency_tracking_incomplete_by_root: HashSet::new(),
+            next_revision: 1,
+        };
+
+        assert_eq!(
+            affected_roots_for_document(&state, &folder_uri),
+            vec![root_uri]
+        );
+    }
+
+    #[test]
+    fn folder_operations_match_lexical_paths_below_symlinked_directories() {
+        let root_uri = Url::parse("file:///tmp/project/main.lsl").unwrap();
+        let folder_uri = Url::parse("file:///tmp/project/include-alias").unwrap();
+        let lexical_include = PathBuf::from("/tmp/project/include-alias/nested/shared.inc");
+        let state = ServerState {
+            config: Some(LintConfig::default()),
+            documents: Arc::new(HashMap::from([(
+                root_uri.clone(),
+                DocumentState {
+                    text: Arc::from("root"),
+                    version: 1,
+                    revision: 1,
+                },
+            )])),
+            published_by_root: HashMap::new(),
+            dependencies_by_root: HashMap::from([(
+                root_uri.clone(),
+                HashSet::from([
+                    normalize_path(&root_uri.to_file_path().unwrap()),
+                    normalize_lexical_path(&lexical_include),
                 ]),
             )]),
             dependency_tracking_incomplete_by_root: HashSet::new(),

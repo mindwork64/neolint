@@ -933,6 +933,85 @@ fn deleting_a_symlinked_include_reanalyzes_its_dependent_root() {
     fs::remove_dir_all(workspace).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn deleting_a_symlinked_include_directory_reanalyzes_its_dependent_root() {
+    let workspace = unique_workspace("neolint-lsp-symlink-directory");
+    let target_directory = workspace.join("actual-includes");
+    let alias_directory = workspace.join("include-alias");
+    let include_path = target_directory.join("shared.inc");
+    let root_path = workspace.join("main.lsl");
+    fs::create_dir_all(&target_directory).unwrap();
+    fs::write(&include_path, "integer shared = 1;\n").unwrap();
+    std::os::unix::fs::symlink(&target_directory, &alias_directory).unwrap();
+    let root_text = concat!(
+        "#include ",
+        "\"include-alias/shared.inc\"",
+        "\n",
+        "default { state_entry() { llOwnerSay((string)shared); } }\n",
+    );
+    fs::write(&root_path, root_text).unwrap();
+    fs::write(workspace.join(".neolint.conf"), "preprocess = true\n").unwrap();
+
+    let alias_uri = url::Url::from_directory_path(&alias_directory)
+        .unwrap()
+        .to_string();
+    let root_uri = url::Url::from_file_path(&root_path).unwrap().to_string();
+    let workspace_uri = url::Url::from_directory_path(&workspace)
+        .unwrap()
+        .to_string();
+    let mut client = LspClient::new(&workspace_uri);
+
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": root_uri,
+                "languageId": "lsl",
+                "version": 1,
+                "text": root_text
+            }
+        }
+    }));
+    let initial = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let initial_publication = initial
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        initial_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "include through a directory symlink should initially resolve"
+    );
+
+    // Remove only the alias directory symlink; the real include remains.
+    fs::remove_file(&alias_directory).unwrap();
+    assert!(include_path.exists());
+    client.send(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didDeleteFiles",
+        "params": { "files": [{ "uri": alias_uri }] }
+    }));
+    let deleted = client.receive_until(|message| is_publish(message, &root_uri, Some(1)));
+    let deleted_publication = deleted
+        .iter()
+        .find(|message| is_publish(message, &root_uri, Some(1)))
+        .unwrap();
+    assert!(
+        !deleted_publication["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "deleting a symlinked include directory must invalidate nested includes"
+    );
+
+    client.shutdown();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
 #[test]
 fn creating_a_higher_priority_include_candidate_changes_resolution() {
     let workspace = unique_workspace("neolint-lsp-include-precedence");
