@@ -4,6 +4,24 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "data/**"
+      - "editors/vscode/**"
+      - "scripts/release-*"
+      - "scripts/generate-third-party-notices.py"
+      - "scripts/verify_*.py"
+      - "LICENSE-MIT"
+      - "LICENSE-APACHE"
+      - "LICENSES/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       publish:
