@@ -21,7 +21,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $git = (Get-Command git.exe -ErrorAction Stop).Source
           $gitRoot = Split-Path -Parent (Split-Path -Parent $git)
-          $bash = Join-Path $gitRoot "bin\\bash.exe"
+          $bash = Join-Path (Join-Path $gitRoot "bin") "bash.exe"
           if (-not (Test-Path -LiteralPath $bash)) {
             throw "Git Bash is required by the Rust toolchain action but was not found at $bash"
           }
