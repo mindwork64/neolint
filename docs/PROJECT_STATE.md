@@ -5,15 +5,21 @@ tests and user-facing documentation; update this file at meaningful boundaries.
 
 ## Current release line
 
-- **v1.2.0 builds on the AST-first stable implementation with deeper semantic analysis, runtime profiles and Firestorm Lazy List support.**
+- **v1.3.0 release preparation** builds on the v1.2.0 AST-first engine and
+  adds the multi-script project model, the LSP server, and the VS Code package.
+  The release tag and GitHub Release are intentionally created only after the
+  release-preparation PR is merged and approved.
 - `ast` is the default CLI and `LintConfig::default()` engine.
 - `legacy` remains available through `--engine legacy` or `engine = legacy`.
-  It is not deprecated or removed in this release.
+  It is not deprecated or removed.
 - `compare` remains opt-in and is intended for maintainers; it displays Legacy
   diagnostics and reports the semantic comparison on stderr.
-- The v1.2.0 release targets remain Linux x86_64 and Windows x86_64.
-- Neolint remains a deterministic, offline-by-default CLI tool. No IDE
-  integration, language server, incremental analysis or autofix is included.
+- The planned v1.3.0 binary targets are Linux x86_64 and Windows x86_64.
+  Each platform archive contains both `neolint` and `neolint-lsp`.
+- The VS Code extension is packaged as a VSIX and attached to the GitHub
+  Release. Marketplace publication is not configured.
+- Normal CLI and LSP analysis is local and offline-by-default; the language
+  server is an adapter over the same Rust analysis API, not a second analyzer.
 
 ## Completed implementation
 
@@ -87,10 +93,12 @@ share the same prepared source and source map.
   [`preprocessor-ast.md`](architecture/preprocessor-ast.md).
 - Benchmark methodology and limitations are recorded in
   [`ast-stabilization.md`](architecture/ast-stabilization.md).
-- Phase 8 originally recorded 951 passing Rust tests. The expanded v1.2.0
-  candidate has 1,186 passing Rust tests in Debug, Release and Rust 1.75.0
-  configurations, plus passing Clippy, Rustdoc, Python catalogue/documentation/
-  benchmark/site-content checks and the Astro production build.
+- The v1.2.0 line recorded its full Debug, Release and Rust 1.75.0 test
+  matrix, Clippy, Rustdoc, Python catalogue/documentation checks and Astro
+  production build. The v1.3.0 release-preparation PR adds explicit LSP
+  initialize/shutdown smoke tests, VSIX content validation, and tagged
+  Linux/Windows archive plus checksum validation. Use the PR's CI results as
+  the authoritative verification for this release candidate.
 - Real-script save-and-lint experiment used a 1,234-line Firestorm script:
   median save+lint 9.328 ms Legacy, 9.916 ms AST and 10.944 ms Compare on a
   Ryzen 5 2600X. This is a fresh-process CLI measurement, not an incremental
@@ -98,20 +106,42 @@ share the same prepared source and source map.
 
 ## Multi-script project model
 
-The optional manifest-driven CLI project mode is implemented on the current
-feature branch. Every listed root script receives its own AnalysisUnit,
-preprocessor, parser, symbol table, semantic state and diagnostic stream.
-Project defaults, per-script config overlays, invocation-wide config overlays
-and CLI options are merged deterministically. Includes remain scoped to their
-own root script; no project-wide symbol table or cross-script name resolution
-is created. Script and diagnostic order follows the manifest. See
-project-model.md. The feature is still subject to PR review and merge.
+The manifest-driven CLI project mode is integrated on `main`. Every listed
+root script receives its own AnalysisUnit, preprocessor, parser, symbol table,
+semantic state and diagnostic stream. Project defaults, per-script config
+overlays, invocation-wide config overlays and CLI options are merged
+deterministically. Includes remain scoped to their own root script; no
+project-wide symbol table or cross-script name resolution is created. Script
+and diagnostic order follows the manifest. See [project-model.md](project-model.md).
+
+## Language server and VS Code client
+
+- `neolint-lsp` is an optional Cargo binary enabled by the `lsp` feature.
+  The CLI's default build does not pull in the LSP dependency set.
+- The server provides standard LSP diagnostics, full-text synchronization,
+  initialization/shutdown, cancellation-aware background analysis,
+  dependency-scoped invalidation, multi-root workspace configuration, hover,
+  definition, completion and the safe SEM041 quick fix.
+- Each open `.lsl` root has an independent analysis/configuration snapshot.
+  Hover, definition and completion are scoped to that current root; there is no
+  cross-file include navigation or workspace-wide symbol index.
+- Affected roots are reanalyzed in full. Incremental parsing/AST reuse is not
+  implemented.
+- The VS Code extension is in `editors/vscode`. It includes the production
+  `vscode-languageclient` runtime dependency in its VSIX. The release package
+  is installed from VSIX; Marketplace publishing is not configured.
+- The LSP initialize response follows LSP 3.17 `InitializeResult` shape:
+  capabilities are nested under `result.capabilities`, and `serverInfo`
+  reports the server name and compiled package version.
 
 ## Release policy and known limitations
 
-- `main` is the stable release branch; feature development continues through
-  dedicated branches and pull requests.
-- Legacy retirement is not part of v1.2.0 and requires a separate decision.
+- `main` is the stable release branch; changes enter it through dedicated
+  branches and pull requests.
+- v1.3.0 is the release-preparation target. Do not create the tag or GitHub
+  Release until the preparation PR is merged and the release is explicitly
+  authorized. The operational sequence is documented in [releasing.md](releasing.md).
+- Legacy retirement is not part of v1.3.0 and requires a separate decision.
 - Known evidence limits: benchmark timings are single-host/Linux measurements;
   sub-10 ms rows include process-startup and scheduler noise; peak RSS was
   measured only on Linux. `MAX_TYPE_DEPTH` remains a defensive guard that is

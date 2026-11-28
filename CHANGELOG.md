@@ -5,15 +5,62 @@ checksums are published on the [GitHub Releases page](https://github.com/mindwor
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-28
+
 ### Added
 
-- Optional multi-script project manifests (--project) with deterministic script ordering, project defaults, per-script config overlays, and isolated preprocessing/analysis units.
-- LSLint-inspired AST diagnostics for:
-  - constant conditions, including literal assignment results, unchanged local
-    empty-string comparisons, and immutable global integer initializers;
-  - empty `if` statements, transitions to the current state, multiple LSO jump
-    sites, and unsafe `print()` usage.
-- Second Life God Mode-only function guard with explicit `--god-mode` opt-in.
+- Optional multi-script project manifests (`--project`) with deterministic
+  script ordering, project defaults, per-script configuration overlays, and
+  independent preprocessing and analysis units.
+- The optional `neolint-lsp` executable, backed by the same Rust analysis
+  engine as the CLI. The server provides LSP diagnostics, full-text document
+  synchronization, safe shutdown, cancellation-aware analysis, and
+  dependency-scoped invalidation for local includes and configuration files.
+- A VS Code extension with live diagnostics, hover, definition navigation,
+  context-aware completion (including target API catalogues), and a safe
+  `SEM041` quick fix that marks an assignment condition as intentional.
+- Multi-root workspace support and per-script configuration selection for
+  `neolint.project`, `.neolint.conf`, and the optional extension overlay.
+- LSLint-inspired AST diagnostics for constant conditions, empty `if`
+  statements, transitions to the current state, multiple LSO jump sites, and
+  unsafe `print()` usage.
+- A Second Life God Mode-only function guard with explicit `--god-mode` opt-in.
+
+### Changed
+
+- Release archives now include both the CLI and LSP executables for Linux
+  x86_64 and Windows x86_64, together with project licenses, generated
+  notices for the locked Rust dependency graph, and separate notices for
+  vendored Linden Research and OpenSimulator metadata.
+- The release workflow packages the VS Code extension as a VSIX and publishes
+  SHA-256 checksums for all three distributable packages.
+- LSP initialization now returns the standard nested
+  `InitializeResult.capabilities` object and identifies the server/version in
+  `serverInfo`.
+- Release smoke tests exercise an actual LSP JSON-RPC initialize/shutdown
+  exchange and validate the VSIX runtime dependency contents.
+
+### Compatibility and boundaries
+
+- AST remains the default engine. The Legacy engine remains available through
+  `--engine legacy`; Compare remains an opt-in maintainer mode.
+- The LSP server analyzes each open root script independently. Hover,
+  definition and completion are scoped to the current script; cross-file
+  navigation and workspace-wide symbol indexing are not included.
+- Each affected root is currently reanalyzed in full. Incremental parsing and
+  AST reuse are not implemented.
+- NeoLint remains a linter, not a compiler. A clean lint result does not
+  guarantee acceptance by the official compiler or a simulator.
+- The VS Code extension is distributed as a downloadable VSIX on GitHub
+  Releases; Marketplace publication is not part of this release.
+
+### Verification
+
+- Rust debug/release tests, the Rust 1.75 MSRV suite, Clippy, Rustdoc,
+  documentation contracts, VS Code type-check/build, VSIX content validation,
+  and platform-specific CLI/LSP release smoke tests are required release gates.
+- Live Firestorm external-editor integration remains a low-priority manual
+  follow-up (issue #132), not a release blocker.
 
 ## [1.2.0] - 2026-11-26
 

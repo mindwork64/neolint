@@ -33,16 +33,15 @@
 
 ## At a glance
 
-Current version: `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)
-
 | | |
 |:--|:--|
 | **Language** | Linden Scripting Language (LSL) |
-| **Implementation** | Rust · no runtime dependencies |
+| **Implementation** | Rust CLI/LSP · no external runtime dependencies |
 | **Analysis engine** | AST by default · Legacy compatibility mode |
 | **Execution** | Local CLI and VS Code LSP · deterministic · offline during normal lint runs |
 | **Release binaries** | Linux x86_64 · Windows x86_64 |
-| **Current version** | `1.2.0` · [stable release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0) |
+| **Latest published release** | `1.2.0` (CLI only) · [GitHub Releases](https://github.com/mindwork64/neolint/releases) |
+| **Next release target** | `1.3.0` (CLI + LSP + VSIX; not published yet) |
 
 Neolint is a linter, **not an LSL compiler**. A clean report means only that the checks implemented by neolint found no issue; it does not guarantee acceptance or correct behavior in Second Life or another simulator. The official compiler and target runtime remain authoritative.
 
@@ -50,14 +49,14 @@ Neolint is a linter, **not an LSL compiler**. A clean report means only that the
 
 ### 1. Download
 
-Choose the archive for your platform from the **[v1.2.0 release](https://github.com/mindwork64/neolint/releases/tag/v1.2.0)**:
+When v1.3.0 is published, choose the archive for your platform from the **[v1.3.0 release page](https://github.com/mindwork64/neolint/releases/tag/v1.3.0)**. Until then, only the CLI-only v1.2.0 release is available:
 
 | Platform | Archive |
 |:--|:--|
-| Linux x86_64 | <code>neolint-v1.2.0-x86_64-unknown-linux-gnu.tar.gz</code> |
-| Windows x86_64 | <code>neolint-v1.2.0-x86_64-pc-windows-msvc.zip</code> |
+| Linux x86_64 | <code>neolint-v1.3.0-x86_64-unknown-linux-gnu.tar.gz</code> |
+| Windows x86_64 | <code>neolint-v1.3.0-x86_64-pc-windows-msvc.zip</code> |
 
-Verify the downloaded archive using its adjacent <code>.sha256</code> file. The [installation guide](docs/getting-started.md#verify-a-download) contains platform-specific verification commands and full installation steps.
+Each archive contains both `neolint` (CLI) and `neolint-lsp` (language server), plus the applicable license and third-party notices. Verify the archive using its adjacent <code>.sha256</code> file. For IDE support, also download <code>neolint-vscode-0.2.0.vsix</code> from the same release and install it through **Extensions: Install from VSIX…**. The [installation guide](docs/getting-started.md) contains platform-specific commands, checksum verification, and VS Code setup steps.
 
 ### 2. Run
 
@@ -137,6 +136,7 @@ Use this as the map to the project docs. The README stays deliberately concise; 
 | Review the current implementation and verified status | **[Project state](docs/PROJECT_STATE.md)** |
 | Understand AST design and implementation decisions | **[AST stabilization](docs/architecture/ast-stabilization.md)** · **[Preprocessor / AST architecture](docs/architecture/preprocessor-ast.md)** |
 | See what changed between versions | **[Changelog](CHANGELOG.md)** |
+| Prepare and publish a GitHub release | **[Release guide](docs/releasing.md)** |
 
 ## Supported platforms
 
@@ -145,17 +145,23 @@ Prebuilt stable release archives are currently provided for:
 - **Linux x86_64** — <code>x86_64-unknown-linux-gnu</code>
 - **Windows x86_64** — <code>x86_64-pc-windows-msvc</code>
 
-macOS, ARM, 32-bit, and other targets are not part of the current release. Neolint has no GUI, TUI, web interface, IDE integration, language server, or autofix functionality: it is intentionally a focused command-line tool.
+macOS, ARM, 32-bit, and other targets are not part of the current release. NeoLint has no built-in GUI, TUI, or web interface. Its optional language server provides live diagnostics and navigation through the separately packaged VS Code extension; it does not provide general IDE integrations, cross-file navigation, or automatic source rewriting.
 
 ## For developers
 
 Build from source with a stable Rust toolchain (minimum supported version: 1.75):
 
 ~~~sh
-cargo build --release
+cargo build --release --bin neolint
+cargo build --release --features lsp --bin neolint-lsp
 cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
+
+cd editors/vscode
+npm ci
+npm run check
+npm run package
 ~~~
 
 The CI workflow additionally checks documentation contracts, Rustdoc, release-mode tests, and the Rust 1.75 MSRV. See the [AST stabilization notes](docs/architecture/ast-stabilization.md) and [project state](docs/PROJECT_STATE.md) before changing parser or analysis behavior.
@@ -166,7 +172,7 @@ Issues and pull requests are welcome: **[report a bug](https://github.com/mindwo
 
 Neolint's own source code is dual-licensed under **MIT OR Apache-2.0**: choose either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
 
-Vendored Linden Research LSL definitions in <code>data/lsl-builtins.txt</code> and <code>data/lsl-deprecated.txt</code> retain their separate upstream MIT license. They are not relicensed by neolint's dual-license choice. See the [third-party notice](LICENSES/LINDEN-RESEARCH-MIT.txt) and [data provenance](data/README.md).
+Vendored Linden Research LSL definitions in <code>data/lsl-builtins.txt</code> and <code>data/lsl-deprecated.txt</code> retain their separate upstream MIT license. OpenSimulator-derived metadata retains its upstream notice. These components are not relicensed by neolint's dual-license choice. See the [Linden Research notice](LICENSES/LINDEN-RESEARCH-MIT.txt), the [OpenSimulator notice](LICENSES/OPENSIM-NOTICE.txt), and [data provenance](data/README.md); binary archives also include the generated Rust dependency notices.
 
 ---
 

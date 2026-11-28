@@ -56,9 +56,20 @@ jobs:
         working-directory: editors/vscode
         run: npm ci
 
-      - name: Check and compile the VS Code extension
+      - name: Audit, check and compile the VS Code extension
         working-directory: editors/vscode
-        run: npm run check && npm run compile
+        run: |
+          npm audit
+          npm run check
+          npm run compile
+
+      - name: Package the VS Code extension
+        working-directory: editors/vscode
+        run: npm run package
+
+      - name: Verify the VSIX runtime contents
+        working-directory: editors/vscode
+        run: python3 ../../scripts/verify_vsix.py neolint-vscode-0.2.0.vsix
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -69,8 +80,21 @@ jobs:
       - name: Run debug tests
         run: cargo test --all-targets --all-features
 
+      - name: Build and smoke-test the LSP executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --features lsp --bin neolint-lsp
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          python3 scripts/release-smoke-lsp.py --binary target/debug/neolint-lsp --version "$version"
+
       - name: Run release tests
         run: cargo test --release --all-targets --all-features
+
+      - name: Generate third-party notices
+        run: |
+          cargo fetch --locked
+          python3 scripts/generate-third-party-notices.py --output /tmp/neolint-third-party-notices.md
 
       - name: Check Rust documentation
         env:

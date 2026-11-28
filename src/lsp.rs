@@ -173,7 +173,14 @@ pub fn run_stdio() -> Result<(), Box<dyn Error + Send + Sync>> {
         workspace,
         ..Default::default()
     };
-    connection.initialize_finish(initialize_id, serde_json::to_value(capabilities)?)?;
+    let initialize_result = serde_json::json!({
+        "capabilities": capabilities,
+        "serverInfo": {
+            "name": SERVER_NAME,
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+    });
+    connection.initialize_finish(initialize_id, initialize_result)?;
 
     eprintln!("{SERVER_NAME} LSP initialized");
 

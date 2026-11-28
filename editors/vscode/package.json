@@ -2,7 +2,7 @@
   "name": "neolint-vscode",
   "displayName": "NeoLint",
   "description": "LSL diagnostics from the NeoLint analysis engine.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "mindwork64",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -13,12 +13,18 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Programming Languages", "Linters"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "scripts": {
     "compile": "tsc -p ./",
-    "check": "tsc -p ./ --noEmit"
+    "check": "tsc -p ./ --noEmit",
+    "package": "npm run compile && vsce package"
   },
   "contributes": {
     "configuration": {
@@ -31,7 +37,9 @@
         },
         "neolint.serverArgs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Additional command-line arguments passed to neolint-lsp."
         },
@@ -49,6 +57,12 @@
   "devDependencies": {
     "@types/node": "18.19.39",
     "@types/vscode": "1.85.0",
-    "typescript": "5.4.5"
+    "typescript": "5.4.5",
+    "@vscode/vsce": "4.1.1"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.1"
+    }
   }
 }
