@@ -1,0 +1,112 @@
+name: Build Windows release artifact (self-hosted)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x86_64 MSVC release package
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust and MSVC target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Configure MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Check toolchain and read package version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustc --version
+          cargo --version
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw "MSVC compiler cl.exe is not available on this self-hosted runner"
+          }
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed" }
+          $version = $metadata.packages[0].version
+          if ($version -ne "1.3.0") {
+            throw "Expected NeoLint 1.3.0 source, found $version"
+          }
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build optimized CLI and language server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "x86_64-pc-windows-msvc"
+          cargo build --locked --release --target $target --bin neolint
+          if ($LASTEXITCODE -ne 0) { throw "Windows CLI build failed" }
+          cargo build --locked --release --target $target --features lsp --bin neolint-lsp
+          if ($LASTEXITCODE -ne 0) { throw "Windows LSP build failed" }
+
+      - name: Smoke test CLI
+        shell: pwsh
+        run: |
+          ./scripts/release-smoke.ps1 -Binary "target/x86_64-pc-windows-msvc/release/neolint.exe" -Version $env:PACKAGE_VERSION
+
+      - name: Smoke test LSP protocol
+        shell: pwsh
+        run: |
+          python scripts/release-smoke-lsp.py --binary "target/x86_64-pc-windows-msvc/release/neolint-lsp.exe" --version $env:PACKAGE_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "Windows LSP protocol smoke test failed" }
+
+      - name: Package Windows archive and checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "x86_64-pc-windows-msvc"
+          $archive = "neolint-v$env:PACKAGE_VERSION-$target.zip"
+          $packageDir = ".release-package"
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Remove-Item -Recurse -Force $packageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$packageDir/LICENSES" | Out-Null
+
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { throw "Cargo dependency fetch failed" }
+          python scripts/generate-third-party-notices.py --output "$packageDir/THIRD-PARTY-NOTICES.md"
+          if ($LASTEXITCODE -ne 0) { throw "Third-party notice generation failed" }
+
+          Copy-Item "target/$target/release/neolint.exe" "$packageDir/neolint.exe"
+          Copy-Item "target/$target/release/neolint-lsp.exe" "$packageDir/neolint-lsp.exe"
+          Copy-Item LICENSE-MIT, LICENSE-APACHE, README.md, CHANGELOG.md "$packageDir/"
+          Copy-Item data/README.md "$packageDir/DATA-NOTICES.md"
+          Copy-Item LICENSES/LINDEN-RESEARCH-MIT.txt, LICENSES/OPENSIM-NOTICE.txt "$packageDir/LICENSES/"
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "dist/$archive" -Force
+          Remove-Item -Recurse -Force $packageDir
+
+          python -c "import sys; sys.path.insert(0, 'scripts'); from pathlib import Path; from verify_release_archives import verify_windows; verify_windows(Path('dist/$archive')); print('Windows release archive contents: verified')"
+          if ($LASTEXITCODE -ne 0) { throw "Windows release archive validation failed" }
+
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLowerInvariant()
+          Set-Content -Path "dist/$archive.sha256" -Value "$hash  $archive" -Encoding ascii
+          $expected = ((Get-Content "dist/$archive.sha256" -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "Windows archive SHA-256 verification failed" }
+
+      - name: Upload Windows release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: neolint-v1.3.0-windows-msvc
+          path: |
+            dist/neolint-v1.3.0-x86_64-pc-windows-msvc.zip
+            dist/neolint-v1.3.0-x86_64-pc-windows-msvc.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
