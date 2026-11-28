@@ -20,7 +20,7 @@ def main() -> int:
             "extension/package.json",
             "extension/out/extension.js",
             "extension/node_modules/vscode-languageclient/package.json",
-            "extension/LICENSE",
+            "extension/LICENSE.txt",
             "extension/LICENSE-MIT",
             "extension/LICENSE-APACHE",
         }

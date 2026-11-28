@@ -144,7 +144,7 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("git push origin vX.Y.Z", release_guide)
         self.assertIn("workflow_dispatch", workflow)
         self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
-        self.assertIn("extension/LICENSE-APACHE", (ROOT / "scripts/verify_vsix.py").read_text())
+        self.assertIn("extension/LICENSE.txt", (ROOT / "scripts/verify_vsix.py").read_text())
 
 
 if __name__ == "__main__":
