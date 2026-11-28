@@ -1,0 +1,8 @@
+NeoLint for VS Code is dual-licensed under either of the following licenses,
+at your option:
+
+- MIT License: see LICENSE-MIT.
+- Apache License, Version 2.0: see LICENSE-APACHE.
+
+The license of the extension's runtime dependencies is documented in their
+respective package metadata and distribution files.

@@ -99,7 +99,52 @@ class DocumentationTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         self.assertIn(f"neolint-v{version}-x86_64-unknown-linux-gnu.tar.gz", getting_started)
         self.assertIn(f"neolint-v{version}-x86_64-pc-windows-msvc.zip", getting_started)
-        self.assertIn(f"Current version: `{version}`", readme)
+        self.assertIn(f"Next release target", readme)
+        self.assertIn(f"`{version}` (CLI + LSP + VSIX; not published yet)", readme)
+        self.assertIn("Latest published release", readme)
+
+    def test_lsp_initialize_result_uses_protocol_shape(self):
+        source = (ROOT / "src/lsp.rs").read_text()
+        tests = (ROOT / "tests/lsp_protocol.rs").read_text()
+        smoke = (ROOT / "scripts/release-smoke-lsp.py").read_text()
+        self.assertIn('"capabilities": capabilities', source)
+        self.assertIn('"serverInfo"', source)
+        self.assertIn('initialize_result["result"]["capabilities"]', tests)
+        self.assertIn('result.get("capabilities", {})', smoke)
+        self.assertIn('result["serverInfo"].get("version")', smoke)
+
+    def test_release_artifacts_include_cli_lsp_licenses_and_vsix(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        for required in (
+            "--features lsp --bin neolint-lsp",
+            "release-smoke-lsp.py",
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "LINDEN-RESEARCH-MIT.txt",
+            "OPENSIM-NOTICE.txt",
+            "THIRD-PARTY-NOTICES.md",
+            "generate-third-party-notices.py",
+            "neolint-vscode-0.2.0.vsix",
+            "sha256sum -c",
+        ):
+            self.assertIn(required, workflow)
+        package = (ROOT / "editors/vscode/package.json").read_text()
+        self.assertIn('"version": "0.2.0"', package)
+        self.assertIn('"@vscode/vsce": "4.1.1"', package)
+        self.assertIn('"package": "npm run compile && vsce package"', package)
+        self.assertIn('"minimatch": "11.0.1"', package)
+        vscodeignore = (ROOT / "editors/vscode/.vscodeignore").read_text()
+        self.assertNotIn("node_modules/**", vscodeignore)
+        self.assertTrue((ROOT / "scripts/verify_vsix.py").is_file())
+        self.assertTrue((ROOT / "scripts/verify_release_archives.py").is_file())
+        self.assertTrue((ROOT / "scripts/generate-third-party-notices.py").is_file())
+        self.assertTrue((ROOT / "docs/releasing.md").is_file())
+        release_guide = (ROOT / "docs/releasing.md").read_text()
+        self.assertIn("publish", release_guide)
+        self.assertIn("git push origin vX.Y.Z", release_guide)
+        self.assertIn("workflow_dispatch", workflow)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
+        self.assertIn("extension/LICENSE.txt", (ROOT / "scripts/verify_vsix.py").read_text())
 
 
 if __name__ == "__main__":

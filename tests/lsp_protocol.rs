@@ -212,49 +212,62 @@ impl LspClient {
             .find(|message| message.get("id") == Some(&json!(1)))
             .unwrap();
         assert_eq!(
-            initialize_result["result"]["hoverProvider"], true,
+            initialize_result["result"]["serverInfo"]["name"], "NeoLint",
+            "the initialize result must identify the server"
+        );
+        assert_eq!(
+            initialize_result["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION"),
+            "the initialize result must report the built package version"
+        );
+        assert_eq!(
+            initialize_result["result"]["capabilities"]["hoverProvider"], true,
             "the server must advertise textDocument/hover"
         );
         assert_eq!(
-            initialize_result["result"]["definitionProvider"], true,
+            initialize_result["result"]["capabilities"]["definitionProvider"], true,
             "the server must advertise textDocument/definition"
         );
         assert!(
-            initialize_result["result"]["completionProvider"].is_object(),
+            initialize_result["result"]["capabilities"]["completionProvider"].is_object(),
             "the server must advertise textDocument/completion"
         );
         if supports_quickfix_literals {
             assert_eq!(
-                initialize_result["result"]["codeActionProvider"]["codeActionKinds"],
+                initialize_result["result"]["capabilities"]["codeActionProvider"]
+                    ["codeActionKinds"],
                 json!(["quickfix"]),
                 "the server must advertise safe quick fixes"
             );
         } else {
             assert!(
-                initialize_result["result"]["codeActionProvider"].is_null(),
+                initialize_result["result"]["capabilities"]["codeActionProvider"].is_null(),
                 "the server must not advertise code actions a client cannot receive"
             );
         }
         assert_eq!(
-            initialize_result["result"]["workspace"]["workspaceFolders"]["supported"], true,
+            initialize_result["result"]["capabilities"]["workspace"]["workspaceFolders"]
+                ["supported"],
+            true,
             "the server must advertise workspace folder support"
         );
         if supports_file_operations {
             assert_eq!(
-                initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]
+                initialize_result["result"]["capabilities"]["workspace"]["fileOperations"]["didCreate"]
                     ["filters"][0]["scheme"],
                 "file",
                 "the server must advertise local file create notifications; response: {initialize_result:#?}"
             );
             assert!(
-                initialize_result["result"]["workspace"]["fileOperations"]["didCreate"]["filters"]
-                    [0]["pattern"]["matches"]
+                initialize_result["result"]["capabilities"]["workspace"]["fileOperations"]
+                    ["didCreate"]["filters"][0]["pattern"]["matches"]
                     .is_null(),
                 "file-operation filters must include files and folders"
             );
         } else {
             assert!(
-                initialize_result["result"]["workspace"]["fileOperations"].is_null(),
+                initialize_result["result"]["capabilities"]["workspace"]["fileOperations"]
+                    .is_null(),
                 "the server must not advertise file operations the client did not request"
             );
         }
